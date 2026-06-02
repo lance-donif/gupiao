@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装必要的 Python 依赖
+RUN pip install --no-cache-dir fastapi uvicorn pandas akshare
+
+# 复制脚本文件夹，以便服务器能找到 scripts.aktools_server:app
+COPY scripts/ /app/scripts/
+
+EXPOSE 8010
+
+CMD ["uvicorn", "scripts.aktools_server:app", "--host", "0.0.0.0", "--port", "8010"]

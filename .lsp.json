@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "vtsls": {
+      "command": "vtsls",
+      "args": ["--stdio"],
+      "fileTypes": [".ts", ".tsx", ".js", ".jsx"],
+      "rootMarkers": ["tsconfig.json", "package.json", ".git"]
+    },
+    "pyright": {
+      "command": "pyright-langserver",
+      "args": ["--stdio"],
+      "fileTypes": [".py"],
+      "rootMarkers": ["pyproject.toml", "setup.py", "requirements.txt", ".git"]
+    }
+  }
+}

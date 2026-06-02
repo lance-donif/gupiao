@@ -1,0 +1,591 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum RunContextKind {
+  INGEST
+  BACKTEST
+  ANALYSIS
+  SCHEDULER
+}
+
+model RunContext {
+  id          String          @id @default(cuid())
+  clusterKey  String
+  kind        RunContextKind
+  asOf        DateTime?
+  windowStart DateTime?
+  windowEnd   DateTime?
+  triggeredAt DateTime        @default(now())
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  newsItems   NewsItem[]
+  stocks      Stock[]
+
+  @@index([clusterKey, kind])
+  @@index([clusterKey, asOf])
+}
+
+model NewsItem {
+  id            String      @id
+  title         String
+  content       String
+  source        String
+  sourceRef     String?
+  publishedAt   DateTime
+  capturedAt    DateTime    @default(now())
+  clusterKey    String
+  runContextId  String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  runContext    RunContext? @relation(fields: [runContextId], references: [id], onDelete: SetNull)
+
+  @@index([clusterKey, publishedAt])
+  @@index([runContextId, publishedAt])
+  @@unique([clusterKey, source, publishedAt, title])
+}
+
+model Stock {
+  id             String      @id
+  symbol         String
+  name           String
+  industry       String
+  exchange       String?
+  clusterKey     String
+  runContextId   String?
+  lastSyncedAt   DateTime?
+  latestTradeDay DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  runContext     RunContext? @relation(fields: [runContextId], references: [id], onDelete: SetNull)
+  candles        Candle[]
+
+  @@unique([clusterKey, symbol])
+  @@index([clusterKey, industry])
+  @@index([runContextId, latestTradeDay])
+}
+
+model Candle {
+  id          String   @id @default(cuid())
+  stockId     String
+  tradingDay  DateTime
+  open        Decimal  @db.Decimal(18, 4)
+  high        Decimal  @db.Decimal(18, 4)
+  low         Decimal  @db.Decimal(18, 4)
+  close       Decimal  @db.Decimal(18, 4)
+  volume      BigInt
+  capturedAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  stock       Stock    @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@unique([stockId, tradingDay])
+  @@index([stockId, tradingDay])
+  @@index([tradingDay])
+}
+
+model RawNewsRecord {
+  id           String    @id @default(cuid())
+  title        String
+  content      String
+  source       String
+  url          String
+  publishedAt  DateTime
+  capturedAt   DateTime  @default(now())
+  clusterKey   String
+  rawMetadata  Json
+  titleHash    String
+
+  @@unique([clusterKey, source, publishedAt, titleHash])
+  @@index([clusterKey, publishedAt])
+  @@index([capturedAt])
+}
+
+model NormalizedNewsRecord {
+  id             String                 @id
+  title          String
+  content        String
+  source         String
+  url            String
+  publishedAt    DateTime
+  capturedAt     DateTime               @default(now())
+  clusterKey     String
+  reprintGroupId String?
+  reprintWeight  Decimal                @default(1.0) @db.Decimal(3, 2)
+  evidenceContribs EvidenceContribution[]
+
+  @@unique([clusterKey, reprintGroupId, url])
+  @@index([clusterKey, publishedAt])
+  @@index([reprintGroupId])
+}
+
+model EvidenceContribution {
+  id                   String               @id @default(cuid())
+  traceId              String
+  newsId               String
+  symbol               String
+  keyword              String
+  sourceKeyword        String?
+  matchedExposureKeyword String?
+  exposureFactId       String?
+  matchMethod          String?
+  matchConfidence      Decimal?             @db.Decimal(5, 4)
+  baseFrequencyScore   Decimal              @db.Decimal(10, 4)
+  timeDecayedScore     Decimal              @db.Decimal(10, 4)
+  reprintPenaltyScore  Decimal              @db.Decimal(10, 4)
+  finalContribScore    Decimal              @db.Decimal(10, 4)
+  reasons              String[]
+  asOf                 DateTime
+  clusterKey           String
+  createdAt            DateTime             @default(now())
+
+  news                 NormalizedNewsRecord @relation(fields: [newsId], references: [id])
+
+  @@unique([traceId, newsId, symbol, keyword])
+  @@index([traceId, symbol])
+  @@index([clusterKey, asOf, symbol])
+  @@index([symbol, keyword])
+  @@index([traceId, sourceKeyword])
+  @@index([traceId, matchedExposureKeyword])
+}
+
+model GraphSnapshot {
+  id           String   @id @default(cuid())
+  traceId      String   @unique
+  asOf         DateTime
+  clusterKey   String
+  nodesJson    Json
+  edgesJson    Json
+  createdAt    DateTime @default(now())
+
+  @@index([clusterKey, asOf])
+}
+
+model StockFeatureSnapshot {
+  id                       String   @id @default(cuid())
+  traceId                  String
+  symbol                   String
+  asOf                     DateTime
+  clusterKey               String
+  newsFrequencyScore       Decimal  @db.Decimal(10, 4)
+  relationConfidenceScore  Decimal  @db.Decimal(10, 4)
+  boardMatchScore          Decimal  @db.Decimal(10, 4)
+  weakSignalBonus          Decimal  @db.Decimal(10, 4)
+  aggregatedScore          Decimal  @db.Decimal(10, 4)
+  reasons                  String[]
+
+  @@unique([traceId, symbol])
+  @@index([clusterKey, asOf, symbol])
+}
+
+model RecommendationSnapshot {
+  id                   String   @id @default(cuid())
+  traceId              String
+  asOf                 DateTime
+  clusterKey           String
+  rank                 Int
+  symbol               String
+  stockName            String
+  industry             String
+  finalScore           Decimal  @db.Decimal(10, 4)
+  reasons              String[]
+  scoreBreakdown       Json
+  yield1Day            Decimal? @db.Decimal(6, 4)
+  yield3Day            Decimal? @db.Decimal(6, 4)
+  yield5Day            Decimal? @db.Decimal(6, 4)
+  realizedPrice        Decimal? @db.Decimal(18, 4)
+  realizedPriceTarget  Decimal? @db.Decimal(18, 4)
+  isReconciled         Boolean  @default(false)
+
+  @@unique([traceId, symbol])
+  @@index([clusterKey, asOf, rank])
+}
+
+model KeywordPerformancePenalty {
+  id             String   @id @default(cuid())
+  clusterKey     String   @default("global")
+  keyword        String
+  factor         Decimal  @db.Decimal(5, 4)
+  lossPct        Decimal  @db.Decimal(8, 6)
+  thresholdPct   Decimal  @db.Decimal(8, 6)
+  triggerTraceId String
+  triggerSymbol  String
+  triggerAsOf    DateTime
+  validFrom      DateTime
+  validTo        DateTime
+  reason         String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([clusterKey, triggerTraceId, triggerSymbol, keyword])
+  @@index([clusterKey, keyword, validFrom, validTo])
+  @@index([clusterKey, triggerAsOf])
+}
+
+model StrategyDefinition {
+  id          String         @id @default(cuid())
+  clusterKey  String
+  name        String
+  description String?
+  enabled     Boolean        @default(true)
+  configJson  Json
+  deletedAt   DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  runs        StrategyRun[]
+
+  @@index([clusterKey, name])
+  @@index([clusterKey, enabled])
+  @@index([clusterKey, deletedAt])
+  @@index([clusterKey, createdAt])
+}
+
+model StrategyRun {
+  id                  String                    @id @default(cuid())
+  strategyId          String
+  strategyNameSnapshot String
+  traceId             String
+  clusterKey          String
+  asOf                DateTime
+  status              String
+  inputFingerprint    String
+  configSnapshot      Json
+  diagnostics         Json
+  errorMessage        String?
+  createdAt           DateTime                  @default(now())
+  completedAt         DateTime?
+  strategy            StrategyDefinition        @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  recommendations     StrategyRecommendationEvent[]
+
+  @@unique([strategyId, asOf, inputFingerprint])
+  @@index([clusterKey, asOf])
+  @@index([traceId])
+  @@index([strategyId, createdAt])
+}
+
+model StrategyRecommendationEvent {
+  id                String      @id @default(cuid())
+  strategyRunId     String
+  strategyId        String
+  traceId           String
+  clusterKey        String
+  asOf              DateTime
+  rank              Int
+  symbol            String
+  stockName         String
+  industry          String
+  finalScore        Decimal     @db.Decimal(10, 4)
+  scoreBreakdown    Json
+  reasons           String[]
+  baseTradingDay    DateTime
+  basePrice         Decimal     @db.Decimal(18, 4)
+  currentTradingDay DateTime?
+  currentPrice      Decimal?    @db.Decimal(18, 4)
+  returnPct         Decimal?    @db.Decimal(10, 6)
+  returnStatus      String
+  createdAt         DateTime    @default(now())
+  strategyRun       StrategyRun @relation(fields: [strategyRunId], references: [id], onDelete: Cascade)
+
+  @@unique([strategyRunId, symbol])
+  @@index([clusterKey, asOf, strategyId, rank])
+  @@index([strategyId, asOf])
+  @@index([symbol, asOf])
+}
+
+model RunTrace {
+  traceId      String             @id
+  clusterKey   String
+  kind         String
+  asOf         DateTime
+  status       String
+  metrics      Json
+  errorMessage String?
+  triggeredAt  DateTime           @default(now())
+  completedAt  DateTime?
+  steps        PipelineStepTrace[]
+
+  @@index([clusterKey, status])
+  @@index([asOf])
+}
+
+model PipelineStepTrace {
+  id           String    @id @default(cuid())
+  traceId      String
+  stepName     String
+  status       String
+  inputSummary Json
+  outputSummary Json
+  errorMessage String?
+  startedAt    DateTime  @default(now())
+  endedAt      DateTime?
+  
+  trace        RunTrace  @relation(fields: [traceId], references: [traceId], onDelete: Cascade)
+
+  @@unique([traceId, stepName])
+}
+
+model DataRefreshLedger {
+  id         String   @id @default(cuid())
+  dataKind   String
+  source     String
+  clusterKey String   @default("global")
+  bucketKey  String
+  status     String
+  fetchedAt  DateTime
+  expiresAt  DateTime
+  traceId    String?
+  summary    Json
+  error      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([dataKind, source, clusterKey, bucketKey])
+  @@index([clusterKey, dataKind, source, expiresAt])
+  @@index([traceId])
+}
+
+model MarketSignalSnapshot {
+  id                      String   @id @default(cuid())
+  traceId                 String
+  asOf                    DateTime
+  clusterKey              String   @default("global")
+  symbol                  String
+  latestTradingDay        DateTime?
+  momentum5dPct           Decimal? @db.Decimal(10, 6)
+  momentum20dPct          Decimal? @db.Decimal(10, 6)
+  volumeRatio20d          Decimal? @db.Decimal(10, 4)
+  breakout20d             Boolean  @default(false)
+  volatilityCompression   Boolean  @default(false)
+  recentWeekGainExceeded  Boolean  @default(false)
+  score                   Decimal  @db.Decimal(10, 4)
+  reasons                 String[]
+  createdAt               DateTime @default(now())
+
+  @@unique([traceId, symbol])
+  @@index([clusterKey, asOf, symbol])
+  @@index([clusterKey, latestTradingDay])
+}
+
+model NewsQualitySnapshot {
+  id                  String   @id @default(cuid())
+  traceId             String
+  asOf                DateTime
+  clusterKey          String   @default("global")
+  newsId              String
+  source              String
+  reprintGroupId      String?
+  reprintWeight       Decimal  @db.Decimal(3, 2)
+  sameTopicCount      Int      @default(1)
+  titleQuality        String
+  contentQuality      String
+  hasBusinessVariable Boolean  @default(false)
+  hasDirectStockName  Boolean  @default(false)
+  qualityScore        Decimal  @db.Decimal(5, 4)
+  failureReason       String?
+  createdAt           DateTime @default(now())
+
+  @@unique([traceId, newsId])
+  @@index([clusterKey, asOf])
+  @@index([traceId, reprintGroupId])
+}
+
+model ExposureMatchCache {
+  id               String   @id @default(cuid())
+  clusterKey       String   @default("global")
+  sourceKeyword    String
+  exposureKeyword  String
+  exposureFactId   String?
+  matchMethod      String
+  matchConfidence  Decimal  @db.Decimal(5, 4)
+  reason           String
+  validFrom        DateTime
+  validTo          DateTime?
+  hitCount         Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([clusterKey, sourceKeyword, exposureKeyword, matchMethod])
+  @@index([clusterKey, sourceKeyword])
+  @@index([clusterKey, validFrom, validTo])
+}
+
+model StockExposureCandidate {
+  id             String   @id @default(cuid())
+  traceId        String
+  asOf           DateTime
+  clusterKey     String   @default("global")
+  symbol         String
+  stockName      String
+  keyword        String
+  exposureType   String
+  taxonomyLevel  String?
+  source         String
+  sourceId       String
+  sourceName     String
+  confidence     Decimal  @db.Decimal(5, 4)
+  evidenceText   String?
+  evidenceJson   Json
+  memberCount    Int?
+  validFrom      DateTime
+  validFromCandidate DateTime?
+  validTo        DateTime?
+  status         String   @default("candidate")
+  failureReason  String?
+  coverageGapCaseId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([traceId, symbol, keyword, exposureType, source, sourceId])
+  @@index([clusterKey, asOf, status])
+  @@index([clusterKey, symbol, keyword])
+  @@index([clusterKey, source, sourceId])
+  @@index([coverageGapCaseId])
+}
+
+model HistoricalLimitUpCase {
+  id                String   @id @default(cuid())
+  traceId           String
+  clusterKey        String   @default("global")
+  symbol            String
+  stockName         String
+  tradeDate         DateTime
+  touchLimit        Boolean  @default(false)
+  sealedLimit       Boolean  @default(false)
+  prevClose         Decimal  @db.Decimal(18, 4)
+  high              Decimal  @db.Decimal(18, 4)
+  close             Decimal  @db.Decimal(18, 4)
+  boardType         String
+  limitThresholdPct Decimal  @db.Decimal(5, 4)
+  diagnosticsJson   Json
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([traceId, symbol, tradeDate])
+  @@index([clusterKey, tradeDate])
+  @@index([clusterKey, tradeDate, sealedLimit])
+  @@index([clusterKey, symbol, tradeDate])
+}
+
+model CoverageGapCase {
+  id                String   @id @default(cuid())
+  traceId           String
+  clusterKey        String   @default("global")
+  asOf              DateTime
+  symbol            String
+  stockName         String
+  tradeDate         DateTime
+  historicalCaseId  String?
+  gapStage          String
+  missReason        String
+  selectedRank      Int?
+  scoreAtAsOf       Decimal? @db.Decimal(10, 4)
+  diagnosticsJson   Json
+  status            String   @default("open")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([traceId, symbol, tradeDate, gapStage, missReason])
+  @@index([clusterKey, asOf, missReason])
+  @@index([clusterKey, tradeDate, status])
+  @@index([historicalCaseId])
+}
+
+model KeywordAlias {
+  id               String   @id @default(cuid())
+  traceId          String?
+  clusterKey       String   @default("global")
+  sourceKeyword    String
+  canonicalKeyword String
+  relationType     String
+  confidence       Decimal  @db.Decimal(5, 4)
+  source           String
+  sourceId         String
+  evidenceText     String
+  validFrom        DateTime
+  validTo          DateTime?
+  status           String   @default("candidate")
+  failureReason    String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([clusterKey, sourceKeyword, canonicalKeyword, relationType, source, sourceId])
+  @@index([clusterKey, sourceKeyword, status])
+  @@index([clusterKey, canonicalKeyword, status])
+  @@index([clusterKey, validFrom, validTo])
+}
+
+model FactSnapshot {
+  id                  String   @id @default(cuid())
+  traceId             String   @unique
+  clusterKey          String   @default("global")
+  asOf                DateTime
+  factHash            String
+  activeExposureCount Int
+  activeAliasCount    Int
+  sourceSummaryJson   Json
+  createdAt           DateTime @default(now())
+
+  @@index([clusterKey, asOf])
+  @@index([clusterKey, factHash])
+}
+
+model StockExposureFact {
+  id             String   @id @default(cuid())
+  traceId        String?
+  clusterKey     String   @default("global")
+  symbol         String
+  stockName      String
+  keyword        String
+  exposureType   String
+  taxonomyLevel  String?
+  source         String
+  sourceId       String
+  sourceName     String
+  confidence     Decimal  @db.Decimal(5, 4)
+  evidenceJson   Json
+  memberCount    Int?
+  validFrom      DateTime
+  validTo        DateTime?
+  status         String   @default("active")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([clusterKey, symbol, keyword, exposureType, source, sourceId])
+  @@index([clusterKey, symbol, keyword])
+  @@index([clusterKey, keyword, status])
+  @@index([clusterKey, source, sourceId])
+  @@index([clusterKey, validFrom, validTo])
+}
+
+model CausalSignalCandidate {
+  id                  String   @id @default(cuid())
+  traceId             String
+  asOf                DateTime
+  clusterKey          String   @default("global")
+  newsId              String
+  event               String
+  businessVariable    String
+  assetOrThemeKeyword String
+  direction           String
+  confidence          Decimal  @db.Decimal(5, 4)
+  evidenceText        String
+  evidenceOffsetStart Int?
+  evidenceOffsetEnd   Int?
+  extractorType       String
+  modelVersion        String
+  promptVersion       String
+  status              String   @default("candidate")
+  failureReason       String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([traceId, newsId, businessVariable, assetOrThemeKeyword, extractorType])
+  @@index([traceId, confidence])
+  @@index([clusterKey, asOf, status])
+  @@index([clusterKey, assetOrThemeKeyword])
+  @@index([newsId])
+}

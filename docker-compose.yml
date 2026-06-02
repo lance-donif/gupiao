@@ -1,0 +1,110 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: gupiao-redis
+    ports:
+      - "6379:6379"
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    volumes:
+      - ./data/redis:/data
+    restart: unless-stopped
+
+  postgres:
+    image: apache/age:release_PG15_1.6.0
+    container_name: gupiao-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: gupiao
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: gupiaodb
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  aktools:
+    build:
+      context: .
+      dockerfile: Dockerfile.aktools
+    container_name: gupiao-aktools
+    ports:
+      - "8010:8010"
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gupiao-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      PORT: "8000"
+      HOST: "0.0.0.0"
+      DATABASE_URL: "postgresql://gupiao:password@postgres:5432/gupiaodb"
+      REDIS_URL: "redis://redis:6379/0"
+      NODE_ENV: production
+      LLM_SMART_BASE_URL: "http://host.docker.internal:8080/v1"
+      LLM_CHEAP_BASE_URL: "http://host.docker.internal:8080/v1"
+      AKTOOLS_BASE_URL: "http://aktools:8010"
+      AKTOOLS_BOARD_LIMIT: "20"
+      AKTOOLS_SYMBOL_LIMIT: "20"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend/tmp:/app/tmp
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      aktools:
+        condition: service_started
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: gupiao-web
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gupiao-scheduler
+    command: ["bun", "run", "dist/scripts/run-mvp-daily-scheduler.js"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: "postgresql://gupiao:password@postgres:5432/gupiaodb"
+      REDIS_URL: "redis://redis:6379/0"
+      NODE_ENV: production
+      LLM_SMART_BASE_URL: "http://host.docker.internal:8080/v1"
+      LLM_CHEAP_BASE_URL: "http://host.docker.internal:8080/v1"
+      AKTOOLS_BASE_URL: "http://aktools:8010"
+      AKTOOLS_BOARD_LIMIT: "20"
+      AKTOOLS_SYMBOL_LIMIT: "20"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend/tmp:/app/tmp
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      aktools:
+        condition: service_started
+    restart: unless-stopped

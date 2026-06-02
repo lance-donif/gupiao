@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "rootDir": ".",
+    "outDir": "./dist",
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "sourceMap": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/fetch-newsnow.ts",
+    "scripts/run-daily-recommendation.ts",
+    "scripts/run-mvp-daily-scheduler.ts",
+    "scripts/sync-stock-history.ts",
+    "scripts/sync-stocks.ts",
+    "scripts/sync-tickflow-stock-exposure.ts",
+    "prisma.config.ts"
+  ],
+  "exclude": ["dist", "node_modules"]
+}

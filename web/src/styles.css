@@ -1,0 +1,474 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+:root {
+  --background: 214 23% 95.5%;
+  --foreground: 222 32% 8%;
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 3.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 10% 3.9%;
+  --primary: 221 78% 36%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 240 4.8% 95.9%;
+  --secondary-foreground: 240 5.9% 10%;
+  --muted: 214 22% 91.5%;
+  --muted-foreground: 222 12% 40%;
+  --accent: 199 82% 92%;
+  --accent-foreground: 240 5.9% 10%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 214 16% 80%;
+  --input: 214 16% 80%;
+  --ring: 199 89% 48%;
+  --radius: 0.375rem;
+  --price-up: #ef4444;
+  --price-down: #22c55e;
+  --panel: #ffffff;
+  --page: #eef3f7;
+  --surface-base: #eef3f7;
+  --surface-panel: #ffffff;
+  --surface-raised: #f9fbff;
+  --surface-control: #f7f9fc;
+  --surface-sunken: #e6edf5;
+  --line-strong: rgba(15, 23, 42, 0.16);
+  --line-soft: rgba(15, 23, 42, 0.09);
+  --focus-ring: rgba(14, 165, 233, 0.22);
+  --shadow-soft: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 10px 26px rgba(15, 23, 42, 0.07);
+  --shadow-raised: inset 0 1px 0 rgba(255, 255, 255, 0.96), 0 16px 34px rgba(15, 23, 42, 0.12);
+  --shadow-control: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 2px 8px rgba(15, 23, 42, 0.08);
+  --shadow-sunken: inset 0 1px 4px rgba(15, 23, 42, 0.12), inset 0 -1px 0 rgba(255, 255, 255, 0.75);
+  --shadow-focus: 0 0 0 2px var(--focus-ring), 0 7px 16px rgba(14, 165, 233, 0.12);
+  --workstation-gap: 0.75rem;
+}
+
+* {
+  box-sizing: border-box;
+  border-color: hsl(var(--border) / 0.45);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: linear-gradient(180deg, #f8fafc 0%, var(--page) 62%, #e8eef5 100%);
+  color: hsl(var(--foreground));
+  font-family:
+    'Geist Sans',
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+  overflow: auto; /* 移动端优先：默认允许全局自由滚动 */
+  letter-spacing: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(14, 165, 233, 0.18);
+}
+
+a,
+button,
+input,
+select,
+textarea,
+[role='button'] {
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    box-shadow 0.16s ease,
+    color 0.16s ease,
+    transform 0.16s ease;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[role='button']:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+button:disabled,
+[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+button:active:not(:disabled),
+[role='button']:active {
+  transform: translateY(1px);
+}
+
+.bg-background {
+  background-color: hsl(var(--background));
+}
+.bg-card {
+  background-color: hsl(var(--card));
+}
+.bg-muted {
+  background-color: hsl(var(--muted));
+}
+.bg-popover {
+  background-color: hsl(var(--popover));
+}
+.bg-primary {
+  background-color: hsl(var(--primary));
+}
+.bg-secondary {
+  background-color: hsl(var(--secondary));
+}
+.bg-destructive {
+  background-color: hsl(var(--destructive));
+}
+.text-foreground {
+  color: hsl(var(--foreground));
+}
+.text-muted-foreground {
+  color: hsl(var(--muted-foreground));
+}
+.text-popover-foreground {
+  color: hsl(var(--popover-foreground));
+}
+.text-primary {
+  color: hsl(var(--primary));
+}
+.text-primary-foreground {
+  color: hsl(var(--primary-foreground));
+}
+.text-destructive {
+  color: hsl(var(--destructive));
+}
+.border-border {
+  border-color: hsl(var(--border));
+}
+.ring-ring {
+  --tw-ring-color: hsl(var(--ring));
+}
+.price-up {
+  color: var(--price-up);
+}
+.price-down {
+  color: var(--price-down);
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-shell header {
+  height: auto;
+  border-bottom: 1px solid hsl(var(--border) / 0.55);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.85),
+    0 8px 22px rgba(15, 23, 42, 0.05);
+}
+
+.app-main {
+  background: linear-gradient(180deg, #f8fafc 0%, var(--surface-base) 54%, #e8eef5 100%);
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr; /* 移动端优先：默认单列流动 */
+  gap: var(--workstation-gap);
+  height: auto; /* 手机端自适应内容高度 */
+  min-height: calc(100vh - 48px);
+  padding: var(--workstation-gap);
+  background: linear-gradient(180deg, #f8fafc 0%, var(--surface-base) 48%, #e8eef5 100%);
+  overflow: auto; /* 手机端全局纵向滚动 */
+  overflow-wrap: anywhere;
+}
+
+.workstation-panel {
+  border: 1px solid var(--line-soft);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  box-shadow: var(--shadow-soft);
+}
+
+.workstation-panel-strong {
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  background: linear-gradient(180deg, #ffffff 0%, #f7f9fd 100%);
+  box-shadow: var(--shadow-raised);
+}
+
+.workstation-control {
+  border: 1px solid var(--line-soft);
+  background: linear-gradient(180deg, #ffffff 0%, var(--surface-control) 100%);
+  box-shadow: var(--shadow-control);
+}
+
+.workstation-control:hover {
+  border-color: rgba(29, 78, 216, 0.18);
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.workstation-sunken {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-sunken);
+}
+
+.number-figure {
+  font-family: 'SF Mono', 'Roboto Mono', 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.page-workbench {
+  background: linear-gradient(180deg, #f8fafc 0%, var(--surface-base) 50%, #e8eef5 100%);
+}
+
+.app-nav-link {
+  position: relative;
+}
+
+.app-nav-link::after {
+  position: absolute;
+  right: 0.65rem;
+  bottom: -0.45rem;
+  left: 0.65rem;
+  height: 2px;
+  content: '';
+  background: transparent;
+  border-radius: 9999px;
+  transition: background-color 0.16s ease;
+}
+
+.app-nav-link[data-active='true']::after {
+  background: #0ea5e9;
+}
+
+.decision-score-card {
+  background: linear-gradient(
+    135deg,
+    rgba(29, 78, 216, 0.1),
+    rgba(14, 165, 233, 0.06) 38%,
+    #ffffff 72%
+  );
+}
+
+.score-bar-track {
+  height: 5px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.08);
+  border-radius: 9999px;
+}
+
+.score-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+}
+
+.dashboard-grid > *,
+.dashboard-grid .card-modern,
+.dashboard-grid section {
+  min-width: 0;
+}
+
+.scroll-panel {
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 修复 Radix UI ScrollArea 内部 display: table 导致移动端宽度被内容撑破的 Bug */
+[data-radix-scroll-area-viewport] > div {
+  display: block !important;
+}
+
+/* 桌面端大屏响应式：专业三栏锁定高度独立滚动工作台模式 */
+@media (min-width: 1100px) {
+  body {
+    overflow: hidden; /* 恢复大屏视窗层面的溢出隐藏，保证三栏独立自滚动 */
+  }
+
+  .app-shell {
+    display: grid;
+    grid-template-rows: 48px 1fr;
+    height: 100vh;
+    min-width: 1024px; /* 恢复大屏下的大尺寸控制 */
+  }
+
+  .app-shell header {
+    height: 48px;
+  }
+
+  .app-main {
+    min-height: 0;
+    overflow: hidden; /* 恢复桌面端独立滚动所需的容器溢出截断 */
+  }
+
+  .dashboard-grid {
+    grid-template-columns: minmax(0, 1fr) 288px;
+    height: calc(100vh - 48px);
+    overflow: hidden;
+    transition: padding-left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .dashboard-grid:has(.recommendation-rail[data-state='open']) {
+    padding-left: calc(260px + 12px);
+  }
+
+  .dashboard-grid:has(.recommendation-rail[data-state='closed']) {
+    padding-left: 12px;
+  }
+
+  .dashboard-grid > aside {
+    height: 100%;
+  }
+
+  .dashboard-grid > main {
+    height: 100%;
+    min-height: 0;
+  }
+}
+
+/* 推荐列表侧面滑动遮盖抽屉 (Drawer Overlay) 样式 */
+.recommendation-rail {
+  position: fixed;
+  left: 0;
+  top: 48px;
+  bottom: 0;
+  width: 260px;
+  z-index: 45;
+  background: linear-gradient(180deg, #ffffff 0%, #f7f9fd 100%);
+  /* 默认关闭状态：无阴影且完全向左平移，但不设置 opacity: 0，确保拉手可见 */
+  box-shadow: none;
+  transform: translateX(-100%);
+  transition:
+    transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.25s ease;
+  overflow: visible !important; /* 确保右侧挂载的拉手按钮不被剪裁 */
+}
+
+.recommendation-rail[data-state='open'] {
+  transform: translateX(0);
+  /* 展开状态下才显示美丽的阴影 */
+  box-shadow:
+    10px 0 32px rgba(15, 23, 42, 0.12),
+    inset -1px 0 0 rgba(255, 255, 255, 0.8);
+}
+
+@media (max-width: 1099px) {
+  .recommendation-rail {
+    top: 0; /* 移动端撑满全屏高度 */
+    z-index: 50;
+    width: 270px;
+  }
+
+  .recommendation-rail-scroll {
+    max-height: calc(100vh - 120px) !important;
+  }
+}
+
+.evidence-chain-card[data-state='open'] {
+  border-color: hsl(var(--primary) / 0.25);
+  box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.04);
+}
+
+.network-edge-positive {
+  stroke: #f43f5e; /* rose-500 */
+}
+
+.network-edge-neutral {
+  stroke: #cbd5e1; /* slate-300 */
+}
+
+.network-edge-negative {
+  stroke: #10b981; /* emerald-500 */
+}
+
+/* Modern and clean Card & Shadow overrides */
+.card-modern {
+  border: 1px solid hsl(var(--border) / 0.45) !important;
+  background-color: hsl(var(--card) / 0.5) !important;
+  backdrop-filter: blur(12px);
+  box-shadow:
+    0 1px 3px 0 rgba(0, 0, 0, 0.03),
+    0 1px 2px -1px rgba(0, 0, 0, 0.03) !important;
+  border-radius: 8px !important;
+  transition: all 0.2s ease-in-out;
+}
+
+.card-modern:hover {
+  border-color: hsl(var(--border) / 0.8) !important;
+  box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.05) !important;
+}
+
+.card-interactive {
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.card-interactive:hover {
+  transform: translateY(-1px);
+  border-color: hsl(var(--primary) / 0.2) !important;
+  box-shadow: 0 6px 16px -4px rgba(0, 0, 0, 0.06) !important;
+}
+
+.card-interactive:focus-within {
+  outline: none;
+  border-color: hsl(var(--primary) / 0.4) !important;
+  box-shadow: 0 0 0 2px hsl(var(--primary) / 0.1) !important;
+}
+
+tbody tr {
+  transition:
+    background-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+tbody tr:hover {
+  background-color: rgba(255, 255, 255, 0.68);
+}
+
+/* Slim scrollbars for technical workstations */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border) / 0.6);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.3);
+}
+
+/* ==========================================================================
+   Workstation visual system
+   ========================================================================== */
+.dashboard-grid .bg-card,
+.dashboard-grid [class*='bg-card'],
+.page-workbench .bg-card,
+.page-workbench [class*='bg-card'] {
+  background-color: var(--surface-panel);
+}
+
+.dashboard-grid .rounded-lg,
+.page-workbench .rounded-lg {
+  border-radius: 8px;
+}

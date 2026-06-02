@@ -1,0 +1,57 @@
+# 运行时数据目录
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+
+# Node
+node_modules/
+.bun/
+
+# 构建产物
+out/
+.output/
+.vite/
+.rollup.cache/
+.tsup/
+*.tsbuildinfo
+
+# 测试与覆盖率产物
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+vitest-report/
+
+# 日志与临时文件
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+bun-debug.log*
+tmp/
+backend/backend/tmp/
+temp/
+.cache/
+
+# 环境变量（敏感）
+.env
+.env.*
+!.env.example
+*.env.local
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
