@@ -4,7 +4,7 @@ WORKDIR /app
 COPY package.json ./
 RUN bun install
 COPY . .
-RUN bun run build
+RUN bunx vite build --mode production
 
 FROM nginx:stable-alpine AS production-stage
 
