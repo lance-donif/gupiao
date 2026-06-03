@@ -46,11 +46,14 @@ const DEFAULT_LIMIT = 30;
 const DEFAULT_MAX_PER_INDUSTRY = 5;
 const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
 const DEFAULT_MIN_EXPOSURE_FACTS = process.env.TICKFLOW_API_KEY ? 500 : 100;
+const DEFAULT_TICKFLOW_REFRESH_INTERVAL_DAYS = 30;
 const DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE = 50;
 const NEWS_FETCH_CACHE_BUCKET_MINUTES = 15;
 const NEWS_FETCH_CACHE_TTL_MS = NEWS_FETCH_CACHE_BUCKET_MINUTES * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const TICKFLOW_SW_UNIVERSE_SOURCE = 'tickflow_sw_universe';
 const SCORING_EXPOSURE_SOURCES = [
-  'tickflow_sw_universe',
+  TICKFLOW_SW_UNIVERSE_SOURCE,
   'akshare_industry_board_em',
   'akshare_concept_board_em',
   'akshare_individual_info_em',
@@ -99,6 +102,17 @@ interface IStockExposureVerificationResult {
   readonly keywordCount: number;
   readonly minExposureFacts: number;
   readonly sample: readonly Record<string, unknown>[];
+}
+
+interface IStockExposureFreshnessResult {
+  readonly source: typeof TICKFLOW_SW_UNIVERSE_SOURCE;
+  readonly refreshIntervalDays: number;
+  readonly minExposureFacts: number;
+  readonly activeFactCount: number;
+  readonly activeSymbolCount: number;
+  readonly latestValidFrom: string | null;
+  readonly ageDays: number | null;
+  readonly isFresh: boolean;
 }
 
 interface ITickFlowExposureSyncService {
@@ -789,24 +803,110 @@ const verifyStockExposureFacts = async (
   };
 };
 
+const getTickFlowExposureFreshness = async (
+  prisma: any,
+  clusterKey: string,
+  asOf: Date,
+  minExposureFacts: number,
+  refreshIntervalDays: number,
+): Promise<IStockExposureFreshnessResult> => {
+  const activeTickFlowWhere = {
+    clusterKey,
+    status: 'active',
+    source: TICKFLOW_SW_UNIVERSE_SOURCE,
+    exposureType: 'industry_exposure',
+    validFrom: { lte: asOf },
+    OR: [
+      { validTo: null },
+      { validTo: { gte: asOf } },
+    ],
+  };
+  const [activeFactCount, symbolRows, latest] = await Promise.all([
+    prisma.stockExposureFact.count({ where: activeTickFlowWhere }),
+    prisma.stockExposureFact.groupBy({
+      by: ['symbol'],
+      where: activeTickFlowWhere,
+      _count: { _all: true },
+    }),
+    prisma.stockExposureFact.aggregate({
+      where: activeTickFlowWhere,
+      _max: { validFrom: true },
+    }),
+  ]);
+  const latestValidFromRaw = latest?._max?.validFrom;
+  const latestValidFrom = latestValidFromRaw instanceof Date ? latestValidFromRaw : null;
+  const ageMs = latestValidFrom ? Math.max(0, asOf.getTime() - latestValidFrom.getTime()) : null;
+  const ageDays = ageMs === null ? null : Number((ageMs / ONE_DAY_MS).toFixed(2));
+  const refreshIntervalMs = refreshIntervalDays * ONE_DAY_MS;
+
+  return {
+    source: TICKFLOW_SW_UNIVERSE_SOURCE,
+    refreshIntervalDays,
+    minExposureFacts,
+    activeFactCount,
+    activeSymbolCount: symbolRows.length,
+    latestValidFrom: latestValidFrom?.toISOString() ?? null,
+    ageDays,
+    isFresh: latestValidFrom !== null
+      && activeFactCount >= minExposureFacts
+      && ageMs !== null
+      && ageMs <= refreshIntervalMs,
+  };
+};
+
 export const syncAndVerifyStockExposureFacts = async (input: {
   readonly prisma: any;
   readonly traceId: string;
   readonly clusterKey: string;
   readonly asOf: Date;
   readonly minExposureFacts: number;
+  readonly tickFlowRefreshIntervalDays?: number;
   readonly stockNameBySymbol: ReadonlyMap<string, string>;
   readonly syncService: ITickFlowExposureSyncService;
 }): Promise<{
   readonly syncResult: unknown;
   readonly exposureResult: IStockExposureVerificationResult;
 }> => {
-  const syncResult = await input.syncService.sync(input.prisma, {
-    traceId: input.traceId,
-    asOf: input.asOf,
-    clusterKey: input.clusterKey,
-    stockNameBySymbol: input.stockNameBySymbol,
-  });
+  const refreshIntervalDays = input.tickFlowRefreshIntervalDays ?? DEFAULT_TICKFLOW_REFRESH_INTERVAL_DAYS;
+  const freshnessBefore = await getTickFlowExposureFreshness(
+    input.prisma,
+    input.clusterKey,
+    input.asOf,
+    input.minExposureFacts,
+    refreshIntervalDays,
+  );
+  let syncResult: unknown;
+  if (freshnessBefore.isFresh) {
+    syncResult = {
+      mode: 'skip_fresh_monthly_cache',
+      skippedSync: true,
+      reason: 'tickflow_sw_universe_fresh_enough',
+      freshnessBefore,
+    };
+  }
+  else {
+    const upstreamSyncResult = await input.syncService.sync(input.prisma, {
+      traceId: input.traceId,
+      asOf: input.asOf,
+      clusterKey: input.clusterKey,
+      stockNameBySymbol: input.stockNameBySymbol,
+    });
+    const freshnessAfter = await getTickFlowExposureFreshness(
+      input.prisma,
+      input.clusterKey,
+      input.asOf,
+      input.minExposureFacts,
+      refreshIntervalDays,
+    );
+    syncResult = {
+      mode: 'synced_stale_or_insufficient',
+      skippedSync: false,
+      refreshIntervalDays,
+      freshnessBefore,
+      freshnessAfter,
+      upstreamSyncResult,
+    };
+  }
   const exposureResult = await verifyStockExposureFacts(
     input.prisma,
     input.clusterKey,
@@ -1081,6 +1181,12 @@ async function main(): Promise<void> {
   const limit = Number(args.limit ?? DEFAULT_LIMIT);
   const maxPerIndustry = Number(args['max-per-industry'] ?? DEFAULT_MAX_PER_INDUSTRY);
   const minExposureFacts = Number(args['min-exposure-facts'] ?? DEFAULT_MIN_EXPOSURE_FACTS);
+  const tickFlowRefreshIntervalDays = getOptionalPositiveInteger(
+    args,
+    'tickflow-refresh-days',
+    'TICKFLOW_REFRESH_DAYS',
+    DEFAULT_TICKFLOW_REFRESH_INTERVAL_DAYS,
+  );
   const causalSignalBatchSize = Number(args['causal-signal-batch-size'] ?? process.env.CAUSAL_SIGNAL_BATCH_SIZE ?? DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE);
   const stopAfter = getStopAfter(args['stop-after']);
   const prisma = new PrismaClient({
@@ -1332,6 +1438,7 @@ async function main(): Promise<void> {
       mode: 'sync_then_verify',
       exposureTypes: ['industry_exposure', 'concept_exposure', 'company_profile_exposure', 'movement_evidence'],
       minExposureFacts,
+      refreshIntervalDays: tickFlowRefreshIntervalDays,
     });
     const {
       syncResult: tickflowExposureResult,
@@ -1342,6 +1449,7 @@ async function main(): Promise<void> {
       clusterKey,
       asOf,
       minExposureFacts,
+      tickFlowRefreshIntervalDays,
       stockNameBySymbol,
       syncService: createTickFlowStockExposureServiceFromEnv(),
     });

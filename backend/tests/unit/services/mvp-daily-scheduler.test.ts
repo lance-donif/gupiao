@@ -34,6 +34,12 @@ describe('mvp daily scheduler', () => {
       beijingTime: { hour: 8, minute: 30 },
       commandHint: 'bun dist/scripts/sync-stock-history.js --mode repair-gaps',
     });
+    expect(schedule[6]).toMatchObject({
+      id: 'tickflow_industry_exposure_refresh',
+      cadence: 'monthly',
+      monthDays: [1],
+      beijingTime: { hour: 3, minute: 30 },
+    });
     expect(schedule.map(task => task.commandHint)).toEqual([
       'bun dist/scripts/sync-stocks.js --mode check',
       'bun dist/scripts/sync-stock-history.js --mode incremental',
@@ -68,25 +74,25 @@ describe('mvp daily scheduler', () => {
     expect(next.scheduledAt.toISOString()).toBe('2026-05-25T08:10:00.000Z');
   });
 
-  it('finds the weekly Sunday Beijing task', () => {
+  it('finds the monthly first-day Beijing task', () => {
     const next = getNextScheduledRunBeijing(
-      new Date('2026-05-23T16:00:00.000Z'), // 2026-05-24 00:00 Beijing, Sunday
+      new Date('2026-05-31T16:00:00.000Z'), // 2026-06-01 00:00 Beijing
       ['tickflow_industry_exposure_refresh'],
     );
 
     expect(next.task.id).toBe('tickflow_industry_exposure_refresh');
-    expect(next.beijingDateTime).toBe('2026-05-24 03:30');
-    expect(next.scheduledAt.toISOString()).toBe('2026-05-23T19:30:00.000Z');
+    expect(next.beijingDateTime).toBe('2026-06-01 03:30');
+    expect(next.scheduledAt.toISOString()).toBe('2026-05-31T19:30:00.000Z');
   });
 
-  it('rolls the Sunday task to the following Beijing Sunday after it has passed', () => {
+  it('rolls the monthly task to the next Beijing month after it has passed', () => {
     const next = getNextScheduledRunBeijing(
-      new Date('2026-05-23T20:00:00.000Z'), // 2026-05-24 04:00 Beijing, Sunday
+      new Date('2026-06-01T20:00:00.000Z'), // 2026-06-02 04:00 Beijing
       ['tickflow_industry_exposure_refresh'],
     );
 
     expect(next.task.id).toBe('tickflow_industry_exposure_refresh');
-    expect(next.beijingDateTime).toBe('2026-05-31 03:30');
-    expect(next.scheduledAt.toISOString()).toBe('2026-05-30T19:30:00.000Z');
+    expect(next.beijingDateTime).toBe('2026-07-01 03:30');
+    expect(next.scheduledAt.toISOString()).toBe('2026-06-30T19:30:00.000Z');
   });
 });

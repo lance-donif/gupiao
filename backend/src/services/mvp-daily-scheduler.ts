@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process';
 
-export type MvpScheduleCadence = 'daily' | 'weekly';
+export type MvpScheduleCadence = 'daily' | 'weekly' | 'monthly';
 
 export interface IMvpBeijingTime {
   readonly hour: number;
@@ -13,6 +13,7 @@ export interface IMvpScheduleTask {
   readonly cadence: MvpScheduleCadence;
   readonly beijingTime: IMvpBeijingTime;
   readonly weekdays?: readonly number[];
+  readonly monthDays?: readonly number[];
   readonly dataFrequency: string;
   readonly failureStrategy: string;
   readonly commandHint: string;
@@ -34,8 +35,6 @@ interface IBeijingDateParts {
 
 const BEIJING_UTC_OFFSET_HOURS = 8;
 const MS_PER_HOUR = 60 * 60 * 1000;
-const SUNDAY = 0;
-
 const MVP_SCHEDULE_TABLE: readonly IMvpScheduleTask[] = [
   {
     id: 'stock_list_check',
@@ -93,11 +92,11 @@ const MVP_SCHEDULE_TABLE: readonly IMvpScheduleTask[] = [
   },
   {
     id: 'tickflow_industry_exposure_refresh',
-    description: 'Refresh weekly tick-flow industry exposure facts.',
-    cadence: 'weekly',
-    weekdays: [SUNDAY],
+    description: 'Refresh monthly tick-flow industry exposure facts.',
+    cadence: 'monthly',
+    monthDays: [1],
     beijingTime: { hour: 3, minute: 30 },
-    dataFrequency: 'weekly Sunday industry exposure refresh',
+    dataFrequency: 'monthly first-day industry exposure refresh',
     failureStrategy: 'fail fast; retain the previous exposure table and require manual retry',
     commandHint: 'bun dist/scripts/sync-tickflow-stock-exposure.js',
   },
@@ -159,12 +158,16 @@ const addBeijingDays = (parts: IBeijingDateParts, days: number): IBeijingDatePar
   };
 };
 
-const isTaskScheduledOnBeijingWeekday = (task: IMvpScheduleTask, weekday: number): boolean => {
+const isTaskScheduledOnBeijingDate = (task: IMvpScheduleTask, dateParts: IBeijingDateParts): boolean => {
   if (task.cadence === 'daily') {
     return true;
   }
 
-  return (task.weekdays ?? []).includes(weekday);
+  if (task.cadence === 'weekly') {
+    return (task.weekdays ?? []).includes(dateParts.weekday);
+  }
+
+  return (task.monthDays ?? []).includes(dateParts.day);
 };
 
 const beijingWallTimeToUtcDate = (dateParts: IBeijingDateParts, time: IMvpBeijingTime): Date => {
@@ -196,9 +199,9 @@ const formatBeijingDateTime = (date: Date): string => {
 const getNextRunForTask = (now: Date, task: IMvpScheduleTask): Date => {
   const today = getBeijingDateParts(now);
 
-  for (let offsetDays = 0; offsetDays <= 7; offsetDays += 1) {
+  for (let offsetDays = 0; offsetDays <= 62; offsetDays += 1) {
     const candidateDay = addBeijingDays(today, offsetDays);
-    if (!isTaskScheduledOnBeijingWeekday(task, candidateDay.weekday)) {
+    if (!isTaskScheduledOnBeijingDate(task, candidateDay)) {
       continue;
     }
 

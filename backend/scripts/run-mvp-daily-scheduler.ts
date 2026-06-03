@@ -43,6 +43,7 @@ const toTaskPayload = (task: IMvpScheduleTask): Record<string, unknown> => {
     cadence: task.cadence,
     beijingTime: `${pad2(task.beijingTime.hour)}:${pad2(task.beijingTime.minute)}`,
     weekdays: task.weekdays,
+    monthDays: task.monthDays,
     dataFrequency: task.dataFrequency,
     failureStrategy: task.failureStrategy,
     commandHint: task.commandHint,
