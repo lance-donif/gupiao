@@ -20,6 +20,7 @@ import type {
   IStrategyDefinitionRecord,
   IStrategyProfitPayload,
   IStrategyProfitQuery,
+  IStrategyPerformanceReportPayload,
 } from './types.js';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -597,14 +598,17 @@ const summarizeProfitHorizon = <T extends { readonly horizons: Record<ProfitHori
   readonly final_count: number;
   readonly avg_return_pct: number | null;
   readonly win_rate: number | null;
+  readonly max_drawdown_pct: number | null;
 } => {
   const returns = items.map(item => item.horizons[horizon].return_pct).filter((value): value is number => value !== null);
+  const maxDrawdown = returns.length === 0 ? null : Math.min(...returns);
   return {
     sample_count: items.length,
     pending_count: items.filter(item => item.horizons[horizon].status === 'PENDING' || item.horizons[horizon].status === 'NO_CURRENT_PRICE').length,
     final_count: returns.length,
     avg_return_pct: returns.length === 0 ? null : returns.reduce((sum, value) => sum + value, 0) / returns.length,
     win_rate: returns.length === 0 ? null : returns.filter(value => value > 0).length / returns.length,
+    max_drawdown_pct: maxDrawdown,
   };
 };
 
@@ -2119,6 +2123,66 @@ export class RuntimeDataOperations {
     return { id: strategyId, deleted: true };
   }
 
+  public async getStrategyPerformanceReports(
+    groupId: string,
+    strategyId?: string | null,
+    limit?: number,
+  ): Promise<readonly IStrategyPerformanceReportPayload[]> {
+    const pool = this.deps.options.pgPool;
+    if (!pool) {
+      return [];
+    }
+
+    const clusterKey = toClusterKey(groupId);
+    const safeLimit = limit && Number.isInteger(limit) && limit > 0 ? limit : 50;
+
+    const queryParts = [
+      'SELECT id, "strategyId", "strategyNameSnapshot", "clusterKey", "asOf"::text,',
+      '       "winRate"::text, "profitRatio"::text, "avgReturnPct"::text, "maxDrawdown"::text,',
+      '       "recommendationCount", "createdAt"::text',
+      'FROM public."StrategyPerformanceReport"',
+      'WHERE "clusterKey" = $1'
+    ];
+    const values: unknown[] = [clusterKey];
+
+    if (strategyId && strategyId !== 'all') {
+      values.push(strategyId);
+      queryParts.push(`AND "strategyId" = $${values.length}`);
+    }
+
+    queryParts.push('ORDER BY "asOf" DESC, "createdAt" DESC');
+    values.push(safeLimit);
+    queryParts.push(`LIMIT $${values.length}`);
+
+    const result = await pool.query<{
+      id: string;
+      strategyId: string;
+      strategyNameSnapshot: string;
+      clusterKey: string;
+      asOf: string;
+      winRate: string | null;
+      profitRatio: string | null;
+      avgReturnPct: string | null;
+      maxDrawdown: string | null;
+      recommendationCount: number;
+      createdAt: string;
+    }>(queryParts.join(' '), values);
+
+    return result.rows.map(row => ({
+      id: row.id,
+      strategy_id: row.strategyId,
+      strategy_name_snapshot: row.strategyNameSnapshot,
+      cluster_key: row.clusterKey,
+      as_of: row.asOf,
+      win_rate: toNumberOrNull(row.winRate),
+      profit_ratio: toNumberOrNull(row.profitRatio),
+      avg_return_pct: toNumberOrNull(row.avgReturnPct),
+      max_drawdown: toNumberOrNull(row.maxDrawdown),
+      recommendation_count: row.recommendationCount,
+      created_at: row.createdAt,
+    }));
+  }
+
   public async getStrategyProfits(
     groupId: string,
     asOf: string,
@@ -2668,6 +2732,44 @@ export class RuntimeDataOperations {
       uniqueRecommendationRows.map(row => ({ symbol: row.symbol, stockName: row.stockName })),
     );
 
+    // 查询每个股票最近 30 期历史胜率（T+1 / T+3）
+    const symbolList = uniqueRecommendationRows.map(r => r.symbol);
+    const historicalWinRateBySymbol = new Map<string, { t1: number | null; t3: number | null }>();
+    if (symbolList.length > 0) {
+      const winRateRows = await pool.query<{
+        symbol: string;
+        t1_wins: string;
+        t1_total: string;
+        t3_wins: string;
+        t3_total: string;
+      }>(
+        [
+          'SELECT r.symbol,',
+          '  count(*) FILTER (WHERE (r.\"scoreBreakdown\"->\'yield1Day\')::numeric > 0)::text AS t1_wins,',
+          '  count(*)::text AS t1_total,',
+          '  count(*) FILTER (WHERE (r.\"scoreBreakdown\"->\'yield3Day\')::numeric > 0)::text AS t3_wins,',
+          '  count(*)::text AS t3_total',
+          'FROM (',
+          '  SELECT r.symbol, r.\"scoreBreakdown\",',
+          '         row_number() OVER (PARTITION BY r.symbol ORDER BY r.\"asOf\" DESC) AS rn',
+          '  FROM public.\"RecommendationSnapshot\" r',
+          `  WHERE r.\"clusterKey\" = $1 AND r.symbol = ANY($2) AND (r.\"asOf\" + interval '8 hours')::date < $3::date`,
+          ') r',
+          'WHERE r.rn <= 30',
+          'GROUP BY r.symbol',
+        ].join(' '),
+        [clusterKey, symbolList, displayDate],
+      );
+      for (const row of winRateRows.rows) {
+        const t1Total = Number(row.t1_total);
+        const t3Total = Number(row.t3_total);
+        historicalWinRateBySymbol.set(row.symbol, {
+          t1: t1Total === 0 ? null : Number(row.t1_wins) / t1Total,
+          t3: t3Total === 0 ? null : Number(row.t3_wins) / t3Total,
+        });
+      }
+    }
+
     const recommendations: IDashboardRecommendationItem[] = uniqueRecommendationRows.map((row, index, rows) => {
       const finalScore = toNumberOrNull(row.finalScore) ?? 0;
       const totalContribution = toNumberOrNull(row.totalContribution) ?? 0;
@@ -2694,8 +2796,11 @@ export class RuntimeDataOperations {
         score_breakdown: breakdown,
         trace_id: row.traceId,
         strategy_id: row.strategyId,
+        win_rate_t1: historicalWinRateBySymbol.get(row.symbol)?.t1 ?? null,
+        win_rate_t3: historicalWinRateBySymbol.get(row.symbol)?.t3 ?? null,
       };
     });
+
 
     const executionHistory: IDashboardExecutionHistoryItem[] = executionRows.rows.map((row) => {
       const batchId = `batch-${row.traceId}`;
@@ -2853,6 +2958,36 @@ export class RuntimeDataOperations {
     );
     const displayStockName = stockNameBySymbol.get(rawRow.symbol) ?? rawRow.stockName;
     const finalScore = toNumberOrNull(rawRow.finalScore) ?? 0;
+
+    // 查询该股票最近 30 期历史胜率（T+1 / T+3）
+    const winRateRows = await pool.query<{
+      t1_wins: string;
+      t1_total: string;
+      t3_wins: string;
+      t3_total: string;
+    }>(
+      [
+        'SELECT',
+        '  count(*) FILTER (WHERE (r.\"scoreBreakdown\"->\'yield1Day\')::numeric > 0)::text AS t1_wins,',
+        '  count(*)::text AS t1_total,',
+        '  count(*) FILTER (WHERE (r.\"scoreBreakdown\"->\'yield3Day\')::numeric > 0)::text AS t3_wins,',
+        '  count(*)::text AS t3_total',
+        'FROM (',
+        '  SELECT r.\"scoreBreakdown\",',
+        '         row_number() OVER (ORDER BY r.\"asOf\" DESC) AS rn',
+        '  FROM public.\"RecommendationSnapshot\" r',
+        `  WHERE r.\"clusterKey\" = $1 AND r.symbol = $2 AND r.\"asOf\" < $3::timestamp`,
+        ') r',
+        'WHERE r.rn <= 30',
+      ].join(' '),
+      [toClusterKey(groupId), symbol, new Date(rawRow.asOf)],
+    );
+    const winRow = winRateRows.rows[0];
+    const t1Total = winRow ? Number(winRow.t1_total) : 0;
+    const t3Total = winRow ? Number(winRow.t3_total) : 0;
+    const winRateT1 = t1Total === 0 ? null : Number(winRow.t1_wins) / t1Total;
+    const winRateT3 = t3Total === 0 ? null : Number(winRow.t3_wins) / t3Total;
+
     const row: IDashboardRecommendationItem = {
       symbol: rawRow.symbol,
       stock_name: displayStockName,
@@ -2872,6 +3007,8 @@ export class RuntimeDataOperations {
       score_breakdown: rawRow.scoreBreakdown,
       trace_id: rawRow.traceId,
       strategy_id: rawRow.strategyId,
+      win_rate_t1: winRateT1,
+      win_rate_t3: winRateT3,
     };
     const marketSignal = await pool.query<IMarketSignalDbRow>(
       [

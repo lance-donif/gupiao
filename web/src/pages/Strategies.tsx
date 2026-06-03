@@ -3,6 +3,7 @@ import { Copy, Edit, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import type {
   StrategyConfig,
   StrategyDefinition,
+  StrategyPerformanceReport,
   StrategyProfitPayload,
   StrategyProfitSummary,
 } from '@/lib/api-types';
@@ -40,6 +41,7 @@ import {
 } from '@/components/ui/table';
 import { useToast } from '@/components/ui/toast';
 import { buildStrategyViewModel } from '@/features/strategies/strategy-view-model';
+import { StrategyCompareChart } from '@/features/strategies/StrategyCompareChart';
 import { api } from '@/lib/api';
 import { cn, formatPercent } from '@/lib/utils';
 
@@ -58,6 +60,11 @@ function defaultConfig(): StrategyConfig {
     includeSignalTypes: [],
     excludeSignalTypes: [],
     weights: { evidence: 1, graph: 1, exposure: 1, market: 1 },
+    marketWeights: { momentum5d: 6, momentum20d: 5, volumeRatio: 4, breakout: 3, compression: 2, fibonacci: 0, supportResistance: 0 },
+    fibonacciLookbackDays: 60,
+    fibonacciThresholdPct: 0.015,
+    supportResistanceLookbackDays: 60,
+    supportResistanceThresholdPct: 0.015,
   };
 }
 
@@ -70,6 +77,10 @@ function mergeConfig(strategy?: StrategyDefinition): StrategyConfig {
       ...base.weights,
       ...(strategy?.config_json?.weights ?? {}),
     },
+    marketWeights: {
+      ...base.marketWeights,
+      ...(strategy?.config_json?.marketWeights ?? {}),
+    },
     includeSignalTypes: [...(strategy?.config_json?.includeSignalTypes ?? [])],
     excludeSignalTypes: [...(strategy?.config_json?.excludeSignalTypes ?? [])],
   };
@@ -81,6 +92,7 @@ export default function StrategiesPage() {
   const [loading, setLoading] = React.useState(false);
   const [strategies, setStrategies] = React.useState<StrategyDefinition[]>([]);
   const [profits, setProfits] = React.useState<StrategyProfitPayload | null>(null);
+  const [performanceReports, setPerformanceReports] = React.useState<StrategyPerformanceReport[]>([]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<StrategyDefinition | null>(null);
@@ -92,12 +104,14 @@ export default function StrategiesPage() {
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [strategyPayload, profitPayload] = await Promise.all([
+      const [strategyPayload, profitPayload, reportPayload] = await Promise.all([
         api.listStrategies(ctx.activeClusterId),
         api.getStrategyProfits(ctx.activeClusterId, ctx.globalDate),
+        api.getStrategyPerformanceReports(ctx.activeClusterId),
       ]);
       setStrategies(strategyPayload.items);
       setProfits(profitPayload);
+      setPerformanceReports(reportPayload);
       setSelectedId((current) => current ?? strategyPayload.items[0]?.id ?? null);
     } catch (error) {
       toast({ title: '读取策略失败', description: String(error), variant: 'destructive' });
@@ -418,8 +432,51 @@ export default function StrategiesPage() {
               <SettlementCard key={item.strategy_id} item={item} />
             ))}
             {summaries.length === 0 && <Empty text="暂无收益样本" />}
+            {summaries.length > 1 && (
+              <div className="mt-3 border-t border-border/60 pt-3">
+                <StrategyCompareChart summaries={summaries} />
+              </div>
+            )}
           </CardContent>
         </Card>
+        {performanceReports.length > 0 && (
+          <Card className="h-auto shrink-0">
+            <CardHeader className="p-4 pb-2">
+              <CardTitle className="text-[14px]">策略绩效报告</CardTitle>
+              <CardDescription className="text-[12px]">
+                对账后多策略横向对比指标
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="p-4 pt-0 text-[12px]">
+              <Table className="text-[11px]">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>策略</TableHead>
+                    <TableHead className="text-right">日期</TableHead>
+                    <TableHead className="text-right">胜率</TableHead>
+                    <TableHead className="text-right">盈亏比</TableHead>
+                    <TableHead className="text-right">平均收益</TableHead>
+                    <TableHead className="text-right">最大回撤</TableHead>
+                    <TableHead className="text-right">推荐数</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {performanceReports.slice(0, 20).map((report) => (
+                    <TableRow key={report.id}>
+                      <TableCell className="font-medium">{report.strategy_name_snapshot}</TableCell>
+                      <TableCell className="number-figure text-right">{report.as_of.slice(0, 10)}</TableCell>
+                      <TableCell className="number-figure text-right">{report.win_rate != null ? formatPercent(report.win_rate, 0) : '--'}</TableCell>
+                      <TableCell className="number-figure text-right">{report.profit_ratio != null ? report.profit_ratio.toFixed(2) : '--'}</TableCell>
+                      <TableCell className="number-figure text-right">{report.avg_return_pct != null ? formatPercent(report.avg_return_pct, 2) : '--'}</TableCell>
+                      <TableCell className="number-figure text-right text-rose-600">{report.max_drawdown != null ? formatPercent(report.max_drawdown, 2) : '--'}</TableCell>
+                      <TableCell className="number-figure text-right">{report.recommendation_count}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        )}
       </aside>
 
       <StrategySheet
@@ -556,6 +613,89 @@ function StrategySheet(props: {
               ))}
             </div>
           </div>
+          <div className="workstation-control rounded-lg p-3">
+            <div className="mb-3 text-[12px] font-semibold">行情指标权重</div>
+            <div className="grid grid-cols-4 gap-2">
+              {([
+                { key: 'momentum5d' as const, label: '5日动量' },
+                { key: 'momentum20d' as const, label: '20日动量' },
+                { key: 'volumeRatio' as const, label: '量比' },
+                { key: 'breakout' as const, label: '突破' },
+                { key: 'compression' as const, label: '波动压缩' },
+                { key: 'fibonacci' as const, label: '斐波那契' },
+                { key: 'supportResistance' as const, label: '支撑阻力' },
+              ]).map(({ key, label }) => (
+                <Field key={key} label={label}>
+                  <Input
+                    type="number"
+                    step="0.5"
+                    value={props.config.marketWeights[key]}
+                    onChange={(event) =>
+                      props.setConfig((current) => ({
+                        ...current,
+                        marketWeights: { ...current.marketWeights, [key]: Number(event.target.value) },
+                      }))
+                    }
+                  />
+                </Field>
+              ))}
+            </div>
+          </div>
+          <div className="workstation-control rounded-lg p-3">
+            <div className="mb-3 text-[12px] font-semibold">斐波那契 &amp; 支撑阻力参数</div>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="斐波那契回看天数">
+                <Input
+                  type="number"
+                  value={props.config.fibonacciLookbackDays}
+                  onChange={(event) =>
+                    props.setConfig((current) => ({
+                      ...current,
+                      fibonacciLookbackDays: Number(event.target.value),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="斐波那契阈值 (%)">
+                <Input
+                  type="number"
+                  step="0.001"
+                  value={props.config.fibonacciThresholdPct}
+                  onChange={(event) =>
+                    props.setConfig((current) => ({
+                      ...current,
+                      fibonacciThresholdPct: Number(event.target.value),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="支撑阻力回看天数">
+                <Input
+                  type="number"
+                  value={props.config.supportResistanceLookbackDays}
+                  onChange={(event) =>
+                    props.setConfig((current) => ({
+                      ...current,
+                      supportResistanceLookbackDays: Number(event.target.value),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="支撑阻力阈值 (%)">
+                <Input
+                  type="number"
+                  step="0.001"
+                  value={props.config.supportResistanceThresholdPct}
+                  onChange={(event) =>
+                    props.setConfig((current) => ({
+                      ...current,
+                      supportResistanceThresholdPct: Number(event.target.value),
+                    }))
+                  }
+                />
+              </Field>
+            </div>
+          </div>
           <Button className="w-full" onClick={props.onSave}>
             保存策略设置
           </Button>
@@ -595,6 +735,7 @@ function Mini({ label, value }: { label: string; value: string }) {
 
 function SettlementCard({ item }: { item: StrategyProfitSummary }) {
   const settled = pickSettledHorizon(item);
+  const maxDrawdown = settled?.summary.max_drawdown_pct ?? null;
   return (
     <div className="workstation-control rounded-lg p-3">
       <div className="flex items-center justify-between gap-2">
@@ -606,7 +747,7 @@ function SettlementCard({ item }: { item: StrategyProfitSummary }) {
       <div className="mt-2 grid grid-cols-2 gap-2">
         <Mini
           label={settled ? `${settled.label}平均收益` : '平均收益'}
-          value={settled ? formatPercent(settled.summary.avg_return_pct, 2) : '--'}
+          value={settled ? formatPercent(settled.summary.avg_return_pct, 1) : '--'}
         />
         <Mini
           label={settled ? `${settled.label}胜率` : '待结算'}
@@ -617,6 +758,12 @@ function SettlementCard({ item }: { item: StrategyProfitSummary }) {
           }
         />
       </div>
+      {maxDrawdown != null && (
+        <div className="mt-2 flex items-center justify-between rounded bg-rose-50 px-2 py-1 text-[11px] text-rose-700 dark:bg-rose-950/30 dark:text-rose-400">
+          <span>最大回撤</span>
+          <span className="number-figure font-semibold">{formatPercent(maxDrawdown, 1)}</span>
+        </div>
+      )}
       <div className="mt-2 text-[11px] text-muted-foreground">
         T+1 {item.horizon_summaries?.t1.final_count ?? 0}/
         {item.horizon_summaries?.t1.sample_count ?? 0}，T+3{' '}

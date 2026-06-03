@@ -22,13 +22,14 @@ export function buildStrategyViewModel(
     config.recent5dGainMaxPct == null ? '5日涨幅不限' : `5日涨幅 ≤ ${(config.recent5dGainMaxPct * 100).toFixed(0)}%`,
   ];
   const weights = config.weights;
+  const mw = config.marketWeights ?? { momentum5d: 6, momentum20d: 5, volumeRatio: 4, breakout: 3, compression: 2, fibonacci: 0, supportResistance: 0 };
 
   return {
     id: strategy.id,
     name: strategy.name,
     enabled_label: strategy.enabled ? '已启用' : '已停用',
     filter_summary: filters.join(' / '),
-    weight_summary: `证据 ${weights.evidence} / 图谱 ${weights.graph} / 暴露 ${weights.exposure} / 市场 ${weights.market}`,
+    weight_summary: `证据 ${weights.evidence} / 图谱 ${weights.graph} / 暴露 ${weights.exposure} / 市场 ${weights.market} | 行情 动量5d:${mw.momentum5d} 动量20d:${mw.momentum20d} 量比:${mw.volumeRatio} 突破:${mw.breakout} 压缩:${mw.compression} 斐波:${mw.fibonacci} 支撑阻力:${mw.supportResistance}`,
     performance_summary: formatPerformanceSummary(summary),
   };
 }

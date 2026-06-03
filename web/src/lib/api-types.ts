@@ -352,6 +352,16 @@ export interface StrategyConfigWeights {
   market: number;
 }
 
+export interface StrategyMarketWeights {
+  momentum5d: number;
+  momentum20d: number;
+  volumeRatio: number;
+  breakout: number;
+  compression: number;
+  fibonacci: number;
+  supportResistance: number;
+}
+
 export interface StrategyConfig {
   limit: number;
   maxPerSignalType: number;
@@ -366,6 +376,11 @@ export interface StrategyConfig {
   includeSignalTypes: string[];
   excludeSignalTypes: string[];
   weights: StrategyConfigWeights;
+  marketWeights: StrategyMarketWeights;
+  fibonacciLookbackDays: number;
+  fibonacciThresholdPct: number;
+  supportResistanceLookbackDays: number;
+  supportResistanceThresholdPct: number;
 }
 
 export interface StrategyDefinition {
@@ -429,6 +444,7 @@ export interface StrategyProfitHorizonSummary {
   final_count: number;
   avg_return_pct: number | null;
   win_rate: number | null;
+  max_drawdown_pct: number | null;
 }
 
 export interface StrategyProfitSummary {
@@ -454,6 +470,20 @@ export interface StrategyProfitPayload {
   as_of: string;
   rows: StrategyProfitRow[];
   summaries: StrategyProfitSummary[];
+}
+
+export interface StrategyPerformanceReport {
+  id: string;
+  strategy_id: string;
+  strategy_name_snapshot: string;
+  cluster_key: string;
+  as_of: string;
+  win_rate: number | null;
+  profit_ratio: number | null;
+  avg_return_pct: number | null;
+  max_drawdown: number | null;
+  recommendation_count: number;
+  created_at: string;
 }
 
 export interface ConfigItem {
@@ -568,6 +598,8 @@ export interface DashboardRecommendationItem {
   score_breakdown: Record<string, unknown>;
   trace_id: string;
   strategy_id: string | null;
+  win_rate_t1: number | null;
+  win_rate_t3: number | null;
 }
 
 export interface DashboardExecutionHistoryItem {

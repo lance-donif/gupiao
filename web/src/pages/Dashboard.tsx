@@ -222,10 +222,24 @@ function RecommendationRail({
                 <div className="truncate text-[11px] leading-4 text-muted-foreground">
                   {row.symbol} · {row.industry}
                 </div>
+                {(row.win_rate_t1 != null || row.win_rate_t3 != null) && (
+                  <div className="mt-0.5 flex gap-1">
+                    {row.win_rate_t1 != null && (
+                      <span className="rounded bg-emerald-50 px-1 py-0 text-[10px] leading-4 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400">
+                        T+1 {Math.round(row.win_rate_t1 * 100)}%
+                      </span>
+                    )}
+                    {row.win_rate_t3 != null && (
+                      <span className="rounded bg-sky-50 px-1 py-0 text-[10px] leading-4 text-sky-700 dark:bg-sky-950/30 dark:text-sky-400">
+                        T+3 {Math.round(row.win_rate_t3 * 100)}%
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="text-right rounded-md bg-white/72 px-1.5 py-1 shadow-[var(--shadow-control)]">
                 <div className="number-figure text-[15px] font-bold leading-5 text-foreground">
-                  {formatScore(row.total_score)}
+                  {Math.round(row.total_score)}
                 </div>
                 <div className="text-[10px] leading-4 text-muted-foreground">阶段 {row.stage}</div>
               </div>

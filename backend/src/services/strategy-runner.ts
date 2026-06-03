@@ -15,6 +15,7 @@ import {
   selectStrategyRecommendations,
 } from './strategy-experiment-core.js';
 import { normalizeSelectionSignalType } from './temp-stock-recommendation-service.js';
+import { calculateMarketSignalScore } from './scoring-contribution-engine.js';
 
 export interface IStrategyDefinitionRow {
   readonly id: string;
@@ -228,7 +229,18 @@ export class StrategyExperimentRunner {
       const startedAt = Date.now();
       try {
         const config = normalizeStrategyExperimentConfig(strategy.configJson);
-        const candidates = features.map(feature => scoreStrategyFeature(feature, config));
+        const candidates = features.map((feature) => {
+          let updatedFeature = feature;
+          if (feature.candles && feature.candles.length > 0) {
+            const computed = calculateMarketSignalScore(feature.candles, config);
+            updatedFeature = {
+              ...feature,
+              marketSignalScore: computed.score,
+              marketSignal: computed as any,
+            };
+          }
+          return scoreStrategyFeature(updatedFeature, config);
+        });
         const selection = selectStrategyRecommendations(candidates, config);
         const run = await this.persistStrategyRunSuccess(prisma, {
           strategy,
@@ -341,6 +353,7 @@ export class StrategyExperimentRunner {
         currentPrice: priceInfo?.close ?? null,
         returnPct: priceInfo?.close == null ? null : 0,
         returnStatus: priceInfo?.close == null ? 'NO_BASE_PRICE' : 'RECORDED',
+        candles: (marketSignal as any).candles ?? [],
       } satisfies IStrategyExperimentFeatureInput;
     });
   }
@@ -402,6 +415,7 @@ export class StrategyExperimentRunner {
         currentPrice: priceInfo?.close ?? null,
         returnPct: priceInfo?.close == null ? null : 0,
         returnStatus: priceInfo?.close == null ? 'NO_BASE_PRICE' : 'RECORDED',
+        candles: (marketSignal as any).candles ?? [],
       } satisfies IStrategyExperimentFeatureInput;
     });
   }
@@ -504,19 +518,64 @@ export class StrategyExperimentRunner {
     symbols: readonly string[],
   ): Promise<Map<string, Record<string, unknown>>> {
     const map = new Map<string, Record<string, unknown>>();
-    if (!prisma.marketSignalSnapshot?.findMany || symbols.length === 0) {
+    if (symbols.length === 0) {
       return map;
     }
 
-    const rows = await prisma.marketSignalSnapshot.findMany({
+    const stocks = await prisma.stock.findMany({
       where: {
-        traceId,
+        clusterKey,
         symbol: { in: [...symbols] },
+      },
+      select: {
+        id: true,
+        symbol: true,
       },
     }) as any[];
 
+    const stockIdToSymbol = new Map<string, string>(
+      stocks.map((stock: any) => [String(stock.id), String(stock.symbol)]),
+    );
+
+    const calendarDays = 120 * 1.6 + 15;
+    const marketWindowStart = new Date(asOf.getTime() - calendarDays * 24 * 60 * 60 * 1000);
+    const candles = await prisma.candle.findMany({
+      where: {
+        stockId: { in: [...stockIdToSymbol.keys()] },
+        tradingDay: {
+          lte: asOf,
+          gte: marketWindowStart,
+        },
+      },
+      orderBy: [
+        { stockId: 'asc' },
+        { tradingDay: 'desc' },
+      ],
+    }) as any[];
+
+    const candlesBySymbol = new Map<string, any[]>();
+    for (const candle of candles) {
+      const symbol = stockIdToSymbol.get(String(candle.stockId));
+      if (symbol) {
+        const list = candlesBySymbol.get(symbol) ?? [];
+        if (list.length < 120) {
+          list.push(candle);
+          candlesBySymbol.set(symbol, list);
+        }
+      }
+    }
+
+    const rows = prisma.marketSignalSnapshot?.findMany
+      ? (await prisma.marketSignalSnapshot.findMany({
+          where: {
+            traceId,
+            symbol: { in: [...symbols] },
+          },
+        }) as any[])
+      : [];
+
     const foundSymbols = new Set(rows.map((row: any) => String(row.symbol)));
-    if (foundSymbols.size < symbols.length) {
+    if (foundSymbols.size < symbols.length && prisma.marketSignalSnapshot?.findMany) {
       const reusableRows = await prisma.marketSignalSnapshot.findMany({
         where: {
           clusterKey,
@@ -537,7 +596,8 @@ export class StrategyExperimentRunner {
     }
 
     for (const row of rows) {
-      map.set(String(row.symbol), {
+      const symbol = String(row.symbol);
+      map.set(symbol, {
         score: toNumber(row.score),
         momentum5dPct: row.momentum5dPct === null || row.momentum5dPct === undefined ? null : toNumber(row.momentum5dPct),
         momentum20dPct: row.momentum20dPct === null || row.momentum20dPct === undefined ? null : toNumber(row.momentum20dPct),
@@ -545,7 +605,24 @@ export class StrategyExperimentRunner {
         breakout20d: row.breakout20d === true,
         volatilityCompression: row.volatilityCompression === true,
         recentWeekGainExceeded: row.recentWeekGainExceeded === true,
+        candles: candlesBySymbol.get(symbol) ?? [],
       });
+    }
+
+    // fallback for symbols that do not even have marketSignalSnapshot in DB
+    for (const symbol of symbols) {
+      if (!map.has(symbol)) {
+        map.set(symbol, {
+          score: 0,
+          momentum5dPct: null,
+          momentum20dPct: null,
+          volumeRatio20d: null,
+          breakout20d: false,
+          volatilityCompression: false,
+          recentWeekGainExceeded: false,
+          candles: candlesBySymbol.get(symbol) ?? [],
+        });
+      }
     }
 
     return map;

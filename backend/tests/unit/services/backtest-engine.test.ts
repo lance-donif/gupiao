@@ -18,6 +18,20 @@ class MockBacktestPrismaClient {
   public recommendationSnapshotsCreated: any[] = [];
   public runTracesCreated: any[] = [];
   public pipelineStepTracesCreated: any[] = [];
+  public strategyDefinitions: any[] = [];
+  public strategyRuns: any[] = [];
+  public strategyEvents: any[] = [];
+  public performanceReports: any[] = [];
+  public marketSignals: any[] = [];
+  public transactionCalls: any[][] = [];
+
+  public async $transaction(promises: Promise<any>[] | ((tx: any) => Promise<any>)): Promise<any[]> {
+    if (typeof promises === 'function') {
+      return promises(this);
+    }
+    this.transactionCalls.push(promises as any[]);
+    return Promise.all(promises);
+  }
 
   public readonly normalizedNewsRecord = {
     findMany: async (args?: any) => {
@@ -89,12 +103,23 @@ class MockBacktestPrismaClient {
     },
     findMany: async (args?: any) => {
       let filtered = this.evidenceContributionsCreated;
+      if (args?.where?.clusterKey) {
+        filtered = filtered.filter(row => row.clusterKey === args.where.clusterKey);
+      }
       if (args?.where?.traceId) {
         filtered = filtered.filter(row => row.traceId === args.where.traceId);
       }
       if (args?.where?.symbol?.in) {
         const symbols = new Set(args.where.symbol.in);
         filtered = filtered.filter(row => symbols.has(row.symbol));
+      }
+      if (Array.isArray(args?.where?.OR)) {
+        filtered = filtered.filter(row => {
+          return args.where.OR.some((cond: any) => {
+            return (!cond.traceId || row.traceId === cond.traceId)
+              && (!cond.symbol || row.symbol === cond.symbol);
+          });
+        });
       }
       return filtered;
     },
@@ -117,6 +142,29 @@ class MockBacktestPrismaClient {
     findUnique: async (args: { where: { traceId_symbol: { traceId: string; symbol: string } } }) => {
       const { traceId, symbol } = args.where.traceId_symbol;
       return this.recommendationSnapshotsCreated.find(rec => rec.traceId === traceId && rec.symbol === symbol) ?? null;
+    },
+    findMany: async (args?: any) => {
+      let filtered = this.recommendationSnapshotsCreated;
+      if (args?.where?.clusterKey) {
+        filtered = filtered.filter(row => row.clusterKey === args.where.clusterKey);
+      }
+      if (args?.where?.traceId) {
+        filtered = filtered.filter(row => row.traceId === args.where.traceId);
+      }
+      if (args?.where?.symbol?.in) {
+        const symbols = new Set(args.where.symbol.in);
+        filtered = filtered.filter(row => symbols.has(row.symbol));
+      }
+      if (args?.where?.asOf) {
+        const asOfFilter = args.where.asOf;
+        if (asOfFilter.gte) {
+          filtered = filtered.filter(row => new Date(row.asOf) >= asOfFilter.gte);
+        }
+        if (asOfFilter.lt) {
+          filtered = filtered.filter(row => new Date(row.asOf) < asOfFilter.lt);
+        }
+      }
+      return filtered;
     },
     createMany: async (args: { data: any[] }) => {
       this.recommendationSnapshotsCreated.push(...args.data);
@@ -156,21 +204,38 @@ class MockBacktestPrismaClient {
   };
 
   public readonly candle = {
-    findMany: async (args: { where: { stockId: string; tradingDay: any }; orderBy: { tradingDay: string }; take?: number }) => {
-      let filtered = this.candleList.filter(c => c.stockId === args.where.stockId);
-      const tradingDayFilter = args.where.tradingDay;
-      if (tradingDayFilter.lte) {
-        filtered = filtered.filter(c => c.tradingDay <= tradingDayFilter.lte);
-      }
-      else if (tradingDayFilter.gt) {
-        filtered = filtered.filter(c => c.tradingDay > tradingDayFilter.gt);
+    findMany: async (args?: any) => {
+      let filtered = this.candleList;
+      const stockIdFilter = args?.where?.stockId;
+      if (stockIdFilter) {
+        if (stockIdFilter.in) {
+          const ids = new Set(stockIdFilter.in.map(String));
+          filtered = filtered.filter(c => ids.has(String(c.stockId)));
+        } else {
+          filtered = filtered.filter(c => String(c.stockId) === String(stockIdFilter));
+        }
       }
 
-      filtered.sort((a, b) => args.orderBy.tradingDay === 'asc'
-        ? a.tradingDay.getTime() - b.tradingDay.getTime()
-        : b.tradingDay.getTime() - a.tradingDay.getTime());
+      const tradingDayFilter = args?.where?.tradingDay;
+      if (tradingDayFilter) {
+        if (tradingDayFilter.lte) {
+          filtered = filtered.filter(c => c.tradingDay <= tradingDayFilter.lte);
+        }
+        if (tradingDayFilter.gt) {
+          filtered = filtered.filter(c => c.tradingDay > tradingDayFilter.gt);
+        }
+        if (tradingDayFilter.gte) {
+          filtered = filtered.filter(c => c.tradingDay >= tradingDayFilter.gte);
+        }
+      }
 
-      return args.take ? filtered.slice(0, args.take) : filtered;
+      if (args?.orderBy?.tradingDay) {
+        filtered.sort((a, b) => args.orderBy.tradingDay === 'asc'
+          ? a.tradingDay.getTime() - b.tradingDay.getTime()
+          : b.tradingDay.getTime() - a.tradingDay.getTime());
+      }
+
+      return args?.take ? filtered.slice(0, args.take) : filtered;
     },
   };
 
@@ -208,6 +273,145 @@ class MockBacktestPrismaClient {
         };
       }
       return this.pipelineStepTracesCreated[index];
+    },
+  };
+
+  public readonly strategyDefinition = {
+    findMany: async (args?: any) => {
+      let rows = this.strategyDefinitions;
+      if (args?.where?.clusterKey) {
+        rows = rows.filter(row => row.clusterKey === args.where.clusterKey);
+      }
+      if (args?.where?.deletedAt === null) {
+        rows = rows.filter(row => row.deletedAt == null);
+      }
+      return rows;
+    },
+    create: async (args: { data: any }) => {
+      const row = {
+        id: `strategy-${this.strategyDefinitions.length + 1}`,
+        deletedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        ...args.data,
+      };
+      this.strategyDefinitions.push(row);
+      return row;
+    },
+  };
+
+  public readonly strategyRun = {
+    findFirst: async (args?: any) => {
+      return this.strategyRuns.find(row =>
+        row.strategyId === args?.where?.strategyId
+        && row.asOf.getTime() === args.where.asOf.getTime()
+        && row.inputFingerprint === args.where.inputFingerprint,
+      ) ?? null;
+    },
+    findMany: async (args?: any) => {
+      let rows = this.strategyRuns;
+      if (args?.where?.traceId) {
+        rows = rows.filter(row => row.traceId === args.where.traceId);
+      }
+      if (args?.where?.clusterKey) {
+        rows = rows.filter(row => row.clusterKey === args.where.clusterKey);
+      }
+      if (args?.where?.status) {
+        rows = rows.filter(row => row.status === args.where.status);
+      }
+      // attach recommendations property
+      return rows.map(row => ({
+        ...row,
+        recommendations: this.strategyEvents.filter(event => event.strategyRunId === row.id),
+      }));
+    },
+    create: async (args: { data: any }) => {
+      const row = {
+        id: `run-${this.strategyRuns.length + 1}`,
+        createdAt: new Date(),
+        ...args.data,
+      };
+      this.strategyRuns.push(row);
+      return row;
+    },
+    update: async (args: { where: { id: string }; data: any }) => {
+      const index = this.strategyRuns.findIndex(row => row.id === args.where.id);
+      if (index !== -1) {
+        this.strategyRuns[index] = {
+          ...this.strategyRuns[index],
+          ...args.data,
+        };
+      }
+      return this.strategyRuns[index];
+    },
+  };
+
+  public readonly strategyRecommendationEvent = {
+    createMany: async (args: { data: any[] }) => {
+      this.strategyEvents.push(...args.data.map((row, index) => ({
+        id: `event-${this.strategyEvents.length + index + 1}`,
+        ...row,
+      })));
+      return { count: args.data.length };
+    },
+    deleteMany: async (args?: any) => {
+      const runId = args?.where?.strategyRunId;
+      this.strategyEvents = this.strategyEvents.filter(row => row.strategyRunId !== runId);
+      return { count: 0 };
+    },
+  };
+
+  public readonly strategyPerformanceReport = {
+    create: async (args: { data: any }) => {
+      const row = { id: `report-${this.performanceReports.length + 1}`, ...args.data };
+      this.performanceReports.push(row);
+      return row;
+    },
+    upsert: async (args: any) => {
+      const where = args.where.strategyId_asOf;
+      const index = this.performanceReports.findIndex(row =>
+        row.strategyId === where.strategyId && row.asOf.getTime() === where.asOf.getTime(),
+      );
+      if (index >= 0) {
+        this.performanceReports[index] = {
+          ...this.performanceReports[index],
+          ...args.update,
+        };
+        return this.performanceReports[index];
+      }
+      const created = { id: `report-${this.performanceReports.length + 1}`, ...args.create };
+      this.performanceReports.push(created);
+      return created;
+    },
+  };
+
+  public readonly marketSignalSnapshot = {
+    findMany: async (args?: any) => {
+      let rows = this.marketSignals;
+      if (args?.where?.traceId) {
+        rows = rows.filter(row => row.traceId === args.where.traceId);
+      }
+      if (args?.where?.symbol?.in) {
+        const symbols = new Set(args.where.symbol.in);
+        rows = rows.filter(row => symbols.has(row.symbol));
+      }
+      if (args?.where?.clusterKey) {
+        rows = rows.filter(row => row.clusterKey === args.where.clusterKey);
+      }
+      if (args?.where?.asOf) {
+        rows = rows.filter(row => row.asOf === args.where.asOf);
+      }
+      return rows;
+    },
+    createMany: async (args: { data: any[] }) => {
+      this.marketSignals.push(...args.data);
+      return { count: args.data.length };
+    },
+  };
+
+  public readonly factSnapshot = {
+    upsert: async (args: { where: { traceId: string }; create: any; update: any }) => {
+      return { traceId: args.where.traceId, ...args.create };
     },
   };
 }
@@ -416,6 +620,91 @@ describe('backtest engine', () => {
     expect(Number(snapshot.yield1Day)).toBeCloseTo(0.10, 4);
     expect(Number(snapshot.yield3Day)).toBeCloseTo(-0.10, 4);
     expect(Number(snapshot.yield5Day)).toBeCloseTo(0.20, 4);
+  });
+
+  it('persists StrategyPerformanceReport with win rate / profit ratio / max drawdown after reconciliation', async () => {
+    const mockDb = new MockBacktestPrismaClient();
+    const asOf = new Date('2026-05-24T12:00:00.000Z');
+    const clusterKey = 'friend-network-cluster';
+    const traceId = 'test-perf-report-trace';
+    mockDb.strategyDefinitions.push({
+      id: 'strategy-perf',
+      clusterKey,
+      name: '绩效策略',
+      description: null,
+      enabled: true,
+      deletedAt: null,
+      configJson: {
+        limit: 5,
+        maxPerSignalType: 5,
+        maxPrice: 40,
+        exclude688: true,
+        excludeST: true,
+        recent5dGainMaxPct: 0.2,
+        includeSignalTypes: [],
+        excludeSignalTypes: [],
+        weights: { evidence: 1, graph: 1, exposure: 1, market: 1 },
+      },
+    });
+
+    seedRecommendationPath(mockDb, {
+      traceId,
+      asOf,
+      clusterKey,
+      newsId: 'news-past',
+      symbol: '600000',
+      stockName: '浦发银行',
+      keyword: '信贷',
+    });
+
+    const result = await new BacktestEngine().runBacktest(mockDb, { traceId, asOf, clusterKey });
+
+    expect(result.reconciledCount).toBe(1);
+    expect(mockDb.performanceReports).toHaveLength(1);
+
+    const report = mockDb.performanceReports[0];
+    expect(report.strategyId).toBe('strategy-perf');
+    expect(report.strategyNameSnapshot).toBe('绩效策略');
+    expect(report.clusterKey).toBe(clusterKey);
+    expect(report.recommendationCount).toBe(1);
+    // yield5Day 已知约为 0.20（看 seedRecommendationPath 的蜡烛结构）
+    expect(Number(report.avgReturnPct)).toBeGreaterThan(0);
+    expect(Number(report.avgReturnPct)).toBeCloseTo(0.20, 2);
+    expect(Number(report.winRate)).toBe(1);
+    // 单只推荐正收益，profitRatio=avgWinning / |avgLosing|，avgLosing=0 -> null
+    expect(report.profitRatio === null || Number(report.profitRatio) > 0).toBe(true);
+    expect(report.maxDrawdown).not.toBeNull();
+  });
+
+  it('reconciles in a single batched candle query and persists via $transaction', async () => {
+    const mockDb = new MockBacktestPrismaClient();
+    const asOf = new Date('2026-05-24T12:00:00.000Z');
+    const clusterKey = 'friend-network-cluster';
+    const traceId = 'test-batched-reconcile';
+
+    // 3 候选，1 批 candle.findMany
+    for (const row of [
+      ['600001', '股票A', '题材A'],
+      ['600002', '股票B', '题材B'],
+      ['600003', '股票C', '题材C'],
+    ] as const) {
+      seedRecommendationPath(mockDb, {
+        traceId,
+        asOf,
+        clusterKey,
+        newsId: `news-${row[0]}`,
+        symbol: row[0],
+        stockName: row[1],
+        keyword: row[2],
+      });
+    }
+
+    const result = await new BacktestEngine().runBacktest(mockDb, { traceId, asOf, clusterKey });
+
+    expect(result.reconciledCount).toBe(3);
+    // 3 个 update 走 $transaction
+    expect(mockDb.transactionCalls).toHaveLength(1);
+    expect(mockDb.transactionCalls[0]).toHaveLength(3);
   });
 
   it('can run inside an existing daily trace without creating or completing RunTrace', async () => {

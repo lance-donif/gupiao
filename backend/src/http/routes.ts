@@ -151,6 +151,19 @@ export const handleBackendRoute = async (
     return { handled: true, ok: true };
   }
 
+  if (pathname === '/api/strategy/performance-reports' && method === 'GET') {
+    writeJson(
+      response,
+      200,
+      await store.getStrategyPerformanceReports(
+        url.searchParams.get('group_id') ?? 'main',
+        url.searchParams.get('strategy_id'),
+        parsePositiveInteger(url.searchParams.get('limit'), 50),
+      ),
+    );
+    return { handled: true, ok: true };
+  }
+
   if (pathname === '/api/strategy/profits' && method === 'GET') {
     writeJson(
       response,

@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { ScoringContributionEngine } from './scoring-contribution-engine.js';
 import { TempStockRecommendationService } from './temp-stock-recommendation-service.js';
 import { TraceManager } from './trace-manager.js';
+import { StrategyExperimentRunner } from './strategy-runner.js';
 
 export interface IBacktestRunInput {
   readonly traceId: string;
@@ -196,99 +197,135 @@ export class BacktestEngine {
         recommendationsCount: recommendations.length,
       });
 
-      for (const rec of recommendations) {
-        // 1. 查询股票记录 (必须包含 clusterKey 隔离)
-        const stock = await prisma.stock.findUnique({
+      const symbols = recommendations.map((rec: any) => String(rec.symbol));
+      if (symbols.length > 0) {
+        // 1. 批量查询股票记录
+        const stocks = await prisma.stock.findMany({
           where: {
-            clusterKey_symbol: {
-              clusterKey,
-              symbol: rec.symbol,
-            },
+            clusterKey,
+            symbol: { in: symbols },
           },
         });
+        const stockMap = new Map<string, any>(stocks.map((s: any) => [s.symbol, s]));
+        const stockIds = stocks.map((s: any) => s.id);
 
-        if (!stock) {
-          continue;
-        }
-
-        // 2. 隔离查询历史行情 (P_0 基准价: <= asOf 的最后一天收盘价)
-        const baseCandles = await prisma.candle.findMany({
+        // 2. 批量查询历史与未来 K 线 (基准价为 <= asOf 最后一天，未来价为 > asOf 5个交易日以内)
+        const marginBefore = new Date(asOf.getTime() - 30 * 24 * 60 * 60 * 1000);
+        const marginAfter = new Date(asOf.getTime() + 20 * 24 * 60 * 60 * 1000);
+        const allCandles = await prisma.candle.findMany({
           where: {
-            stockId: stock.id,
-            tradingDay: { lte: asOf },
-          },
-          orderBy: { tradingDay: 'desc' },
-          take: 1,
-        });
-
-        if (baseCandles.length === 0) {
-          continue; // 缺乏历史基准价，跳过对账
-        }
-
-        const p0Candle = baseCandles[0];
-        const p0 = Number(p0Candle.close);
-
-        // 3. 查询未来的行情 (T+1, T+3, T+5 收盘价: > asOf 按时间升序排序)
-        const futureCandles = await prisma.candle.findMany({
-          where: {
-            stockId: stock.id,
-            tradingDay: { gt: asOf },
+            stockId: { in: stockIds },
+            tradingDay: { gte: marginBefore, lte: marginAfter },
           },
           orderBy: { tradingDay: 'asc' },
-          take: 5, // 拿 5 个交易日的行情
         });
 
-        if (futureCandles.length === 0) {
-          continue; // 未来未发生或无价格，暂无法对账
+        const candlesByStockId = new Map<string, any[]>();
+        for (const candle of allCandles) {
+          const list = candlesByStockId.get(candle.stockId) ?? [];
+          list.push(candle);
+          candlesByStockId.set(candle.stockId, list);
         }
 
-        // 提取 T+1, T+3, T+5 的价格
-        const p1Candle = futureCandles[0]; // 第 1 个未来交易日
-        const p3Candle = futureCandles.length >= 3 ? futureCandles[2] : null; // 第 3 个未来交易日
-        const p5Candle = futureCandles.length >= 5 ? futureCandles[4] : null; // 第 5 个未来交易日
-
-        const yield1Day = p1Candle ? (Number(p1Candle.close) - p0) / p0 : null;
-        const yield3Day = p3Candle ? (Number(p3Candle.close) - p0) / p0 : null;
-        const yield5Day = p5Candle ? (Number(p5Candle.close) - p0) / p0 : null;
-
-        // 4. 获取当时生成的 Snapshot 以合并并固化本次使用的 Profile 数据
-        const currentSnapshot = await prisma.recommendationSnapshot.findUnique({
+        // 3. 批量查询 Snapshots 详情以合并 scoreBreakdown
+        const existingSnapshots = await prisma.recommendationSnapshot.findMany({
           where: {
-            traceId_symbol: {
-              traceId,
-              symbol: rec.symbol,
-            },
+            traceId,
+            symbol: { in: symbols },
           },
         });
+        const snapshotMap = new Map<string, any>(existingSnapshots.map((s: any) => [s.symbol, s]));
 
-        const originalBreakdown = currentSnapshot ? (currentSnapshot.scoreBreakdown as any) : {};
-        const updatedBreakdown = {
-          ...originalBreakdown,
-          scoringProfile: scoreResult.profileUsed,
-          halfLifeDaysUsed: scoreResult.halfLifeDaysUsed,
-          maxWindowDaysUsed: scoreResult.maxWindowDaysUsed,
-        };
+        const updates: any[] = [];
+        const finalYieldsMap = new Map<string, number>(); // 用于后续计算策略统计指标
+        const basePriceMap = new Map<string, number>();
+        const futureCandlesMap = new Map<string, any[]>();
 
-        // 5. 更新 RecommendationSnapshot 快照表中的收益率与 profile 参数
-        await prisma.recommendationSnapshot.update({
-          where: {
-            traceId_symbol: {
-              traceId,
-              symbol: rec.symbol,
-            },
-          },
-          data: {
-            realizedPrice: new Prisma.Decimal(p0),
-            realizedPriceTarget: p5Candle ? new Prisma.Decimal(Number(p5Candle.close)) : (p3Candle ? new Prisma.Decimal(Number(p3Candle.close)) : new Prisma.Decimal(Number(p1Candle.close))),
-            yield1Day: yield1Day !== null ? new Prisma.Decimal(yield1Day) : null,
-            yield3Day: yield3Day !== null ? new Prisma.Decimal(yield3Day) : null,
-            yield5Day: yield5Day !== null ? new Prisma.Decimal(yield5Day) : null,
-            scoreBreakdown: updatedBreakdown,
-            isReconciled: true,
-          },
+        for (const rec of recommendations) {
+          const stock = stockMap.get(rec.symbol);
+          if (!stock) continue;
+
+          const stockCandles = candlesByStockId.get(stock.id) ?? [];
+          const baseCandles = stockCandles
+            .filter(c => c.tradingDay.getTime() <= asOf.getTime())
+            .sort((left, right) => right.tradingDay.getTime() - left.tradingDay.getTime());
+          const futureCandles = stockCandles
+            .filter(c => c.tradingDay.getTime() > asOf.getTime())
+            .sort((left, right) => left.tradingDay.getTime() - right.tradingDay.getTime());
+
+          if (baseCandles.length === 0 || futureCandles.length === 0) {
+            continue;
+          }
+
+          const p0 = Number(baseCandles[0].close);
+          basePriceMap.set(rec.symbol, p0);
+          futureCandlesMap.set(rec.symbol, futureCandles);
+
+          const p1Candle = futureCandles[0];
+          const p3Candle = futureCandles.length >= 3 ? futureCandles[2] : null;
+          const p5Candle = futureCandles.length >= 5 ? futureCandles[4] : null;
+
+          const yield1Day = p1Candle ? (Number(p1Candle.close) - p0) / p0 : null;
+          const yield3Day = p3Candle ? (Number(p3Candle.close) - p0) / p0 : null;
+          const yield5Day = p5Candle ? (Number(p5Candle.close) - p0) / p0 : null;
+
+          const finalYield = yield5Day !== null ? yield5Day : (yield3Day !== null ? yield3Day : (yield1Day !== null ? yield1Day : null));
+          if (finalYield !== null) {
+            finalYieldsMap.set(rec.symbol, finalYield);
+          }
+
+          const currentSnapshot = snapshotMap.get(rec.symbol);
+          const originalBreakdown = currentSnapshot ? (currentSnapshot.scoreBreakdown as any) : {};
+          const updatedBreakdown = {
+            ...originalBreakdown,
+            scoringProfile: scoreResult.profileUsed,
+            halfLifeDaysUsed: scoreResult.halfLifeDaysUsed,
+            maxWindowDaysUsed: scoreResult.maxWindowDaysUsed,
+          };
+
+          updates.push(
+            prisma.recommendationSnapshot.update({
+              where: {
+                traceId_symbol: {
+                  traceId,
+                  symbol: rec.symbol,
+                },
+              },
+              data: {
+                realizedPrice: new Prisma.Decimal(p0),
+                realizedPriceTarget: p5Candle ? new Prisma.Decimal(Number(p5Candle.close)) : (p3Candle ? new Prisma.Decimal(Number(p3Candle.close)) : new Prisma.Decimal(Number(p1Candle.close))),
+                yield1Day: yield1Day !== null ? new Prisma.Decimal(yield1Day) : null,
+                yield3Day: yield3Day !== null ? new Prisma.Decimal(yield3Day) : null,
+                yield5Day: yield5Day !== null ? new Prisma.Decimal(yield5Day) : null,
+                scoreBreakdown: updatedBreakdown,
+                isReconciled: true,
+              },
+            })
+          );
+          reconciledCount++;
+        }
+
+        if (updates.length > 0) {
+          await prisma.$transaction(updates);
+        }
+
+        // 4. 运行所有启用的策略，生成对应的 StrategyRecommendationEvent 事件记录
+        const strategyRunner = new StrategyExperimentRunner();
+        await strategyRunner.runEnabledStrategies(prisma, {
+          traceId,
+          asOf,
+          clusterKey,
         });
 
-        reconciledCount++;
+        // 5. 生成绩效评估报告 (StrategyPerformanceReport) 并持久化
+        await generatePerformanceReports(prisma, {
+          traceId,
+          asOf,
+          clusterKey,
+          defaultYieldsMap: finalYieldsMap,
+          basePriceMap,
+          futureCandlesMap,
+        });
       }
 
       await TraceManager.completeStepTrace(prisma, traceId, 'reconciliation', {
@@ -321,5 +358,136 @@ export class BacktestEngine {
       halfLifeDaysUsed: scoreResult.halfLifeDaysUsed,
       maxWindowDaysUsed: scoreResult.maxWindowDaysUsed,
     };
+  }
+}
+
+async function generatePerformanceReports(
+  prisma: any,
+  input: {
+    readonly traceId: string;
+    readonly asOf: Date;
+    readonly clusterKey: string;
+    readonly defaultYieldsMap: Map<string, number>;
+    readonly basePriceMap: Map<string, number>;
+    readonly futureCandlesMap: Map<string, any[]>;
+  }
+): Promise<void> {
+  if (!prisma.strategyPerformanceReport?.create) {
+    return;
+  }
+  const { traceId, asOf, clusterKey, defaultYieldsMap, basePriceMap, futureCandlesMap } = input;
+
+  // 1. 获取当天运行成功的所有 StrategyRun
+  const strategyRuns = await prisma.strategyRun.findMany({
+    where: {
+      traceId,
+      clusterKey,
+      status: 'SUCCESS',
+    },
+    include: {
+      recommendations: true,
+    },
+  });
+
+  // 2. 为每个策略运行计算指标
+  for (const run of strategyRuns) {
+    const recs = run.recommendations;
+    if (recs.length === 0) {
+      continue;
+    }
+
+    const yields: number[] = [];
+    for (const rec of recs) {
+      let y = defaultYieldsMap.get(rec.symbol);
+      if (y === undefined) {
+        const basePrice = basePriceMap.get(rec.symbol) ?? Number(rec.basePrice);
+        const future = futureCandlesMap.get(rec.symbol) ?? [];
+        if (basePrice > 0 && future.length > 0) {
+          const p1 = future[0];
+          const p3 = future.length >= 3 ? future[2] : null;
+          const p5 = future.length >= 5 ? future[4] : null;
+          const lastCandle = p5 ?? p3 ?? p1;
+          if (lastCandle) {
+            y = (Number(lastCandle.close) - basePrice) / basePrice;
+          }
+        }
+      }
+      if (y !== undefined && y !== null) {
+        yields.push(y);
+      }
+    }
+
+    const recCount = recs.length;
+    if (yields.length === 0) {
+      continue;
+    }
+
+    const winCount = yields.filter(y => y > 0).length;
+    const winRate = winCount / yields.length;
+    const avgReturn = yields.reduce((a, b) => a + b, 0) / yields.length;
+
+    const positiveYields = yields.filter(y => y > 0);
+    const negativeYields = yields.filter(y => y < 0);
+    const avgPositive = positiveYields.length > 0 ? (positiveYields.reduce((a, b) => a + b, 0) / positiveYields.length) : 0;
+    const avgNegative = negativeYields.length > 0 ? (negativeYields.reduce((a, b) => a + b, 0) / negativeYields.length) : 0;
+    const profitRatio = avgNegative !== 0 ? avgPositive / Math.abs(avgNegative) : null;
+
+    // 计算最大回撤 Max Drawdown
+    const portfolioValues = [1.0];
+    for (let t = 0; t < 5; t++) {
+      let sumRatios = 0;
+      let count = 0;
+      for (const rec of recs) {
+        const future = futureCandlesMap.get(rec.symbol) ?? [];
+        const base = basePriceMap.get(rec.symbol) ?? Number(rec.basePrice);
+        if (future[t] && base > 0) {
+          sumRatios += Number(future[t].close) / base;
+          count++;
+        }
+      }
+      if (count > 0) {
+        portfolioValues.push(sumRatios / count);
+      }
+    }
+
+    let maxVal = 1.0;
+    let maxDD = 0.0;
+    for (const val of portfolioValues) {
+      if (val > maxVal) {
+        maxVal = val;
+      }
+      const dd = (maxVal - val) / maxVal;
+      if (dd > maxDD) {
+        maxDD = dd;
+      }
+    }
+
+    await prisma.strategyPerformanceReport.upsert({
+      where: {
+        strategyId_asOf: {
+          strategyId: run.strategyId,
+          asOf,
+        },
+      },
+      create: {
+        strategyId: run.strategyId,
+        strategyNameSnapshot: run.strategyNameSnapshot,
+        clusterKey,
+        asOf,
+        winRate: new Prisma.Decimal(winRate.toFixed(4)),
+        profitRatio: profitRatio !== null ? new Prisma.Decimal(profitRatio.toFixed(4)) : null,
+        avgReturnPct: new Prisma.Decimal(avgReturn.toFixed(6)),
+        maxDrawdown: new Prisma.Decimal(maxDD.toFixed(6)),
+        recommendationCount: recCount,
+      },
+      update: {
+        strategyNameSnapshot: run.strategyNameSnapshot,
+        winRate: new Prisma.Decimal(winRate.toFixed(4)),
+        profitRatio: profitRatio !== null ? new Prisma.Decimal(profitRatio.toFixed(4)) : null,
+        avgReturnPct: new Prisma.Decimal(avgReturn.toFixed(6)),
+        maxDrawdown: new Prisma.Decimal(maxDD.toFixed(6)),
+        recommendationCount: recCount,
+      },
+    });
   }
 }

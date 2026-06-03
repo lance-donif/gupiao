@@ -150,6 +150,10 @@ export class BackendRuntimeStore {
     return this.data.deleteStrategy(groupId, strategyId);
   }
 
+  public async getStrategyPerformanceReports(groupId: string, strategyId?: string | null, limit?: number) {
+    return this.data.getStrategyPerformanceReports(groupId, strategyId, limit);
+  }
+
   public async getStrategyProfits(groupId: string, asOf: string, query?: IStrategyProfitQuery | string | null) {
     return this.data.getStrategyProfits(groupId, asOf, query);
   }

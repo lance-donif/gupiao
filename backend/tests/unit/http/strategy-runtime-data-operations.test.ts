@@ -285,8 +285,8 @@ describe('strategy runtime data operations', () => {
         win_rate: 1,
         top_return_pct: 0.2,
         worst_return_pct: 0.2,
-        live: { sample_count: 1, pending_count: 0, final_count: 1, avg_return_pct: 0.2, win_rate: 1 },
-        t1: { sample_count: 1, pending_count: 1, final_count: 0, avg_return_pct: null, win_rate: null },
+        live: { sample_count: 1, pending_count: 0, final_count: 1, avg_return_pct: 0.2, win_rate: 1, max_drawdown_pct: 0.2 },
+        t1: { sample_count: 1, pending_count: 1, final_count: 0, avg_return_pct: null, win_rate: null, max_drawdown_pct: null },
       },
       {
         strategy_id: 'strategy-a',
@@ -298,8 +298,8 @@ describe('strategy runtime data operations', () => {
         win_rate: 0.5,
         top_return_pct: 0.1,
         worst_return_pct: -0.05,
-        live: { sample_count: 2, pending_count: 0, final_count: 2, avg_return_pct: 0.025, win_rate: 0.5 },
-        t1: { sample_count: 2, pending_count: 2, final_count: 0, avg_return_pct: null, win_rate: null },
+        live: { sample_count: 2, pending_count: 0, final_count: 2, avg_return_pct: 0.025, win_rate: 0.5, max_drawdown_pct: -0.05 },
+        t1: { sample_count: 2, pending_count: 2, final_count: 0, avg_return_pct: null, win_rate: null, max_drawdown_pct: null },
       },
     ]);
   });
@@ -588,6 +588,103 @@ describe('strategy runtime data operations', () => {
       status: 'FALLBACK',
     });
     expect(queries.some(sql => sql.includes('AND (r."asOf" + interval'))).toBe(false);
+  });
+
+  it('reads strategy performance reports ordered by asOf DESC and formatted as numbers', async () => {
+    let lastSql = '';
+    const pool = {
+      query: async (sql: string) => {
+        lastSql = sql;
+        if (sql.includes('FROM public."StrategyPerformanceReport"')) {
+          return {
+            rows: [
+              {
+                id: 'report-1',
+                strategyId: 'strategy-a',
+                strategyNameSnapshot: '策略A快照',
+                clusterKey: 'global',
+                asOf: '2026-05-25T15:59:59.999Z',
+                winRate: '0.7500',
+                profitRatio: '2.5000',
+                avgReturnPct: '0.038200',
+                maxDrawdown: '-0.012300',
+                recommendationCount: 8,
+                createdAt: '2026-05-25T16:00:00.000Z',
+              },
+              {
+                id: 'report-2',
+                strategyId: 'strategy-a',
+                strategyNameSnapshot: '策略A快照',
+                clusterKey: 'global',
+                asOf: '2026-05-20T15:59:59.999Z',
+                winRate: '0.5000',
+                profitRatio: '1.2000',
+                avgReturnPct: '0.015000',
+                maxDrawdown: '-0.008000',
+                recommendationCount: 6,
+                createdAt: '2026-05-20T16:00:00.000Z',
+              },
+            ],
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    const data = new RuntimeDataOperations({ options: { pgPool: pool } } as any);
+
+    const rows = await data.getStrategyPerformanceReports('main', undefined, 10);
+
+    expect(lastSql).toContain('FROM public."StrategyPerformanceReport"');
+    expect(lastSql).toContain('WHERE "clusterKey" = $1');
+    expect(lastSql).toContain('ORDER BY "asOf" DESC');
+    expect(lastSql).toContain('LIMIT $2');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.strategy_id).toBe('strategy-a');
+    expect(rows[0]?.win_rate).toBe(0.75);
+    expect(rows[0]?.profit_ratio).toBe(2.5);
+    expect(rows[0]?.avg_return_pct).toBeCloseTo(0.0382, 4);
+    expect(rows[0]?.max_drawdown).toBeCloseTo(-0.0123, 4);
+    expect(rows[0]?.recommendation_count).toBe(8);
+    expect(rows[1]?.win_rate).toBe(0.5);
+  });
+
+  it('filters strategy performance reports by strategyId when provided', async () => {
+    let lastSql = '';
+    let lastParams: unknown[] | undefined;
+    const pool = {
+      query: async (sql: string, params?: unknown[]) => {
+        lastSql = sql;
+        lastParams = params;
+        if (sql.includes('FROM public."StrategyPerformanceReport"')) {
+          return {
+            rows: [{
+              id: 'report-3',
+              strategyId: 'strategy-b',
+              strategyNameSnapshot: '策略B快照',
+              clusterKey: 'global',
+              asOf: '2026-05-22T15:59:59.999Z',
+              winRate: null,
+              profitRatio: null,
+              avgReturnPct: null,
+              maxDrawdown: null,
+              recommendationCount: 0,
+              createdAt: '2026-05-22T16:00:00.000Z',
+            }],
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    const data = new RuntimeDataOperations({ options: { pgPool: pool } } as any);
+
+    const rows = await data.getStrategyPerformanceReports('main', 'strategy-b', 20);
+
+    expect(lastSql).toContain('AND "strategyId" = $2');
+    expect(lastParams).toEqual(['global', 'strategy-b', 20]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.strategy_id).toBe('strategy-b');
+    expect(rows[0]?.win_rate).toBeNull();
+    expect(rows[0]?.profit_ratio).toBeNull();
   });
 
   it('sorts dashboard network edges after collecting all candidates', async () => {

@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { CoverageInitializationRepository } from '../repositories/coverage-initialization-repository.js';
 import { FactSnapshotService } from './limitup-evidence-initialization.js';
+import { IStrategyExperimentConfig } from './strategy-experiment-core.js';
 
 // --- 动态指数半衰期时间衰减算法 ---
 const calculateTimeDecay = (
@@ -31,6 +32,7 @@ export interface IScoringEngineInput {
   readonly scoringProfile?: 'short_news' | 'industry_cycle' | 'fundamental_theme' | 'custom';
   readonly halfLifeDays?: number;
   readonly maxWindowDays?: number;
+  readonly strategyConfig?: IStrategyExperimentConfig;
 }
 
 export interface IScoringEngineOutput {
@@ -829,7 +831,10 @@ const average = (values: readonly number[]): number | null => {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 };
 
-const calculateMarketSignalScore = (candlesDesc: readonly any[]): IMarketSignalScore => {
+export const calculateMarketSignalScore = (
+  candlesDesc: readonly any[],
+  strategyConfig?: IStrategyExperimentConfig,
+): IMarketSignalScore => {
   const candles = [...candlesDesc].sort((left, right) => left.tradingDay.getTime() - right.tradingDay.getTime());
   if (candles.length < 6) {
     return {
@@ -881,18 +886,86 @@ const calculateMarketSignalScore = (candlesDesc: readonly any[]): IMarketSignalS
     && latestClose >= avgClose20,
   );
 
-  const momentum5Score = momentum5dPct === null ? 0 : clamp((momentum5dPct + 0.02) / 0.1, 0, 1) * 6;
-  const momentum20Score = momentum20dPct === null ? 0 : clamp((momentum20dPct + 0.03) / 0.18, 0, 1) * 5;
-  const volumeScore = volumeRatio20d === null ? 0 : clamp((volumeRatio20d - 1) / 1.5, 0, 1) * 4;
-  const breakoutScore = breakout20d
-    ? 3
-    : (previous20High > 0 && latestClose >= previous20High * 0.97 ? 1.5 : 0);
-  const compressionScore = volatilityCompression ? 2 : 0;
-  const score = Number(clamp(
-    momentum5Score + momentum20Score + volumeScore + breakoutScore + compressionScore,
-    0,
-    MARKET_SIGNAL_SCORE_MAX,
-  ).toFixed(4));
+  // 映射基本组件原始得分 (0 到 1)
+  const S_m5 = momentum5dPct === null ? 0 : clamp((momentum5dPct + 0.02) / 0.1, 0, 1);
+  const S_m20 = momentum20dPct === null ? 0 : clamp((momentum20dPct + 0.03) / 0.18, 0, 1);
+  const S_vol = volumeRatio20d === null ? 0 : clamp((volumeRatio20d - 1) / 1.5, 0, 1);
+  const S_br = breakout20d
+    ? 1
+    : (previous20High > 0 && latestClose >= previous20High * 0.97 ? 0.5 : 0);
+  const S_cmp = volatilityCompression ? 1 : 0;
+
+  // 新增指标 1：斐波那契回调计算与打分
+  const fibLookback = strategyConfig?.fibonacciLookbackDays ?? 60;
+  const fibThreshold = strategyConfig?.fibonacciThresholdPct ?? 0.015;
+  const fibCandles = candles.slice(-fibLookback);
+  let fibHit = false;
+  let matchedFibLevel: number | null = null;
+  if (fibCandles.length >= 10) {
+    const fibHigh = Math.max(...fibCandles.map(c => toNumber(c.high)));
+    const fibLow = Math.min(...fibCandles.map(c => toNumber(c.low)));
+    const diff = fibHigh - fibLow;
+    if (diff > 0) {
+      const targetLevels = [0.382, 0.500, 0.618];
+      for (const r of targetLevels) {
+        const levelVal = fibHigh - r * diff;
+        if (Math.abs(latestClose - levelVal) / latestClose <= fibThreshold) {
+          fibHit = true;
+          matchedFibLevel = r;
+          break;
+        }
+      }
+    }
+  }
+  const S_fib = fibHit ? 1 : 0;
+
+  // 新增指标 2：支撑压力检测与打分
+  const srLookback = strategyConfig?.supportResistanceLookbackDays ?? 60;
+  const srThreshold = strategyConfig?.supportResistanceThresholdPct ?? 0.015;
+  const srCandles = candles.slice(-srLookback);
+  let srHit = false;
+  let srType: 'support' | 'resistance' | null = null;
+  if (srCandles.length >= 10) {
+    const srHigh = Math.max(...srCandles.map(c => toNumber(c.high)));
+    const srLow = Math.min(...srCandles.map(c => toNumber(c.low)));
+    const nearSupport = Math.abs(latestClose - srLow) / latestClose <= srThreshold;
+    const nearResistance = Math.abs(latestClose - srHigh) / latestClose <= srThreshold;
+    if (nearSupport) {
+      srHit = true;
+      srType = 'support';
+    } else if (nearResistance) {
+      srHit = true;
+      srType = 'resistance';
+    }
+  }
+  const S_sr = srHit ? 1 : 0;
+
+  // 行情权重配置读取与归一化打分
+  const w = strategyConfig?.marketWeights ?? {
+    momentum5d: 6,
+    momentum20d: 5,
+    volumeRatio: 4,
+    breakout: 3,
+    compression: 2,
+    fibonacci: 0,
+    supportResistance: 0,
+  };
+  const totalWeight = w.momentum5d + w.momentum20d + w.volumeRatio + w.breakout + w.compression + w.fibonacci + w.supportResistance;
+  const weightedSum =
+    (w.momentum5d * S_m5) +
+    (w.momentum20d * S_m20) +
+    (w.volumeRatio * S_vol) +
+    (w.breakout * S_br) +
+    (w.compression * S_cmp) +
+    (w.fibonacci * S_fib) +
+    (w.supportResistance * S_sr);
+
+  const score = totalWeight > 0
+    ? Number(clamp((weightedSum / totalWeight) * 20, 0, 20).toFixed(4))
+    : 0;
+
+  const fibDesc = fibHit ? `斐波那契回调 ${matchedFibLevel! * 100}% 水平命中` : '斐波那契回调未命中';
+  const srDesc = srHit ? `支撑压力位 [${srType!}] 触碰` : '支撑压力未触碰';
 
   return {
     score,
@@ -906,6 +979,7 @@ const calculateMarketSignalScore = (candlesDesc: readonly any[]): IMarketSignalS
     recentWeekGainExceeded: momentum5dPct !== null && momentum5dPct > 0.2,
     reasons: [
       `市场确认信号 ${score.toFixed(4)}/20：5日涨跌 ${momentum5dPct === null ? 'NA' : (momentum5dPct * 100).toFixed(2)}%，20日涨跌 ${momentum20dPct === null ? 'NA' : (momentum20dPct * 100).toFixed(2)}%，20日量比 ${volumeRatio20d === null ? 'NA' : volumeRatio20d.toFixed(2)}`,
+      `量化指标：${fibDesc}，${srDesc}`,
       `行情可见边界 tradingDay <= asOf，最新用于评分交易日 ${latest.tradingDay.toISOString().slice(0, 10)}`,
       `20日突破 ${breakout20d ? '是' : '否'}，波动压缩/突破组合 ${volatilityCompression ? '是' : '否'}`,
     ],
@@ -1143,11 +1217,19 @@ const loadRecentCandlesByStockId = async (
     readonly clusterKey: string;
     readonly asOf: Date;
     readonly stockIds: readonly string[];
+    readonly strategyConfig?: IStrategyExperimentConfig;
   },
 ): Promise<Map<string, any[]>> => {
   if (input.stockIds.length === 0) {
     return new Map();
   }
+
+  const lookbackDays = Math.max(
+    40,
+    input.strategyConfig?.fibonacciLookbackDays ?? 60,
+    input.strategyConfig?.supportResistanceLookbackDays ?? 60
+  );
+  const calendarDays = Math.ceil(lookbackDays * 1.6) + 15;
 
   if (typeof prisma?.$queryRawUnsafe === 'function') {
     const rows = await prisma.$queryRawUnsafe(
@@ -1159,7 +1241,7 @@ const loadRecentCandlesByStockId = async (
         '  FROM "Candle" c',
         '  WHERE c."stockId" = s.id AND c."tradingDay" <= $2',
         '  ORDER BY c."tradingDay" DESC',
-        '  LIMIT 40',
+        `  LIMIT ${lookbackDays}`,
         ') c ON TRUE',
         'WHERE s."clusterKey" = $1 AND s.id = ANY($3::text[])',
         'ORDER BY s.id ASC, c."tradingDay" DESC',
@@ -1179,7 +1261,7 @@ const loadRecentCandlesByStockId = async (
     return candlesByStockId;
   }
 
-  const marketWindowStart = new Date(input.asOf.getTime() - 90 * 24 * 60 * 60 * 1000);
+  const marketWindowStart = new Date(input.asOf.getTime() - calendarDays * 24 * 60 * 60 * 1000);
   const candles = await prisma.candle.findMany({
     where: {
       stockId: { in: [...input.stockIds] },
@@ -1198,7 +1280,7 @@ const loadRecentCandlesByStockId = async (
   for (const candle of candles) {
     const stockId = String(candle.stockId);
     const list = candlesByStockId.get(stockId) ?? [];
-    if (list.length < 40) {
+    if (list.length < lookbackDays) {
       list.push(candle);
       candlesByStockId.set(stockId, list);
     }
@@ -1240,7 +1322,13 @@ const persistMarketSignals = async (
 
 const loadMarketSignals = async (
   prisma: any,
-  input: { readonly traceId: string; readonly clusterKey: string; readonly asOf: Date; readonly symbols: readonly string[] },
+  input: {
+    readonly traceId: string;
+    readonly clusterKey: string;
+    readonly asOf: Date;
+    readonly symbols: readonly string[];
+    readonly strategyConfig?: IStrategyExperimentConfig;
+  },
 ): Promise<Map<string, IMarketSignalScore>> => {
   const requestedSymbols = [...new Set(input.symbols)];
   const results = await loadExistingMarketSignals(prisma, {
@@ -1295,10 +1383,11 @@ const loadMarketSignals = async (
     clusterKey: input.clusterKey,
     asOf: input.asOf,
     stockIds: [...stockIdToSymbol.keys()],
+    strategyConfig: input.strategyConfig,
   });
 
   for (const [stockId, symbol] of stockIdToSymbol.entries()) {
-    const marketSignal = calculateMarketSignalScore(candlesByStockId.get(stockId) ?? []);
+    const marketSignal = calculateMarketSignalScore(candlesByStockId.get(stockId) ?? [], input.strategyConfig);
     results.set(symbol, marketSignal);
   }
 
@@ -1750,6 +1839,7 @@ export class ScoringContributionEngine {
       clusterKey,
       asOf,
       symbols: [...contribsBySymbol.keys()],
+      strategyConfig: input.strategyConfig,
     });
     timings.loadMarketSignalsMs = Date.now() - marketSignalStartedAt;
 

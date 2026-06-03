@@ -59,6 +59,8 @@ export interface IDashboardRecommendationItem {
   readonly score_breakdown: Record<string, unknown>;
   readonly trace_id: string;
   readonly strategy_id: string | null;
+  readonly win_rate_t1: number | null;
+  readonly win_rate_t3: number | null;
 }
 
 export interface IDashboardExecutionHistoryItem {
@@ -385,6 +387,7 @@ export interface IStrategyProfitHorizonSummary {
   readonly final_count: number;
   readonly avg_return_pct: number | null;
   readonly win_rate: number | null;
+  readonly max_drawdown_pct: number | null;
 }
 
 export interface IStrategyProfitRow {
@@ -524,3 +527,18 @@ export interface IMLRecommendationQuery {
   readonly topN: number;
   readonly forceRefresh: boolean;
 }
+
+export interface IStrategyPerformanceReportPayload {
+  readonly id: string;
+  readonly strategy_id: string;
+  readonly strategy_name_snapshot: string;
+  readonly cluster_key: string;
+  readonly as_of: string;
+  readonly win_rate: number | null;
+  readonly profit_ratio: number | null;
+  readonly avg_return_pct: number | null;
+  readonly max_drawdown: number | null;
+  readonly recommendation_count: number;
+  readonly created_at: string;
+}
+

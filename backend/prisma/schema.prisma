@@ -237,6 +237,7 @@ model StrategyDefinition {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
   runs        StrategyRun[]
+  reports     StrategyPerformanceReport[]
 
   @@index([clusterKey, name])
   @@index([clusterKey, enabled])
@@ -588,4 +589,23 @@ model CausalSignalCandidate {
   @@index([clusterKey, asOf, status])
   @@index([clusterKey, assetOrThemeKeyword])
   @@index([newsId])
+}
+
+model StrategyPerformanceReport {
+  id                   String   @id @default(cuid())
+  strategyId           String
+  strategyNameSnapshot String
+  clusterKey           String   @default("global")
+  asOf                 DateTime
+  winRate              Decimal? @db.Decimal(5, 4)
+  profitRatio          Decimal? @db.Decimal(8, 4)
+  avgReturnPct         Decimal? @db.Decimal(8, 6)
+  maxDrawdown          Decimal? @db.Decimal(8, 6)
+  recommendationCount  Int
+  createdAt            DateTime @default(now())
+
+  strategy             StrategyDefinition @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  @@unique([strategyId, asOf])
+  @@index([clusterKey, asOf])
 }

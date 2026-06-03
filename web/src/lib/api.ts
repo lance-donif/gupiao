@@ -21,6 +21,7 @@ import type {
   RuntimeGraphOut,
   StrategyConfig,
   StrategyDefinition,
+  StrategyPerformanceReport,
   StrategyProfitPayload,
   TraceCostOut,
   TraceEvent,
@@ -369,5 +370,15 @@ export const api = {
       qs.set('sort_order', params.sort_order);
     }
     return http<StrategyProfitPayload>(`/api/strategy/profits?${qs.toString()}`);
+  },
+  getStrategyPerformanceReports(group_id: string, strategy_id?: string | null, limit?: number) {
+    const qs = new URLSearchParams({ group_id });
+    if (strategy_id && strategy_id !== 'all') {
+      qs.set('strategy_id', strategy_id);
+    }
+    if (limit && Number.isInteger(limit) && limit > 0) {
+      qs.set('limit', String(limit));
+    }
+    return http<StrategyPerformanceReport[]>(`/api/strategy/performance-reports?${qs.toString()}`);
   },
 };

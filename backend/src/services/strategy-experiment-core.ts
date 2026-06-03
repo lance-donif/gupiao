@@ -7,6 +7,16 @@ export interface IStrategyExperimentWeights {
   readonly market: number;
 }
 
+export interface IMarketSignalWeights {
+  readonly momentum5d: number;
+  readonly momentum20d: number;
+  readonly volumeRatio: number;
+  readonly breakout: number;
+  readonly compression: number;
+  readonly fibonacci: number;
+  readonly supportResistance: number;
+}
+
 export interface IStrategyExperimentConfig {
   readonly limit: number;
   readonly maxPerSignalType: number;
@@ -21,6 +31,13 @@ export interface IStrategyExperimentConfig {
   readonly includeSignalTypes: readonly string[];
   readonly excludeSignalTypes: readonly string[];
   readonly weights: IStrategyExperimentWeights;
+  
+  // Market signals customization
+  readonly marketWeights: IMarketSignalWeights;
+  readonly fibonacciLookbackDays: number;
+  readonly fibonacciThresholdPct: number;
+  readonly supportResistanceLookbackDays: number;
+  readonly supportResistanceThresholdPct: number;
 }
 
 export interface IStrategyExperimentSignal {
@@ -47,6 +64,9 @@ export interface IStrategyExperimentFeatureInput {
   readonly currentPrice: number | null;
   readonly returnPct: number | null;
   readonly returnStatus: string;
+  
+  // Candles history for strategy-specific recalculation
+  readonly candles?: readonly any[];
 }
 
 export interface IStrategyExperimentScoreBreakdown {
@@ -209,6 +229,22 @@ const normalizeWeights = (value: unknown): IStrategyExperimentWeights => {
   };
 };
 
+const normalizeMarketWeights = (value: unknown): IMarketSignalWeights => {
+  if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value))) {
+    throw new Error('Invalid marketWeights value');
+  }
+  const weights = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return {
+    momentum5d: parseNonNegativeNumber(weights.momentum5d, 6),
+    momentum20d: parseNonNegativeNumber(weights.momentum20d, 5),
+    volumeRatio: parseNonNegativeNumber(weights.volumeRatio, 4),
+    breakout: parseNonNegativeNumber(weights.breakout, 3),
+    compression: parseNonNegativeNumber(weights.compression, 2),
+    fibonacci: parseNonNegativeNumber(weights.fibonacci, 0),
+    supportResistance: parseNonNegativeNumber(weights.supportResistance, 0),
+  };
+};
+
 export const defaultStrategyExperimentConfig = (): IStrategyExperimentConfig => ({
   limit: 30,
   maxPerSignalType: 30,
@@ -228,6 +264,19 @@ export const defaultStrategyExperimentConfig = (): IStrategyExperimentConfig => 
     exposure: 1,
     market: 1,
   },
+  marketWeights: {
+    momentum5d: 6,
+    momentum20d: 5,
+    volumeRatio: 4,
+    breakout: 3,
+    compression: 2,
+    fibonacci: 0,
+    supportResistance: 0,
+  },
+  fibonacciLookbackDays: 60,
+  fibonacciThresholdPct: 0.015,
+  supportResistanceLookbackDays: 60,
+  supportResistanceThresholdPct: 0.015,
 });
 
 export const normalizeStrategyExperimentConfig = (raw: unknown): IStrategyExperimentConfig => {
@@ -250,6 +299,11 @@ export const normalizeStrategyExperimentConfig = (raw: unknown): IStrategyExperi
     includeSignalTypes: parseStringList(input.includeSignalTypes),
     excludeSignalTypes: parseStringList(input.excludeSignalTypes),
     weights: normalizeWeights(input.weights),
+    marketWeights: normalizeMarketWeights(input.marketWeights),
+    fibonacciLookbackDays: parsePositiveInteger(input.fibonacciLookbackDays, defaults.fibonacciLookbackDays),
+    fibonacciThresholdPct: parseNonNegativeNumber(input.fibonacciThresholdPct, defaults.fibonacciThresholdPct),
+    supportResistanceLookbackDays: parsePositiveInteger(input.supportResistanceLookbackDays, defaults.supportResistanceLookbackDays),
+    supportResistanceThresholdPct: parseNonNegativeNumber(input.supportResistanceThresholdPct, defaults.supportResistanceThresholdPct),
   };
 };
 

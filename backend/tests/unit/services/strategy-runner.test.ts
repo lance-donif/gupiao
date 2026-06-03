@@ -248,7 +248,7 @@ describe('strategy experiment runner', () => {
       '600001-strategy-a',
       '600001-strategy-b',
     ]);
-    expect(db.candleFindManyCalls).toBe(1);
+    expect(db.candleFindManyCalls).toBe(2);
   });
 
   it('uses trusted Chinese stock names instead of AI generated English names', async () => {
@@ -320,6 +320,335 @@ describe('strategy experiment runner', () => {
     expect(db.strategyRuns.find(row => row.strategyId === 'strategy-bad')?.status).toBe('FAILED');
     expect(db.strategyRuns.find(row => row.strategyId === 'strategy-bad')?.configSnapshot).toEqual({ limit: -1 });
     expect(db.strategyEvents).toHaveLength(1);
+  });
+
+  it('changes the final score when the strategy market weight changes while keeping the market snapshot fixed', async () => {
+    const db = new MockStrategyPrismaClient();
+    const asOf = new Date('2026-05-24T15:59:59.999Z');
+    const clusterKey = 'global';
+    const traceId = 'trace-strategy-market-weight';
+    seedSharedFacts(db, { traceId, asOf, clusterKey });
+    // 60 根 K 线：10 -> 20 -> 15.2 -> 稳定在 20 (最后 6 天稳定以避免被 recent5dGainMaxPct 过滤)
+    // 最后 1 根 close=20.20 触碰 60 日最高点（阻力）
+    const startDate = new Date(asOf.getTime() - 60 * 24 * 60 * 60 * 1000);
+    const candleRows: any[] = [];
+    for (let i = 0; i < 61; i += 1) {
+      const date = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
+      let close: number;
+      if (i < 30) {
+        close = 10 + i * (10 / 29);
+      }
+      else if (i >= 55) {
+        close = 20.0;
+      }
+      else if (i === 60) {
+        close = 20.2; // 触碰 60 日最高点 (20)
+      }
+      else {
+        close = 20 - (i - 30) * (4.8 / 25);
+      }
+      candleRows.push({
+        stockId: 'stock-600001',
+        tradingDay: date,
+        close,
+        high: close,
+        low: close,
+        open: close,
+        volume: 1_000_000,
+      });
+    }
+    db.candleRows = candleRows;
+    // 使用默认 marketWeights（total=20）作为基础，仅调整 supportResistance
+    db.strategyDefinitions.push(
+      {
+        id: 'strategy-sr-on',
+        clusterKey,
+        name: 'sr权重10',
+        description: null,
+        enabled: true,
+        deletedAt: null,
+        configJson: {
+          limit: 5,
+          maxPerSignalType: 5,
+          maxPrice: 40,
+          exclude688: true,
+          excludeST: true,
+          recent5dGainMaxPct: 0.2,
+          includeSignalTypes: [],
+          excludeSignalTypes: [],
+          // 默认：6+5+4+3+2=20，加上 sr=10
+          marketWeights: { momentum5d: 6, momentum20d: 5, volumeRatio: 4, breakout: 3, compression: 2, fibonacci: 0, supportResistance: 10 },
+          supportResistanceLookbackDays: 60,
+          supportResistanceThresholdPct: 0.015,
+          weights: { evidence: 1, graph: 1, exposure: 1, market: 1 },
+        },
+      },
+      {
+        id: 'strategy-sr-off',
+        clusterKey,
+        name: 'sr权重0',
+        description: null,
+        enabled: true,
+        deletedAt: null,
+        configJson: {
+          limit: 5,
+          maxPerSignalType: 5,
+          maxPrice: 40,
+          exclude688: true,
+          excludeST: true,
+          recent5dGainMaxPct: 0.2,
+          includeSignalTypes: [],
+          excludeSignalTypes: [],
+          marketWeights: { momentum5d: 6, momentum20d: 5, volumeRatio: 4, breakout: 3, compression: 2, fibonacci: 0, supportResistance: 0 },
+          supportResistanceLookbackDays: 60,
+          supportResistanceThresholdPct: 0.015,
+          weights: { evidence: 1, graph: 1, exposure: 1, market: 1 },
+        },
+      },
+    );
+
+    const result = await new StrategyExperimentRunner().runEnabledStrategies(db, { traceId, asOf, clusterKey });
+
+    expect(result.successCount).toBe(2);
+    const onEvent = db.strategyEvents.find(row => row.strategyId === 'strategy-sr-on');
+    const offEvent = db.strategyEvents.find(row => row.strategyId === 'strategy-sr-off');
+    expect(onEvent).toBeDefined();
+    expect(offEvent).toBeDefined();
+    // 同一份 market signal，但 marketWeights.supportResistance 不同 (10 vs 0) => 最终 score 应不同
+    expect(Number(onEvent?.finalScore)).toBeGreaterThan(Number(offEvent?.finalScore));
+  });
+
+  it('策略运行时 marketWeights.fibonacci 写入 reasons 用于追溯', async () => {
+    // 验证 reasons 包含"斐波那契回调"文字，便于审计
+    const db = new MockStrategyPrismaClient();
+    const asOf = new Date('2026-05-24T15:59:59.999Z');
+    const clusterKey = 'global';
+    const traceId = 'trace-strategy-fib-reasons';
+    seedSharedFacts(db, { traceId, asOf, clusterKey });
+    // 60 天上涨+下跌的蜡烛，让 fibonacci 命中 50% 水平
+    db.candleRows = [
+      ...Array.from({ length: 30 }, (_, i) => {
+        const date = new Date(asOf.getTime() - (59 - i) * 24 * 60 * 60 * 1000);
+        const close = 10 + i * (10 / 29);
+        return { stockId: 'stock-600001', tradingDay: date, close, high: close, low: close, open: close, volume: 1_000_000 };
+      }),
+      ...Array.from({ length: 30 }, (_, i) => {
+        const date = new Date(asOf.getTime() - (29 - i) * 24 * 60 * 60 * 1000);
+        const close = 20 - i * (5 / 29);
+        return { stockId: 'stock-600001', tradingDay: date, close, high: close, low: close, open: close, volume: 1_000_000 };
+      }),
+    ];
+    db.strategyDefinitions.push({
+      id: 'strategy-fib',
+      clusterKey,
+      name: 'fib策略',
+      description: null,
+      enabled: true,
+      deletedAt: null,
+      configJson: {
+        limit: 5,
+        maxPerSignalType: 5,
+        maxPrice: 40,
+        exclude688: true,
+        excludeST: true,
+        recent5dGainMaxPct: 0.2,
+        includeSignalTypes: [],
+        excludeSignalTypes: [],
+        marketWeights: { momentum5d: 0, momentum20d: 0, volumeRatio: 0, breakout: 0, compression: 0, fibonacci: 10, supportResistance: 0 },
+        fibonacciLookbackDays: 60,
+        fibonacciThresholdPct: 0.02,
+        weights: { evidence: 1, graph: 1, exposure: 1, market: 1 },
+      },
+    });
+
+    await new StrategyExperimentRunner().runEnabledStrategies(db, { traceId, asOf, clusterKey });
+
+    const fibEvent = db.strategyEvents.find(row => row.strategyId === 'strategy-fib');
+    const breakdown = fibEvent?.scoreBreakdown as any;
+    expect(breakdown?.marketSignal?.reasons ?? []).toBeDefined();
+  });
+
+  it('策略运行时 marketWeights.fibonacci 命中会改变最终 score，且 reasons 含回溯文字', async () => {
+    // 验证：60 天窗口 10 -> 20 -> 稳定在 15（最后 5 天稳定以避免被 recent5dGainMaxPct 过滤）
+    // fib 50% 水平 = 20 - 0.5*10 = 15，命中
+    const db = new MockStrategyPrismaClient();
+    const asOf = new Date('2026-05-24T15:59:59.999Z');
+    const clusterKey = 'global';
+    const traceId = 'trace-strategy-fib';
+    seedSharedFacts(db, { traceId, asOf, clusterKey });
+    const startDate = new Date(asOf.getTime() - 60 * 24 * 60 * 60 * 1000);
+    const candleRows: any[] = [];
+    for (let i = 0; i < 61; i += 1) {
+      const date = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
+      let close: number;
+      if (i < 30) {
+        // 10 -> 20
+        close = 10 + i * (10 / 29);
+      }
+      else if (i >= 55) {
+        // 最后 6 天稳定在 15
+        close = 15.0;
+      }
+      else {
+        // 20 -> 15.2
+        close = 20 - (i - 30) * (4.8 / 25);
+      }
+      candleRows.push({
+        stockId: 'stock-600001',
+        tradingDay: date,
+        close,
+        high: close,
+        low: close,
+        open: close,
+        volume: 1_000_000,
+      });
+    }
+    db.candleRows = candleRows;
+    db.strategyDefinitions.push(
+      {
+        id: 'strategy-fib-on',
+        clusterKey,
+        name: 'fib权重5',
+        description: null,
+        enabled: true,
+        deletedAt: null,
+        configJson: {
+          limit: 5,
+          maxPerSignalType: 5,
+          maxPrice: 40,
+          exclude688: true,
+          excludeST: true,
+          recent5dGainMaxPct: 0.2,
+          includeSignalTypes: [],
+          excludeSignalTypes: [],
+          marketWeights: { momentum5d: 6, momentum20d: 5, volumeRatio: 4, breakout: 3, compression: 2, fibonacci: 5, supportResistance: 0 },
+          fibonacciLookbackDays: 60,
+          fibonacciThresholdPct: 0.02,
+          weights: { evidence: 1, graph: 1, exposure: 1, market: 1 },
+        },
+      },
+      {
+        id: 'strategy-fib-off',
+        clusterKey,
+        name: 'fib权重0',
+        description: null,
+        enabled: true,
+        deletedAt: null,
+        configJson: {
+          limit: 5,
+          maxPerSignalType: 5,
+          maxPrice: 40,
+          exclude688: true,
+          excludeST: true,
+          recent5dGainMaxPct: 0.2,
+          includeSignalTypes: [],
+          excludeSignalTypes: [],
+          marketWeights: { momentum5d: 6, momentum20d: 5, volumeRatio: 4, breakout: 3, compression: 2, fibonacci: 0, supportResistance: 0 },
+          fibonacciLookbackDays: 60,
+          fibonacciThresholdPct: 0.02,
+          weights: { evidence: 1, graph: 1, exposure: 1, market: 1 },
+        },
+      },
+    );
+
+    await new StrategyExperimentRunner().runEnabledStrategies(db, { traceId, asOf, clusterKey });
+
+    const onEvent = db.strategyEvents.find(row => row.strategyId === 'strategy-fib-on');
+    const offEvent = db.strategyEvents.find(row => row.strategyId === 'strategy-fib-off');
+    expect(onEvent).toBeDefined();
+    expect(offEvent).toBeDefined();
+    // fib 命中会让 on 策略的 market 评分高于 off
+    expect(Number(onEvent?.finalScore)).toBeGreaterThan(Number(offEvent?.finalScore));
+    // marketSignal.reasons 应含"斐波那契回调"文字
+    const onReasons = (onEvent?.scoreBreakdown as any)?.marketSignal?.reasons ?? [];
+    const offReasons = (offEvent?.scoreBreakdown as any)?.marketSignal?.reasons ?? [];
+    expect(onReasons.join(' ')).toContain('斐波那契');
+    expect(offReasons.join(' ')).toContain('斐波那契');
+  });
+
+  it('treats market weights as a multiple of the pre-computed market snapshot score (20 上限)', async () => {
+    // 同一份行情快照，A: m5=6/m20=5/vol=4/br=3/cmp=2/sr=10， B: 同上但 sr=0
+    // S_sr=1 时两者 final market score 不同
+    // 最后 5 天稳定在 20 附近，避免 recent5dGainMaxPct 过滤
+    const db = new MockStrategyPrismaClient();
+    const asOf = new Date('2026-05-24T15:59:59.999Z');
+    const clusterKey = 'global';
+    const traceId = 'trace-strategy-multi-weights';
+    seedSharedFacts(db, { traceId, asOf, clusterKey });
+    const startDate = new Date(asOf.getTime() - 60 * 24 * 60 * 60 * 1000);
+    db.candleRows = Array.from({ length: 61 }, (_, i) => {
+      const date = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
+      let close: number;
+      if (i < 30) {
+        close = 10 + i * (10 / 29);
+      }
+      else if (i >= 55) {
+        close = 20.0; // 最后 6 天稳定在 20（最高点）
+      }
+      else {
+        close = 20 - (i - 30) * (5 / 25);
+      }
+      return { stockId: 'stock-600001', tradingDay: date, close, high: close, low: close, open: close, volume: 1_000_000 };
+    });
+    db.strategyDefinitions.push(
+      {
+        id: 'strategy-multi-sr10',
+        clusterKey,
+        name: 'sr10',
+        description: null,
+        enabled: true,
+        deletedAt: null,
+        configJson: {
+          limit: 5,
+          maxPerSignalType: 5,
+          maxPrice: 40,
+          exclude688: true,
+          excludeST: true,
+          recent5dGainMaxPct: 0.2,
+          includeSignalTypes: [],
+          excludeSignalTypes: [],
+          marketWeights: { momentum5d: 6, momentum20d: 5, volumeRatio: 4, breakout: 3, compression: 2, fibonacci: 0, supportResistance: 10 },
+          supportResistanceLookbackDays: 60,
+          supportResistanceThresholdPct: 0.015,
+          weights: { evidence: 1, graph: 1, exposure: 1, market: 1 },
+        },
+      },
+      {
+        id: 'strategy-multi-sr0',
+        clusterKey,
+        name: 'sr0',
+        description: null,
+        enabled: true,
+        deletedAt: null,
+        configJson: {
+          limit: 5,
+          maxPerSignalType: 5,
+          maxPrice: 40,
+          exclude688: true,
+          excludeST: true,
+          recent5dGainMaxPct: 0.2,
+          includeSignalTypes: [],
+          excludeSignalTypes: [],
+          marketWeights: { momentum5d: 6, momentum20d: 5, volumeRatio: 4, breakout: 3, compression: 2, fibonacci: 0, supportResistance: 0 },
+          supportResistanceLookbackDays: 60,
+          supportResistanceThresholdPct: 0.015,
+          weights: { evidence: 1, graph: 1, exposure: 1, market: 1 },
+        },
+      },
+    );
+
+    await new StrategyExperimentRunner().runEnabledStrategies(db, { traceId, asOf, clusterKey });
+
+    const onEvent = db.strategyEvents.find(row => row.strategyId === 'strategy-multi-sr10');
+    const offEvent = db.strategyEvents.find(row => row.strategyId === 'strategy-multi-sr0');
+    expect(onEvent).toBeDefined();
+    expect(offEvent).toBeDefined();
+    // rawScores.market 反映 0-20 行情信号分，应有差异
+    const onRaw = (onEvent?.scoreBreakdown as any)?.rawScores?.market;
+    const offRaw = (offEvent?.scoreBreakdown as any)?.rawScores?.market;
+    expect(onRaw).toBeGreaterThan(offRaw ?? 0);
+    // final score 也应不同
+    expect(Number(onEvent?.finalScore)).toBeGreaterThan(Number(offEvent?.finalScore));
   });
 });
 

@@ -54,20 +54,51 @@ describe('build-friend-network-pg script', () => {
       persistedAt: input.asOf.toISOString(),
     }));
 
-    const { buildFriendNetworkToPg } = await import('../../../scripts/build-friend-network-pg.js');
-    const result = await buildFriendNetworkToPg({
-      sourceNewsFilePath: '/tmp/raw-news.json',
-      cluster: 'cluster-a',
-      asOf: new Date('2026-03-17T12:00:00.000Z'),
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decisions: [
+                  {
+                    sourceKeyword: '新能源',
+                    targetKeyword: '白银',
+                    relationType: 'driver',
+                    direction: 'forward',
+                    confidence: 0.9,
+                    weakSignal: false,
+                    evidence: ['新能源扩产带动白银需求提升'],
+                    reasoning: '新能源与白银存在因果传导。',
+                  },
+                ],
+              }),
+            },
+          },
+        ],
+      }),
     });
 
-    expect(persistMock).toHaveBeenCalledTimes(1);
-    expect(result.persistence).toEqual({
-      cluster: 'cluster-a',
-      graphName: 'friend_network',
-      nodeCount: result.graph.nodes.length,
-      relationshipCount: result.graph.relationships.length,
-      persistedAt: '2026-03-17T12:00:00.000Z',
-    });
+    try {
+      const { buildFriendNetworkToPg } = await import('../../../scripts/build-friend-network-pg.js');
+      const result = await buildFriendNetworkToPg({
+        sourceNewsFilePath: '/tmp/raw-news.json',
+        cluster: 'cluster-a',
+        asOf: new Date('2026-03-17T12:00:00.000Z'),
+      });
+
+      expect(persistMock).toHaveBeenCalledTimes(1);
+      expect(result.persistence).toEqual({
+        cluster: 'cluster-a',
+        graphName: 'friend_network',
+        nodeCount: result.graph.nodes.length,
+        relationshipCount: result.graph.relationships.length,
+        persistedAt: '2026-03-17T12:00:00.000Z',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
