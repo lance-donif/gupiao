@@ -47,7 +47,7 @@ const DEFAULT_MAX_PER_INDUSTRY = 5;
 const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
 const DEFAULT_MIN_EXPOSURE_FACTS = process.env.TICKFLOW_API_KEY ? 500 : 100;
 const DEFAULT_TICKFLOW_REFRESH_INTERVAL_DAYS = 30;
-const DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE = 50;
+const DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE = 8;
 const NEWS_FETCH_CACHE_BUCKET_MINUTES = 15;
 const NEWS_FETCH_CACHE_TTL_MS = NEWS_FETCH_CACHE_BUCKET_MINUTES * 60 * 1000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -1470,42 +1470,82 @@ async function main(): Promise<void> {
     activeStep = null;
 
     activeStep = 'causal_signal_extraction';
-    stepStartedAt = markStepStart();
-    const causalExtractionCandidates = filterCausalExtractionCandidates(visibleCandidates);
-    if (causalExtractionCandidates.length === 0) {
-      throw new PipelineStopError('causal_signal_extraction', '没有命中经营变量/资产主题关键词的新闻，严格单向流程停止');
+    let causalSignalResult: any = null;
+    const maxStepRetries = 3;
+    const stepRetryDelayMs = 5 * 60 * 1000; // 5 minutes
+
+    for (let attempt = 1; attempt <= maxStepRetries; attempt++) {
+      if (attempt > 1) {
+        // Clean up previous attempt's step trace row to avoid compound primary key constraint violation
+        try {
+          await prisma.pipelineStepTrace.delete({
+            where: {
+              traceId_stepName: {
+                traceId,
+                stepName: 'causal_signal_extraction',
+              },
+            },
+          });
+        } catch {}
+      }
+
+      stepStartedAt = markStepStart();
+      const causalExtractionCandidates = filterCausalExtractionCandidates(visibleCandidates);
+      if (causalExtractionCandidates.length === 0) {
+        throw new PipelineStopError('causal_signal_extraction', '没有命中经营变量/资产主题关键词的新闻，严格单向流程停止');
+      }
+      await TraceManager.startStepTrace(prisma, traceId, 'causal_signal_extraction', {
+        clusterKey,
+        asOf: asOf.toISOString(),
+        extractor: process.env.CAUSAL_SIGNAL_EXTRACTOR ?? null,
+        noImplicitFallback: true,
+        visibleCandidates: visibleCandidates.length,
+        llmInputCandidates: causalExtractionCandidates.length,
+        batchSize: causalSignalBatchSize,
+        retryAttempt: attempt,
+      });
+
+      try {
+        causalSignalResult = await new CausalSignalExtractionService(createCausalSignalExtractorFromEnv()).execute(prisma, {
+          traceId,
+          asOf,
+          clusterKey,
+          news: causalExtractionCandidates.map(candidate => ({
+            id: candidate.id,
+            title: candidate.title,
+            content: candidate.content,
+            source: candidate.source,
+            publishedAt: candidate.publishedAt,
+            reprintWeight: candidate.reprintWeight,
+          })),
+          batchSize: Number.isFinite(causalSignalBatchSize) ? causalSignalBatchSize : DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE,
+          onBatchComplete: event => console.log(
+            `[causal_signal_extraction] batch ${event.batchIndex}/${event.batchCount} size=${event.batchSize} elapsedMs=${event.elapsedMs} signalCount=${event.signalCount}`,
+          ),
+        });
+        if (causalSignalResult.candidateCount === 0) {
+          throw new PipelineStopError('causal_signal_extraction', 'AI/结构化因果候选为空，严格单向流程停止');
+        }
+        markStepEnd('causal_signal_extraction', stepStartedAt);
+        await TraceManager.completeStepTrace(prisma, traceId, 'causal_signal_extraction', causalSignalResult);
+        break;
+      } catch (error) {
+        if (error instanceof PipelineStopError) {
+          throw error;
+        }
+        console.error(`[causal_signal_extraction] Attempt ${attempt} failed: ${error instanceof Error ? error.message : String(error)}`);
+
+        try {
+          await TraceManager.failStepTrace(prisma, traceId, 'causal_signal_extraction', error instanceof Error ? error.message : String(error));
+        } catch {}
+
+        if (attempt === maxStepRetries) {
+          throw error;
+        }
+        console.log(`[causal_signal_extraction] Waiting ${stepRetryDelayMs / 1000}s before retrying...`);
+        await new Promise(resolve => setTimeout(resolve, stepRetryDelayMs));
+      }
     }
-    await TraceManager.startStepTrace(prisma, traceId, 'causal_signal_extraction', {
-      clusterKey,
-      asOf: asOf.toISOString(),
-      extractor: process.env.CAUSAL_SIGNAL_EXTRACTOR ?? null,
-      noImplicitFallback: true,
-      visibleCandidates: visibleCandidates.length,
-      llmInputCandidates: causalExtractionCandidates.length,
-      batchSize: causalSignalBatchSize,
-    });
-    const causalSignalResult = await new CausalSignalExtractionService(createCausalSignalExtractorFromEnv()).execute(prisma, {
-      traceId,
-      asOf,
-      clusterKey,
-      news: causalExtractionCandidates.map(candidate => ({
-        id: candidate.id,
-        title: candidate.title,
-        content: candidate.content,
-        source: candidate.source,
-        publishedAt: candidate.publishedAt,
-        reprintWeight: candidate.reprintWeight,
-      })),
-      batchSize: Number.isFinite(causalSignalBatchSize) ? causalSignalBatchSize : DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE,
-      onBatchComplete: event => console.log(
-        `[causal_signal_extraction] batch ${event.batchIndex}/${event.batchCount} size=${event.batchSize} elapsedMs=${event.elapsedMs} signalCount=${event.signalCount}`,
-      ),
-    });
-    if (causalSignalResult.candidateCount === 0) {
-      throw new PipelineStopError('causal_signal_extraction', 'AI/结构化因果候选为空，严格单向流程停止');
-    }
-    markStepEnd('causal_signal_extraction', stepStartedAt);
-    await TraceManager.completeStepTrace(prisma, traceId, 'causal_signal_extraction', causalSignalResult);
     activeStep = null;
 
     activeStep = 'graph_snapshot';
@@ -1689,7 +1729,7 @@ async function main(): Promise<void> {
       aktoolsExposure: aktoolsExposureResult,
       tickflowExposure: tickflowExposureResult,
       keywordPerformancePenalty: keywordPerformancePenaltyResult,
-      causalSignalCandidates: causalSignalResult.candidateCount,
+      causalSignalCandidates: causalSignalResult?.candidateCount ?? 0,
       graphNodes: graph.nodeCount,
       graphEdges: graph.edgeCount,
       recommendationsCreated: backtestResult.recommendationsCreated,
@@ -1723,7 +1763,7 @@ async function main(): Promise<void> {
         aktoolsExposure: aktoolsExposureResult,
         tickflowExposure: tickflowExposureResult,
         keywordPerformancePenalty: keywordPerformancePenaltyResult,
-        causalSignalCandidates: causalSignalResult.candidateCount,
+        causalSignalCandidates: causalSignalResult?.candidateCount ?? 0,
         newsQuality: newsQualityResult,
         stepTimings,
       },

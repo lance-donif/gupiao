@@ -1,3 +1,5 @@
+import { fetchWithRetry } from './ai-client-utils.js';
+
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_MAX_REQUEST_CHARS = 240000;
 const KEYWORDS_PER_STOCK = 5;
@@ -182,47 +184,58 @@ export class OpenAiCompatibleStockKeywordRequester implements IAiStockKeywordReq
   }
 
   public async requestKeywords(input: IAiStockKeywordRequestInput): Promise<IAiStockKeywordPayload> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 60000);
+    const messages: IOpenAiCompatibleMessage[] = [
+      {
+        role: 'system',
+        content: '你只输出严格JSON。任何不确定的内容要用较低confidence表达，但不能伪造新闻证据。',
+      },
+      {
+        role: 'user',
+        content: input.prompt,
+      },
+    ];
+    const body = JSON.stringify({
+      model: this.options.model,
+      messages,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+    });
+
+    let response: Response;
     try {
-      const messages: IOpenAiCompatibleMessage[] = [
+      response = await fetchWithRetry(
+        `${this.baseUrl}/chat/completions`,
         {
-          role: 'system',
-          content: '你只输出严格JSON。任何不确定的内容要用较低confidence表达，但不能伪造新闻证据。',
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.options.apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body,
         },
         {
-          role: 'user',
-          content: input.prompt,
-        },
-      ];
-      const body = JSON.stringify({
-        model: this.options.model,
-        messages,
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-      });
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.options.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body,
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`AI stock keyword request failed with HTTP ${response.status}`);
+          maxRetries: 3,
+          requestTimeoutMs: this.options.timeoutMs ?? 60000,
+        }
+      );
+    } catch (error) {
+      const match = error instanceof Error ? error.message.match(/Retryable HTTP status:\s*(\d+)/) : null;
+      if (match) {
+        throw new Error(`AI stock keyword request failed with HTTP ${match[1]}`);
       }
-      const payload = await response.json() as IOpenAiCompatibleResponse;
-      const content = payload.choices?.[0]?.message?.content;
-      if (typeof content !== 'string' || content.trim().length === 0) {
-        throw new Error('AI stock keyword response missing content');
-      }
-      return JSON.parse(extractJsonObject(content)) as IAiStockKeywordPayload;
+      throw error;
     }
-    finally {
-      clearTimeout(timeout);
+
+    if (!response.ok) {
+      throw new Error(`AI stock keyword request failed with HTTP ${response.status}`);
     }
+
+    const payload = await response.json() as IOpenAiCompatibleResponse;
+    const content = payload.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || content.trim().length === 0) {
+      throw new Error('AI stock keyword response missing content');
+    }
+    return JSON.parse(extractJsonObject(content)) as IAiStockKeywordPayload;
   }
 }
 
@@ -236,24 +249,66 @@ export class AiStockKeywordGenerationService {
     const rows: IValidatedKeywordRow[] = [];
     let skippedInvalidKeywordCount = 0;
 
-    for (let index = 0; index < stocks.length; index += batchSize) {
-      const batch = stocks.slice(index, index + batchSize);
-      const prompt = buildPrompt(batch);
+    const requestWithDynamicBatching = async (
+      toRequest: readonly IStockRow[]
+    ): Promise<{ readonly rows: readonly IValidatedKeywordRow[]; readonly skippedInvalidKeywordCount: number }> => {
+      if (toRequest.length === 0) {
+        return { rows: [], skippedInvalidKeywordCount: 0 };
+      }
+      const prompt = buildPrompt(toRequest);
       const bodyChars = JSON.stringify({ model: this.requester.model, prompt }).length;
       if (prompt.length > maxRequestChars || bodyChars > maxRequestChars) {
-        throw new Error(`AI stock keyword request too large: promptChars=${prompt.length}, bodyChars=${bodyChars}, max=${maxRequestChars}`);
+        if (toRequest.length > 1) {
+          const mid = Math.floor(toRequest.length / 2);
+          const left = toRequest.slice(0, mid);
+          const right = toRequest.slice(mid);
+          console.warn(
+            `[AiStockKeywordGenerationService] Request payload too large (size ${toRequest.length}). Splitting into ${left.length} and ${right.length}.`
+          );
+          const leftResult = await requestWithDynamicBatching(left);
+          const rightResult = await requestWithDynamicBatching(right);
+          return {
+            rows: [...leftResult.rows, ...rightResult.rows],
+            skippedInvalidKeywordCount: leftResult.skippedInvalidKeywordCount + rightResult.skippedInvalidKeywordCount,
+          };
+        }
+        throw new Error(`AI stock keyword request too large even for single stock: promptChars=${prompt.length}, bodyChars=${bodyChars}, max=${maxRequestChars}`);
       }
 
+      try {
+        const payload = await this.requester.requestKeywords({
+          stocks: toRequest,
+          prompt,
+          promptVersion: PROMPT_VERSION,
+          model: this.requester.model,
+        });
+        const validation = this.validatePayload(payload, toRequest, options);
+        return validation;
+      } catch (error) {
+        if (toRequest.length > 1) {
+          const mid = Math.floor(toRequest.length / 2);
+          const left = toRequest.slice(0, mid);
+          const right = toRequest.slice(mid);
+          console.warn(
+            `[AiStockKeywordGenerationService] AI request failed for batch size ${toRequest.length}. Splitting into sizes ${left.length} and ${right.length}. Error: ${error instanceof Error ? error.message : String(error)}`
+          );
+          const leftResult = await requestWithDynamicBatching(left);
+          const rightResult = await requestWithDynamicBatching(right);
+          return {
+            rows: [...leftResult.rows, ...rightResult.rows],
+            skippedInvalidKeywordCount: leftResult.skippedInvalidKeywordCount + rightResult.skippedInvalidKeywordCount,
+          };
+        }
+        throw error;
+      }
+    };
+
+    for (let index = 0; index < stocks.length; index += batchSize) {
+      const batch = stocks.slice(index, index + batchSize);
       options.onProgress?.(`生成关键词批次 ${Math.floor(index / batchSize) + 1}/${Math.ceil(stocks.length / batchSize)}，股票 ${batch.length} 只`);
-      const payload = await this.requester.requestKeywords({
-        stocks: batch,
-        prompt,
-        promptVersion: PROMPT_VERSION,
-        model: this.requester.model,
-      });
-      const validation = this.validatePayload(payload, batch, options);
-      rows.push(...validation.rows);
-      skippedInvalidKeywordCount += validation.skippedInvalidKeywordCount;
+      const result = await requestWithDynamicBatching(batch);
+      rows.push(...result.rows);
+      skippedInvalidKeywordCount += result.skippedInvalidKeywordCount;
     }
 
     if (stocks.length > 0 && rows.length === 0) {

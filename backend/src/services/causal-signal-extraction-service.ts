@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { DataRefreshLedgerService } from './data-refresh-ledger-service.js';
+import { fetchWithRetry } from './ai-client-utils.js';
 
 export type CausalSignalDirection = 'positive' | 'negative' | 'mixed' | 'neutral';
 
@@ -240,11 +241,6 @@ const isDirection = (value: unknown): value is CausalSignalDirection => {
   return value === 'positive' || value === 'negative' || value === 'mixed' || value === 'neutral';
 };
 
-const isRetryableAiStatus = (status: number): boolean => {
-  return status === 429 || status === 502 || status === 503 || status === 504;
-};
-
-const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
 const DEFAULT_MAX_LLM_REQUEST_CHARS = 240_000;
 const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 30_000;
@@ -425,44 +421,35 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
       );
     }
 
-    let response: Response | null = null;
-    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
-      try {
-        response = await this.fetchImpl(`${normalizeBaseUrl(this.options.baseUrl)}/chat/completions`, {
+    let response: Response;
+    try {
+      response = await fetchWithRetry(
+        `${normalizeBaseUrl(this.options.baseUrl)}/chat/completions`,
+        {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${this.options.apiKey}`,
           },
-          signal: controller.signal,
           body: requestBody,
-        });
-      }
-      catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') {
-          if (attempt === this.maxRetries) {
-            throw new Error(`Causal signal AI request timed out after ${this.requestTimeoutMs}ms`);
-          }
-          await sleep(this.retryDelayMs * 2 ** attempt);
-          continue;
+        },
+        {
+          maxRetries: this.maxRetries,
+          retryDelayMs: this.retryDelayMs,
+          requestTimeoutMs: this.requestTimeoutMs,
+          fetchImpl: this.fetchImpl,
         }
-        throw error;
+      );
+    } catch (error) {
+      const match = error instanceof Error ? error.message.match(/Retryable HTTP status:\s*(\d+)/) : null;
+      if (match) {
+        throw new Error(`Causal signal AI request failed with HTTP ${match[1]}`);
       }
-      finally {
-        clearTimeout(timeout);
-      }
-
-      if (response.ok || !isRetryableAiStatus(response.status) || attempt === this.maxRetries) {
-        break;
-      }
-
-      await sleep(this.retryDelayMs * 2 ** attempt);
+      throw error;
     }
 
-    if (!response?.ok) {
-      throw new Error(`Causal signal AI request failed with HTTP ${response?.status ?? 'unknown'}`);
+    if (!response.ok) {
+      throw new Error(`Causal signal AI request failed with HTTP ${response.status}`);
     }
 
     const payload = await response.json() as IOpenAiCompatibleResponse;
@@ -528,18 +515,41 @@ export class CausalSignalExtractionService {
       const batchCount = Math.ceil(input.news.length / batchSize);
       const extracted: ICausalSignalCandidateRecord[] = [];
       const newsById = new Map(input.news.map(news => [news.id, news]));
+      // Recursive helper for dynamic batching on failure
+      const extractWithDynamicBatching = async (
+        toExtract: readonly ICausalSignalExtractionNews[]
+      ): Promise<readonly ICausalSignalCandidateRecord[]> => {
+        if (toExtract.length === 0) {
+          return [];
+        }
+        try {
+          return await this.extractor.extract({
+            ...input,
+            news: toExtract,
+          });
+        } catch (error) {
+          if (toExtract.length > 1) {
+            const mid = Math.floor(toExtract.length / 2);
+            const left = toExtract.slice(0, mid);
+            const right = toExtract.slice(mid);
+            console.warn(
+              `[CausalSignalExtractionService] AI extraction failed for batch size ${toExtract.length}. Splitting into sizes ${left.length} and ${right.length}. Error: ${error instanceof Error ? error.message : String(error)}`
+            );
+            const leftResult = await extractWithDynamicBatching(left);
+            const rightResult = await extractWithDynamicBatching(right);
+            return [...leftResult, ...rightResult];
+          }
+          throw error;
+        }
+      };
+
       for (let index = 0; index < input.news.length; index += batchSize) {
         const batchNews = input.news.slice(index, index + batchSize);
         const startedAt = Date.now();
         const cachedBatch = await this.loadCachedCandidates(prisma, input, batchNews, newsById);
         cacheHitCount += cachedBatch.cacheHitCount;
         const newsToExtract = batchNews.filter(news => !cachedBatch.completedNewsIds.has(news.id));
-        const freshBatch = newsToExtract.length === 0
-          ? []
-          : await this.extractor.extract({
-              ...input,
-              news: newsToExtract,
-            });
+        const freshBatch = await extractWithDynamicBatching(newsToExtract);
         const batch = [...cachedBatch.candidates, ...freshBatch]
           .map(candidate => validateCausalSignalCandidate(candidate, newsById));
         await this.recordExtractionCache(prisma, input, newsToExtract, batch);

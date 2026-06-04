@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 
 import { Prisma } from '@prisma/client';
 import { CoverageInitializationRepository } from '../repositories/coverage-initialization-repository.js';
+import { fetchWithRetry } from './ai-client-utils.js';
 
 export type LimitUpCaseMode = 'touch' | 'sealed';
 export type CoverageGapMissReason = 'no_evidence_chain' | 'score_too_low' | 'filtered_out' | 'not_in_stock_pool';
@@ -794,22 +795,30 @@ export class OpenAiCompatibleExposureCandidateExtractor implements IExposureCand
       throw new Error(`Exposure candidate AI request too large: promptChars=${prompt.length}, bodyChars=${body.length}, max=${this.maxRequestChars}`);
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     let response: Response;
     try {
-      response = await this.fetchImpl(`${this.options.baseUrl.replace(/\/$/u, '')}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.options.apiKey}`,
+      response = await fetchWithRetry(
+        `${this.options.baseUrl.replace(/\/$/u, '')}/chat/completions`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.options.apiKey}`,
+          },
+          body,
         },
-        signal: controller.signal,
-        body,
-      });
-    }
-    finally {
-      clearTimeout(timeout);
+        {
+          maxRetries: 3,
+          requestTimeoutMs: this.requestTimeoutMs,
+          fetchImpl: this.fetchImpl,
+        }
+      );
+    } catch (error) {
+      const match = error instanceof Error ? error.message.match(/Retryable HTTP status:\s*(\d+)/) : null;
+      if (match) {
+        throw new Error(`Exposure candidate AI request failed with HTTP ${match[1]}`);
+      }
+      throw error;
     }
 
     if (!response.ok) {

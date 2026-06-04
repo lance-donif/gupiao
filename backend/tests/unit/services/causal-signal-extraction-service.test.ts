@@ -417,4 +417,66 @@ describe('causal signal extraction service', () => {
       failureReason: 'evidence_text_not_found',
     }));
   });
+
+  it('splits failed news batches recursively using dynamic batching', async () => {
+    const mockDb = new MockCausalSignalPrismaClient();
+    let requestCount = 0;
+
+    const fetchImpl = async (_url: string, init: any): Promise<Response> => {
+      requestCount += 1;
+      const body = JSON.parse(init.body);
+      const userMessage = body.messages.find((m: any) => m.role === 'user').content;
+      const jsonStart = userMessage.lastIndexOf('[');
+      const jsonEnd = userMessage.lastIndexOf(']');
+      const newsItems = JSON.parse(userMessage.slice(jsonStart, jsonEnd + 1));
+
+      if (newsItems.length > 2) {
+        throw new Error('Batch too large, simulated rate limit / overflow');
+      }
+
+      const signals = newsItems.map((news: any) => ({
+        newsId: news.newsId,
+        event: '白银库存下降',
+        businessVariable: '供给不足',
+        assetOrThemeKeyword: '白银',
+        direction: 'positive',
+        confidence: 0.85,
+        evidenceText: '白银库存下降',
+        evidenceOffsetStart: 0,
+        evidenceOffsetEnd: 6,
+      }));
+
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({ signals }),
+          },
+        }],
+      }), { status: 200 });
+    };
+
+    const result = await new CausalSignalExtractionService(new OpenAiCompatibleCausalSignalExtractor({
+      baseUrl: 'http://localhost:8080/v1',
+      apiKey: 'test-key',
+      model: 'gpt-5.4-mini',
+      fetchImpl: fetchImpl as typeof fetch,
+      maxRetries: 0,
+    })).execute(mockDb, {
+      traceId: 'trace-dynamic-batch',
+      asOf: new Date('2026-05-24T15:59:59.999Z'),
+      clusterKey: 'global',
+      batchSize: 4,
+      news: [
+        { id: 'news-a', title: '白银库存下降', content: '白银库存下降。', source: 'aktools', publishedAt: new Date('2026-05-24T08:00:00.000Z') },
+        { id: 'news-b', title: '白银库存下降', content: '白银库存下降。', source: 'aktools', publishedAt: new Date('2026-05-24T08:00:00.000Z') },
+        { id: 'news-c', title: '白银库存下降', content: '白银库存下降。', source: 'aktools', publishedAt: new Date('2026-05-24T08:00:00.000Z') },
+        { id: 'news-d', title: '白银库存下降', content: '白银库存下降。', source: 'aktools', publishedAt: new Date('2026-05-24T08:00:00.000Z') },
+      ],
+    });
+
+    expect(requestCount).toBe(3);
+    expect(result.candidateCount).toBe(4);
+    expect(result.acceptedCount).toBe(4);
+    expect(mockDb.rows.map(r => r.newsId).sort()).toEqual(['news-a', 'news-b', 'news-c', 'news-d'].sort());
+  });
 });

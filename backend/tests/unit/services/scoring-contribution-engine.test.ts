@@ -1804,7 +1804,7 @@ describe('scoring contribution engine', () => {
     expect(Object.values(result.diagnostics.signalTypeCounts)).toEqual([5, 5, 5, 5, 5, 5]);
   });
 
-  it('excludes stocks and keywords recommended on the previous Beijing day', async () => {
+  it('does not exclude stocks and keywords recommended on the previous Beijing day', async () => {
     const mockDb = new MockPrismaClient();
     const asOf = new Date('2026-05-25T09:00:00.000Z');
     const previousAsOf = new Date('2026-05-24T09:00:00.000Z');
@@ -1888,12 +1888,9 @@ describe('scoring contribution engine', () => {
       5,
     );
 
-    expect(result.recommendations.map(item => item.symbol)).toEqual(['600102']);
-    expect(result.diagnostics.excludedByPreviousDayStock).toBe(1);
-    expect(result.diagnostics.excludedByPreviousDayKeyword).toBe(1);
-    expect(result.diagnostics.shortfallReasons).toEqual(expect.arrayContaining([
-      expect.stringContaining('昨日已推荐股票过滤 1 只'),
-      expect.stringContaining('昨日已推荐关键词过滤 1 只'),
-    ]));
+    expect(result.recommendations.map(item => item.symbol)).toEqual(['600100', '600101', '600102']);
+    expect(result.diagnostics.excludedByPreviousDayStock).toBe(0);
+    expect(result.diagnostics.excludedByPreviousDayKeyword).toBe(0);
+    expect(result.diagnostics.shortfallReasons).toEqual([]);
   });
 });

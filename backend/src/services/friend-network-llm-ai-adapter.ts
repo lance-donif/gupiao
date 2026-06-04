@@ -4,6 +4,7 @@ import type {
   IAiRelationshipDecision,
 } from './friend-network-types.js';
 import { requireEnvironmentValue } from './integration-config.js';
+import { fetchWithRetry } from './ai-client-utils.js';
 
 interface IOpenAiCompatibleMessage {
   readonly role: 'system' | 'user';
@@ -117,28 +118,45 @@ export class FriendNetworkLlmAiAdapter implements IFriendNetworkAiAdapter {
       return [];
     }
 
-    const response = await this.fetchImpl(`${normalizeBaseUrl(this.options.baseUrl)}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.options.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.options.model,
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: '你是股票图谱关系裁决助手，只返回合法 JSON。',
-          } satisfies IOpenAiCompatibleMessage,
-          {
-            role: 'user',
-            content: buildPrompt(candidates),
-          } satisfies IOpenAiCompatibleMessage,
-        ],
-      }),
-    });
+    let response: Response;
+    try {
+      response = await fetchWithRetry(
+        `${normalizeBaseUrl(this.options.baseUrl)}/chat/completions`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.options.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: this.options.model,
+            temperature: 0.1,
+            response_format: { type: 'json_object' },
+            messages: [
+              {
+                role: 'system',
+                content: '你是股票图谱关系裁决助手，只返回合法 JSON。',
+              } satisfies IOpenAiCompatibleMessage,
+              {
+                role: 'user',
+                content: buildPrompt(candidates),
+              } satisfies IOpenAiCompatibleMessage,
+            ],
+          }),
+        },
+        {
+          maxRetries: 3,
+          requestTimeoutMs: 30000,
+          fetchImpl: this.fetchImpl,
+        }
+      );
+    } catch (error) {
+      const match = error instanceof Error ? error.message.match(/Retryable HTTP status:\s*(\d+)/) : null;
+      if (match) {
+        throw new Error(`Friend network AI request failed with HTTP ${match[1]}`);
+      }
+      throw error;
+    }
 
     if (!response.ok) {
       throw new Error(`Friend network AI request failed with HTTP ${response.status}`);

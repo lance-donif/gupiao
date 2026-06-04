@@ -385,19 +385,6 @@ const normalizeCooldownKeyword = (value: unknown): string => {
   return String(value ?? '').replace(/\s+/gu, '').toLocaleLowerCase('zh-CN');
 };
 
-const hasPreviousDayKeyword = (
-  recommendation: ITempStockRecommendation,
-  previousDayKeywords: ReadonlySet<string>,
-): boolean => {
-  if (previousDayKeywords.size === 0) {
-    return false;
-  }
-
-  return recommendation.matchedSignals.some((signal) => {
-    const normalized = normalizeCooldownKeyword(signal);
-    return normalized.length > 0 && previousDayKeywords.has(normalized);
-  });
-};
 
 const resolvePreviousBeijingDayRange = (asOf: Date): { startInclusive: Date; endExclusive: Date } => {
   const beijingDateKey = new Date(asOf.getTime() + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
@@ -958,7 +945,7 @@ export class TempRecommendationSelector {
     recommendations: readonly ITempStockRecommendation[],
     limit: number,
     maxPerIndustry: number,
-    cooldownExclusions: IRecommendationCooldownExclusions = createEmptyCooldownExclusions(),
+    _cooldownExclusions: IRecommendationCooldownExclusions = createEmptyCooldownExclusions(),
   ): {
     readonly recommendations: readonly ITempStockRecommendation[];
     readonly diagnostics: Omit<ITempRecommendationSelectionDiagnostics, 'featureSnapshotCount'>;
@@ -969,14 +956,10 @@ export class TempRecommendationSelector {
     const excludedByRecentWeekGain = stockEligibleRecommendations.length - gainEligibleRecommendations.length;
     const priceEligibleRecommendations = gainEligibleRecommendations.filter(isPriceEligible);
     const excludedByPrice = gainEligibleRecommendations.length - priceEligibleRecommendations.length;
-    const previousStockEligibleRecommendations = priceEligibleRecommendations.filter((recommendation) => {
-      return !cooldownExclusions.previousDayStockSymbols.has(recommendation.symbol.trim());
-    });
-    const excludedByPreviousDayStock = priceEligibleRecommendations.length - previousStockEligibleRecommendations.length;
-    const eligibleRecommendations = previousStockEligibleRecommendations.filter((recommendation) => {
-      return !hasPreviousDayKeyword(recommendation, cooldownExclusions.previousDayKeywords);
-    });
-    const excludedByPreviousDayKeyword = previousStockEligibleRecommendations.length - eligibleRecommendations.length;
+    const previousStockEligibleRecommendations = priceEligibleRecommendations;
+    const excludedByPreviousDayStock = 0;
+    const eligibleRecommendations = previousStockEligibleRecommendations;
+    const excludedByPreviousDayKeyword = 0;
     const signalTypeCounts = new Map<string, number>();
     const selected: ITempStockRecommendation[] = [];
     let skippedBySignalTypeCap = 0;
