@@ -4,24 +4,17 @@ import { Prisma } from '@prisma/client';
 import { CoverageInitializationRepository } from '../repositories/coverage-initialization-repository.js';
 import { FactSnapshotService } from './limitup-evidence-initialization.js';
 import { IStrategyExperimentConfig } from './strategy-experiment-core.js';
+import {
+  clamp,
+  normalizeDecimalNumber,
+  normalizeDirectionWeight,
+  normalizeKeyword,
+  longestCommonSubstringLength,
+  calculateTimeDecay,
+  calculateExposureBreadthWeight,
+} from './scoring-utils.js';
 
-// --- 动态指数半衰期时间衰减算法 ---
-const calculateTimeDecay = (
-  publishedAt: Date,
-  asOf: Date,
-  lambda: number,
-  maxWindowDays: number,
-): { decayFactor: number; t: number } => {
-  const diffMs = asOf.getTime() - publishedAt.getTime();
-  const t = diffMs / (1000 * 60 * 60 * 24); // 天数，带小数
 
-  if (t < 0 || t > maxWindowDays) {
-    return { decayFactor: 0, t };
-  }
-
-  const decayFactor = Math.exp(-lambda * t);
-  return { decayFactor, t };
-};
 
 export interface IScoringEngineInput {
   readonly traceId: string;
@@ -219,10 +212,7 @@ const hasDelegate = (prisma: any, delegateName: string, methodName: string): boo
   return typeof prisma?.[delegateName]?.[methodName] === 'function';
 };
 
-const normalizeDecimalNumber = (value: unknown, fallback: number): number => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-};
+
 
 const toRecordOrEmpty = (value: unknown): Record<string, unknown> => {
   return isRecord(value) && !Array.isArray(value) ? value : {};
@@ -242,64 +232,7 @@ const readStringField = (record: Readonly<Record<string, unknown>>, keys: readon
   return null;
 };
 
-const clamp = (value: number, min: number, max: number): number => {
-  return Math.max(min, Math.min(value, max));
-};
 
-const calculateExposureBreadthWeight = (memberCount: unknown): number => {
-  const count = Number(memberCount);
-  if (!Number.isFinite(count) || count <= 0) {
-    return 1;
-  }
-  return Math.max(BROAD_EXPOSURE_MIN_WEIGHT, Number((1 / Math.sqrt(count)).toFixed(4)));
-};
-
-const normalizeDirectionWeight = (direction: unknown): number => {
-  if (direction === 'positive') {
-    return 1;
-  }
-  if (direction === 'mixed') {
-    return 0.35;
-  }
-  if (direction === 'negative') {
-    return -1;
-  }
-  return 0;
-};
-
-const normalizeKeyword = (value: unknown): string => {
-  return String(value ?? '')
-    .replace(/\s+/gu, '')
-    .replace(/[()（）【】[\]《》"“”、,，.。:：;；/\\|-]/gu, '')
-    .replace(/[ⅡⅢ]$/u, '')
-    .toLocaleLowerCase('zh-CN');
-};
-
-const longestCommonSubstringLength = (left: string, right: string): number => {
-  if (left.length === 0 || right.length === 0) {
-    return 0;
-  }
-  
-  // Length difference pruning: abort if ratio is too skewed, preventing expensive O(N*M) calculation
-  const minLen = Math.min(left.length, right.length);
-  const maxLen = Math.max(left.length, right.length);
-  if (maxLen > 0 && minLen / maxLen < 0.6) {
-    return 0;
-  }
-
-  const dp = Array.from({ length: left.length + 1 }, () => Array.from<number>({ length: right.length + 1 }).fill(0));
-  let max = 0;
-  for (let i = 1; i <= left.length; i += 1) {
-    for (let j = 1; j <= right.length; j += 1) {
-      if (left[i - 1] !== right[j - 1]) {
-        continue;
-      }
-      dp[i][j] = dp[i - 1][j - 1] + 1;
-      max = Math.max(max, dp[i][j]);
-    }
-  }
-  return max;
-};
 
 const DIRECT_STOCK_NAME_MATCH_MIN_LENGTH = 4;
 

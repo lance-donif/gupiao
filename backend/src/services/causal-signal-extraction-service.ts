@@ -39,6 +39,7 @@ export interface ICausalSignalExtractionInput {
   readonly clusterKey: string;
   readonly news: readonly ICausalSignalExtractionNews[];
   readonly batchSize?: number;
+  readonly concurrency?: number;
   readonly onBatchComplete?: (event: {
     readonly batchIndex: number;
     readonly batchCount: number;
@@ -247,7 +248,7 @@ const DEFAULT_MAX_LLM_REQUEST_CHARS = 240_000;
 // 单 batch（CAUSAL_SIGNAL_BATCH_SIZE=20）实际需要 40-90s、~6k tokens；保留 env 覆盖（CAUSAL_SIGNAL_LLM_REQUEST_TIMEOUT_MS / _LLM_MAX_TOKENS）。
 const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_LLM_MAX_TOKENS = 8192;
-const DEFAULT_LLM_NEWS_CONTENT_CHARS = 240;
+
 const LLM_CACHE_EXPIRES_AT = new Date('2099-12-31T23:59:59.999Z');
 
 const KEYWORD_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
@@ -349,11 +350,7 @@ const supportsLedgerCache = (prisma: any): boolean => {
   return typeof prisma?.$queryRawUnsafe === 'function' && typeof prisma?.$executeRawUnsafe === 'function';
 };
 
-const truncateNewsContentForPrompt = (value: string): string => {
-  return value.length > DEFAULT_LLM_NEWS_CONTENT_CHARS
-    ? value.slice(0, DEFAULT_LLM_NEWS_CONTENT_CHARS)
-    : value;
-};
+
 
 const buildLlmPrompt = (input: ICausalSignalExtractionInput): string => {
   return [
@@ -367,7 +364,7 @@ const buildLlmPrompt = (input: ICausalSignalExtractionInput): string => {
     JSON.stringify(input.news.map(news => ({
       newsId: news.id,
       title: news.title,
-      content: truncateNewsContentForPrompt(news.content),
+      content: news.content,
       source: news.source,
     })), null, 2),
   ].join('\n');
@@ -382,7 +379,7 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
   private readonly retryDelayMs: number;
   private readonly maxRequestChars: number;
   private readonly requestTimeoutMs: number;
-  private readonly maxTokens: number;
+
 
   public constructor(private readonly options: IOpenAiCompatibleCausalSignalExtractorOptions) {
     this.modelVersion = options.model;
@@ -391,7 +388,7 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
     this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 800);
     this.maxRequestChars = Math.max(1, options.maxRequestChars ?? DEFAULT_MAX_LLM_REQUEST_CHARS);
     this.requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS);
-    this.maxTokens = Math.max(256, options.maxTokens ?? DEFAULT_LLM_MAX_TOKENS);
+
   }
 
   public async extract(input: ICausalSignalExtractionInput): Promise<readonly ICausalSignalCandidateRecord[]> {
@@ -403,7 +400,6 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
     const requestBody = JSON.stringify({
       model: this.options.model,
       temperature: 0,
-      max_tokens: this.maxTokens,
       response_format: { type: 'json_object' },
       messages: [
         {
@@ -457,6 +453,7 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
     const payload = await response.json() as IOpenAiCompatibleResponse;
     const content = payload.choices?.[0]?.message?.content;
     if (!content) {
+      console.error('[CausalSignalExtractionService] Missing message content. Raw payload:', JSON.stringify(payload, null, 2));
       throw new Error('Causal signal AI response missing message content');
     }
 
@@ -504,6 +501,51 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
   }
 }
 
+const runTasksWithConcurrency = async (
+  concurrency: number,
+  tasks: (() => Promise<void>)[],
+): Promise<void> => {
+  let completed = 0;
+  let nextIndex = 0;
+  let hasFailed = false;
+  let activeError: unknown = null;
+
+  if (tasks.length === 0) {
+    return;
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const runNext = () => {
+      if (hasFailed) {
+        reject(activeError);
+        return;
+      }
+      if (completed === tasks.length) {
+        resolve();
+        return;
+      }
+
+      while (nextIndex < tasks.length && nextIndex - completed < concurrency) {
+        const currentIndex = nextIndex;
+        nextIndex++;
+
+        tasks[currentIndex]()
+          .then(() => {
+            completed++;
+            runNext();
+          })
+          .catch((error) => {
+            hasFailed = true;
+            activeError = error;
+            reject(error);
+          });
+      }
+    };
+
+    runNext();
+  });
+};
+
 export class CausalSignalExtractionService {
   public constructor(private readonly extractor: ICausalSignalExtractor) {}
 
@@ -549,51 +591,61 @@ export class CausalSignalExtractionService {
       const globalCached = await this.loadCachedCandidates(prisma, input, input.news, newsById);
       cacheHitCount += globalCached.cacheHitCount;
 
+      const tasks: (() => Promise<void>)[] = [];
+      let activeInsertedCount = 0;
+
       for (let index = 0; index < input.news.length; index += batchSize) {
-        const batchNews = input.news.slice(index, index + batchSize);
-        const startedAt = Date.now();
-        
-        const batchCachedCandidates = globalCached.candidates.filter(c => batchNews.some(n => n.id === c.newsId));
-        const newsToExtract = batchNews.filter(news => !globalCached.completedNewsIds.has(news.id));
-        
-        const freshBatch = await extractWithDynamicBatching(newsToExtract);
-        const batch = [...batchCachedCandidates, ...freshBatch]
-          .map(candidate => validateCausalSignalCandidate(candidate, newsById));
-        await this.recordExtractionCache(prisma, input, newsToExtract, batch);
-        input.onBatchComplete?.({
-          batchIndex: Math.floor(index / batchSize) + 1,
-          batchCount,
-          batchSize: batchNews.length,
-          elapsedMs: Date.now() - startedAt,
-          signalCount: batch.length,
-        });
-        if (batch.length > 0) {
-          const result = await prisma.causalSignalCandidate.createMany({
-            data: batch.map(candidate => ({
-              traceId: candidate.traceId,
-              asOf: candidate.asOf,
-              clusterKey: candidate.clusterKey,
-              newsId: candidate.newsId,
-              event: candidate.event,
-              businessVariable: candidate.businessVariable,
-              assetOrThemeKeyword: candidate.assetOrThemeKeyword,
-              direction: candidate.direction,
-              confidence: new Prisma.Decimal(candidate.confidence),
-              evidenceText: candidate.evidenceText,
-              evidenceOffsetStart: candidate.evidenceOffsetStart,
-              evidenceOffsetEnd: candidate.evidenceOffsetEnd,
-              extractorType: candidate.extractorType,
-              modelVersion: candidate.modelVersion,
-              promptVersion: candidate.promptVersion,
-              status: candidate.status,
-              failureReason: candidate.failureReason,
-            })),
-            skipDuplicates: true,
+        const batchIndex = Math.floor(index / batchSize) + 1;
+        tasks.push(async () => {
+          const batchNews = input.news.slice(index, index + batchSize);
+          const startedAt = Date.now();
+          
+          const batchCachedCandidates = globalCached.candidates.filter(c => batchNews.some(n => n.id === c.newsId));
+          const newsToExtract = batchNews.filter(news => !globalCached.completedNewsIds.has(news.id));
+          
+          const freshBatch = await extractWithDynamicBatching(newsToExtract);
+          const batch = [...batchCachedCandidates, ...freshBatch]
+            .map(candidate => validateCausalSignalCandidate(candidate, newsById));
+          await this.recordExtractionCache(prisma, input, newsToExtract, batch);
+          input.onBatchComplete?.({
+            batchIndex,
+            batchCount,
+            batchSize: batchNews.length,
+            elapsedMs: Date.now() - startedAt,
+            signalCount: batch.length,
           });
-          insertedCount += result.count;
-        }
-        extracted.push(...batch);
+          if (batch.length > 0) {
+            const result = await prisma.causalSignalCandidate.createMany({
+              data: batch.map(candidate => ({
+                traceId: candidate.traceId,
+                asOf: candidate.asOf,
+                clusterKey: candidate.clusterKey,
+                newsId: candidate.newsId,
+                event: candidate.event,
+                businessVariable: candidate.businessVariable,
+                assetOrThemeKeyword: candidate.assetOrThemeKeyword,
+                direction: candidate.direction,
+                confidence: new Prisma.Decimal(candidate.confidence),
+                evidenceText: candidate.evidenceText,
+                evidenceOffsetStart: candidate.evidenceOffsetStart,
+                evidenceOffsetEnd: candidate.evidenceOffsetEnd,
+                extractorType: candidate.extractorType,
+                modelVersion: candidate.modelVersion,
+                promptVersion: candidate.promptVersion,
+                status: candidate.status,
+                failureReason: candidate.failureReason,
+              })),
+              skipDuplicates: true,
+            });
+            activeInsertedCount += result.count;
+          }
+          extracted.push(...batch);
+        });
       }
+
+      const concurrency = Math.max(1, Math.min(input.concurrency ?? 20, 50));
+      await runTasksWithConcurrency(concurrency, tasks);
+      insertedCount = activeInsertedCount;
       candidates = extracted;
     }
     catch (error) {
