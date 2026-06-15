@@ -39,15 +39,7 @@ export function StrategyCompareChart({ summaries }: Props) {
     };
   }, []);
 
-  React.useEffect(() => {
-    const chart = chartRef.current;
-    if (!chart) return;
-    if (summaries.length === 0) {
-      chart.clear();
-      return;
-    }
-
-    // 优先用 T+5 > T+3 > T+1 的已结算数据
+  const seriesData = React.useMemo(() => {
     function pickHorizon(item: StrategyProfitSummary) {
       const h = item.horizon_summaries;
       if (!h) return null;
@@ -56,7 +48,6 @@ export function StrategyCompareChart({ summaries }: Props) {
       if (h.t1.final_count > 0) return h.t1;
       return null;
     }
-
     const names = summaries.map((s) => s.strategy_name);
     const winRates = summaries.map((s) => {
       const h = pickHorizon(s);
@@ -71,10 +62,20 @@ export function StrategyCompareChart({ summaries }: Props) {
       if (h?.max_drawdown_pct == null) return null;
       return +(Math.abs(h.max_drawdown_pct) * 100).toFixed(1);
     });
+    return { names, winRates, avgReturns, maxDrawdowns };
+  }, [summaries]);
+
+  React.useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    if (summaries.length === 0) {
+      chart.clear();
+      return;
+    }
 
     chart.setOption(
       {
-        animation: true,
+        animation: false,
         tooltip: {
           trigger: 'axis',
           axisPointer: { type: 'shadow' },
@@ -95,7 +96,7 @@ export function StrategyCompareChart({ summaries }: Props) {
         grid: { left: 8, right: 8, bottom: 8, top: 36, containLabel: true },
         xAxis: {
           type: 'category',
-          data: names,
+          data: seriesData.names,
           axisLabel: { fontSize: 10, interval: 0, overflow: 'truncate', width: 72 },
         },
         yAxis: {
@@ -107,7 +108,7 @@ export function StrategyCompareChart({ summaries }: Props) {
           {
             name: 'T+x胜率',
             type: 'bar',
-            data: winRates,
+            data: seriesData.winRates,
             itemStyle: { color: '#3b82f6', borderRadius: [3, 3, 0, 0] },
             label: {
               show: true,
@@ -120,7 +121,7 @@ export function StrategyCompareChart({ summaries }: Props) {
           {
             name: '平均收益',
             type: 'bar',
-            data: avgReturns,
+            data: seriesData.avgReturns,
             itemStyle: { color: '#10b981', borderRadius: [3, 3, 0, 0] },
             label: {
               show: true,
@@ -133,7 +134,7 @@ export function StrategyCompareChart({ summaries }: Props) {
           {
             name: '最大回撤',
             type: 'bar',
-            data: maxDrawdowns,
+            data: seriesData.maxDrawdowns,
             itemStyle: { color: '#f43f5e', borderRadius: [3, 3, 0, 0] },
             label: {
               show: true,
@@ -147,7 +148,7 @@ export function StrategyCompareChart({ summaries }: Props) {
       },
       true,
     );
-  }, [summaries]);
+  }, [seriesData, summaries]);
 
   return (
     <div className="space-y-1">

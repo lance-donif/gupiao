@@ -86,6 +86,8 @@ export interface IDashboardSnapshotPayload {
   readonly default_symbol: string | null;
   readonly recommendations: readonly IDashboardRecommendationItem[];
   readonly execution_history: readonly IDashboardExecutionHistoryItem[];
+  readonly theme_forecasts: readonly IThemeForecastDisplayItem[];
+  readonly expectation_gaps: readonly IExpectationGapDisplayItem[];
   readonly warnings: readonly string[];
   readonly sla: {
     readonly status: 'ready' | 'failed' | 'running' | 'waiting' | 'no_trace';
@@ -115,6 +117,28 @@ export interface IDashboardSnapshotPayload {
     readonly started_at: string | null;
     readonly finished_at: string | null;
   };
+}
+
+export interface IThemeForecastDisplayItem {
+  readonly theme: string;
+  readonly direction: 'bullish' | 'bearish' | 'neutral';
+  readonly probability: number;
+  readonly horizon: number;
+  readonly signal_strength: number;
+  readonly expectation_gap: number;
+  readonly related_symbols: readonly string[];
+  readonly weak_signal: boolean;
+  readonly reasons: readonly string[];
+}
+
+export interface IExpectationGapDisplayItem {
+  readonly keyword: string;
+  readonly graph_strength: number;
+  readonly price_reaction: number;
+  readonly expectation_gap: number;
+  readonly is_weak_signal: boolean;
+  readonly related_symbols: readonly string[];
+  readonly reasons: readonly string[];
 }
 
 export interface IDashboardStockDetailPayload {
@@ -329,6 +353,7 @@ export interface IDashboardNetworkPayload {
     readonly strength: number;
     readonly source_type: '因果链' | '暴露映射' | '全局图谱';
   }[];
+  readonly related_theme_forecasts: readonly IThemeForecastDisplayItem[];
   readonly network_preview: {
     readonly explanation: string | null;
   };

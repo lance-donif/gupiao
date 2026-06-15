@@ -9,6 +9,10 @@ class FakeGraphClient {
     return Promise.resolve();
   }
 
+  public async executeBatch(_cypher: string, _params: Readonly<Record<string, unknown>>): Promise<void> {
+    return Promise.resolve();
+  }
+
   public async close(): Promise<void> {
     return Promise.resolve();
   }

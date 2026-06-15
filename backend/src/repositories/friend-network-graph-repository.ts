@@ -1,6 +1,4 @@
 import type {
-  IFriendNetworkPersistedNode,
-  IFriendNetworkPersistedRelationship,
   IFriendNetworkPersistenceResult,
   IFriendNetworkPersistInput,
 } from '../services/friend-network-types.js';
@@ -12,44 +10,6 @@ const escapeCypherLiteral = (value: string): string => {
 
 const quoteCypherString = (value: string): string => {
   return `"${escapeCypherLiteral(value)}"`;
-};
-
-const toJsonLiteral = (value: unknown): string => {
-  return JSON.stringify(value);
-};
-
-const buildNodeMergeCypher = (cluster: string, node: IFriendNetworkPersistedNode): string => {
-  return [
-    `MERGE (n:SignalNode {cluster: ${quoteCypherString(cluster)}, keyword: ${quoteCypherString(node.keyword)}})`,
-    `SET n.category = ${quoteCypherString(node.category)},`,
-    `    n.frequency = ${node.frequency},`,
-    `    n.temperature = ${quoteCypherString(node.temperature)},`,
-    `    n.weakSignal = ${String(node.weakSignal)},`,
-    `    n.updatedAt = ${quoteCypherString(node.updatedAt)},`,
-    `    n.lastNewsIds = ${quoteCypherString(toJsonLiteral(node.newsIds))}`,
-    'RETURN n',
-  ].join(' ');
-};
-
-const buildRelationshipMergeCypher = (
-  cluster: string,
-  relationship: IFriendNetworkPersistedRelationship,
-): string => {
-  return [
-    `MATCH (source:SignalNode {cluster: ${quoteCypherString(cluster)}, keyword: ${quoteCypherString(relationship.sourceKeyword)}})`,
-    `MATCH (target:SignalNode {cluster: ${quoteCypherString(cluster)}, keyword: ${quoteCypherString(relationship.targetKeyword)}})`,
-    `MERGE (source)-[r:FRIEND_RELATION {cluster: ${quoteCypherString(cluster)}, sourceKeyword: ${quoteCypherString(relationship.sourceKeyword)}, targetKeyword: ${quoteCypherString(relationship.targetKeyword)}}]->(target)`,
-    `SET r.relationType = ${quoteCypherString(relationship.relationType)},`,
-    `    r.direction = ${quoteCypherString(relationship.direction)},`,
-    `    r.status = ${quoteCypherString(relationship.status)},`,
-    `    r.confidence = ${relationship.confidence},`,
-    `    r.weakSignal = ${String(relationship.weakSignal)},`,
-    `    r.updatedAt = ${quoteCypherString(relationship.updatedAt)},`,
-    `    r.reasoning = ${quoteCypherString(relationship.reasoning)},`,
-    `    r.evidence = ${quoteCypherString(toJsonLiteral(relationship.evidence))},`,
-    `    r.newsIds = ${quoteCypherString(toJsonLiteral(relationship.newsIds))}`,
-    'RETURN r',
-  ].join(' ');
 };
 
 const normalizeAgtypeScalar = (value: unknown): unknown => {
@@ -80,6 +40,7 @@ const normalizeAgtypeScalar = (value: unknown): unknown => {
 
 export interface IAgeGraphClient {
   execute: (cypher: string) => Promise<void>;
+  executeBatch: (cypher: string, params: Readonly<Record<string, unknown>>) => Promise<void>;
   query: <T>(cypher: string, columnNames?: readonly string[]) => Promise<readonly T[]>;
   close: () => Promise<void>;
 }
@@ -94,12 +55,20 @@ export class PgAgeGraphClient implements IAgeGraphClient {
     await this.runCypher(cypher);
   }
 
+  public async executeBatch(cypher: string, params: Readonly<Record<string, unknown>>): Promise<void> {
+    await this.runCypher(cypher, undefined, params);
+  }
+
   public async query<T>(cypher: string, columnNames?: readonly string[]): Promise<readonly T[]> {
     const rows = await this.runCypher(cypher, columnNames);
     return rows as readonly T[];
   }
 
-  private async runCypher(cypher: string, columnNames?: readonly string[]): Promise<readonly Record<string, unknown>[]> {
+  private async runCypher(
+    cypher: string,
+    columnNames?: readonly string[],
+    params?: Readonly<Record<string, unknown>>,
+  ): Promise<readonly Record<string, unknown>[]> {
     const pgModule = (await import('pg')) as {
       Client: new (options: { connectionString: string }) => {
         connect: () => Promise<void>;
@@ -117,8 +86,9 @@ export class PgAgeGraphClient implements IAgeGraphClient {
       const columnDefinition = columnNames && columnNames.length > 0
         ? columnNames.map(name => `${name} agtype`).join(', ')
         : 'result agtype';
-      const sql = `SELECT * FROM ag_catalog.cypher('${escapedGraphName}', $$ ${cypher} $$) AS (${columnDefinition});`;
-      const result = await client.query(sql);
+      const paramValues = params ? Object.values(params) : [];
+      const sql = `SELECT * FROM ag_catalog.cypher('${escapedGraphName}', $$ ${cypher} $$, ${paramValues.length > 0 ? paramValues.map((_, i) => `$${i + 1}::agtype`).join(', ') : 'NULL'}) AS (${columnDefinition});`;
+      const result = await client.query(sql, paramValues);
       return result.rows.map((row) => {
         const normalizedEntries = Object.entries(row).map(([key, value]) => [key, normalizeAgtypeScalar(value)]);
         return Object.fromEntries(normalizedEntries);
@@ -141,13 +111,62 @@ export class FriendNetworkGraphRepository implements IFriendNetworkGraphReposito
   ) {}
 
   public async persist(input: IFriendNetworkPersistInput): Promise<IFriendNetworkPersistenceResult> {
-    const statements = [
-      ...input.nodes.map(node => buildNodeMergeCypher(input.cluster, node)),
-      ...input.relationships.map(relationship => buildRelationshipMergeCypher(input.cluster, relationship)),
-    ];
+    // 批量 MERGE：单条 UNWIND 替代 N 次 MERGE 循环（消除 N+1：N → 2 次 round-trip）
+    if (input.nodes.length > 0) {
+      const nodeRows = input.nodes.map(node => ({
+        keyword: node.keyword,
+        category: node.category,
+        frequency: node.frequency,
+        temperature: node.temperature,
+        weakSignal: node.weakSignal,
+        updatedAt: node.updatedAt,
+        newsIds: node.newsIds,
+      }));
+      const nodeCypher = [
+        'UNWIND $rows AS row',
+        'MERGE (n:SignalNode {cluster: $cluster, keyword: row.keyword})',
+        'SET n.category = row.category,',
+        '    n.frequency = row.frequency,',
+        '    n.temperature = row.temperature,',
+        '    n.weakSignal = row.weakSignal,',
+        '    n.updatedAt = row.updatedAt,',
+        '    n.lastNewsIds = row.newsIds',
+        'RETURN n',
+      ].join(' ');
+      await this.graphClient.executeBatch(nodeCypher, { cluster: input.cluster, rows: nodeRows });
+    }
 
-    for (const statement of statements) {
-      await this.graphClient.execute(statement);
+    if (input.relationships.length > 0) {
+      const relRows = input.relationships.map(rel => ({
+        sourceKeyword: rel.sourceKeyword,
+        targetKeyword: rel.targetKeyword,
+        relationType: rel.relationType,
+        direction: rel.direction,
+        status: rel.status,
+        confidence: rel.confidence,
+        weakSignal: rel.weakSignal,
+        updatedAt: rel.updatedAt,
+        reasoning: rel.reasoning,
+        evidence: rel.evidence,
+        newsIds: rel.newsIds,
+      }));
+      const relCypher = [
+        'UNWIND $rows AS row',
+        'MATCH (source:SignalNode {cluster: $cluster, keyword: row.sourceKeyword})',
+        'MATCH (target:SignalNode {cluster: $cluster, keyword: row.targetKeyword})',
+        'MERGE (source)-[r:FRIEND_RELATION {cluster: $cluster, sourceKeyword: row.sourceKeyword, targetKeyword: row.targetKeyword}]->(target)',
+        'SET r.relationType = row.relationType,',
+        '    r.direction = row.direction,',
+        '    r.status = row.status,',
+        '    r.confidence = row.confidence,',
+        '    r.weakSignal = row.weakSignal,',
+        '    r.updatedAt = row.updatedAt,',
+        '    r.reasoning = row.reasoning,',
+        '    r.evidence = row.evidence,',
+        '    r.newsIds = row.newsIds',
+        'RETURN r',
+      ].join(' ');
+      await this.graphClient.executeBatch(relCypher, { cluster: input.cluster, rows: relRows });
     }
 
     return {
@@ -172,6 +191,10 @@ export class FriendNetworkAgeGraphReadClient implements IAgeGraphClient {
 
   public execute(cypher: string): Promise<void> {
     return this.baseClient.execute(cypher);
+  }
+
+  public executeBatch(cypher: string, params: Readonly<Record<string, unknown>>): Promise<void> {
+    return this.baseClient.executeBatch(cypher, params);
   }
 
   public query<T>(cypher: string, columnNames?: readonly string[]): Promise<readonly T[]> {

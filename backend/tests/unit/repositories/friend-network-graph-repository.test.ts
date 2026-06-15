@@ -4,9 +4,14 @@ import { FriendNetworkGraphRepository } from '../../../src/repositories/friend-n
 
 class FakeAgeGraphClient {
   public readonly statements: string[] = [];
+  public readonly batchCalls: Array<{ cypher: string; params: Readonly<Record<string, unknown>> }> = [];
 
   public async execute(cypher: string): Promise<void> {
     this.statements.push(cypher);
+  }
+
+  public async executeBatch(cypher: string, params: Readonly<Record<string, unknown>>): Promise<void> {
+    this.batchCalls.push({ cypher, params });
   }
 
   public async query<T>(_cypher: string, _columnNames?: readonly string[]): Promise<readonly T[]> {
@@ -54,11 +59,16 @@ describe('friend-network graph repository', () => {
       ],
     });
 
-    expect(graphClient.statements).toHaveLength(2);
-    expect(graphClient.statements[0]).toContain('MERGE (n:SignalNode');
-    expect(graphClient.statements[0]).toContain('cluster: "cluster-a"');
-    expect(graphClient.statements[1]).toContain('MERGE (source)-[r:FRIEND_RELATION');
-    expect(graphClient.statements[1]).toContain('r.reasoning = "制造业扩产提升白银工业需求"');
+    // 批量 UNWIND：nodes 和 relationships 各 1 次 batch 调用，共 2 次 round-trip
+    expect(graphClient.batchCalls).toHaveLength(2);
+    expect(graphClient.batchCalls[0].cypher).toContain('MERGE (n:SignalNode');
+    expect(graphClient.batchCalls[0].cypher).toContain('cluster: $cluster');
+    expect(graphClient.batchCalls[0].params).toMatchObject({ cluster: 'cluster-a' });
+    expect(graphClient.batchCalls[1].cypher).toContain('MERGE (source)-[r:FRIEND_RELATION');
+    expect(graphClient.batchCalls[1].cypher).toContain('r.reasoning = row.reasoning');
+    expect(graphClient.batchCalls[1].params).toMatchObject({ cluster: 'cluster-a' });
+    // 优化后不再有 N 次 execute
+    expect(graphClient.statements).toHaveLength(0);
     expect(result).toEqual({
       cluster: 'cluster-a',
       graphName: 'friend_network',

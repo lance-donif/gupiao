@@ -42,6 +42,13 @@ class DeferredNewsRepository implements INewsRepository {
     return Promise.resolve();
   }
 
+  public addMany(items: readonly NewsItem[]): Promise<void> {
+    this.enqueue(async ({ newsRepository }) => {
+      await newsRepository.addMany(items);
+    });
+    return Promise.resolve();
+  }
+
   public addRawRecord(record: any): Promise<void> {
     this.enqueue(async ({ newsRepository }) => {
       await newsRepository.addRawRecord(record);
@@ -49,9 +56,23 @@ class DeferredNewsRepository implements INewsRepository {
     return Promise.resolve();
   }
 
+  public addManyRawRecords(records: readonly any[]): Promise<void> {
+    this.enqueue(async ({ newsRepository }) => {
+      await newsRepository.addManyRawRecords(records);
+    });
+    return Promise.resolve();
+  }
+
   public addNormalizedRecord(record: any): Promise<void> {
     this.enqueue(async ({ newsRepository }) => {
       await newsRepository.addNormalizedRecord(record);
+    });
+    return Promise.resolve();
+  }
+
+  public addManyNormalizedRecords(records: readonly any[]): Promise<void> {
+    this.enqueue(async ({ newsRepository }) => {
+      await newsRepository.addManyNormalizedRecords(records);
     });
     return Promise.resolve();
   }

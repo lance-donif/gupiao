@@ -222,8 +222,12 @@ export class StrategyExperimentRunner {
       throw new Error('共享特征为空，无法执行多策略推荐');
     }
 
-    const runs: IStrategyRunSummary[] = [];
-    let recommendationCount = 0;
+    // 1) 串行计算 candidates（CPU，JS 单线程无并行收益；先算好再并发 persist）
+    // 2) 并发 persist：所有策略互不依赖，Promise.all 替代 N 次串行 round-trip
+    const prepared: Array<
+      | { kind: 'success'; strategy: typeof enabledStrategies[number]; config: ReturnType<typeof normalizeStrategyExperimentConfig>; candidates: ReturnType<typeof scoreStrategyFeature>[]; selected: ReturnType<typeof selectStrategyRecommendations>['recommendations']; diagnostics: ReturnType<typeof selectStrategyRecommendations>['diagnostics']; elapsedMs: number }
+      | { kind: 'failure'; strategy: typeof enabledStrategies[number]; errorMessage: string; rawConfigSnapshot: unknown; elapsedMs: number }
+    > = [];
 
     for (const strategy of enabledStrategies) {
       const startedAt = Date.now();
@@ -242,40 +246,69 @@ export class StrategyExperimentRunner {
           return scoreStrategyFeature(updatedFeature, config);
         });
         const selection = selectStrategyRecommendations(candidates, config);
-        const run = await this.persistStrategyRunSuccess(prisma, {
+        prepared.push({
+          kind: 'success',
           strategy,
-          traceId: input.traceId,
-          asOf: input.asOf,
-          clusterKey: input.clusterKey,
           config,
           candidates,
           selected: selection.recommendations,
           diagnostics: selection.diagnostics,
           elapsedMs: Date.now() - startedAt,
         });
-        recommendationCount += selection.recommendations.length;
-        runs.push(run);
       }
       catch (error: any) {
-        const failureMessage = error instanceof Error ? error.message : String(error);
-        await this.persistStrategyRunFailure(prisma, {
+        prepared.push({
+          kind: 'failure',
           strategy,
-          traceId: input.traceId,
-          asOf: input.asOf,
-          clusterKey: input.clusterKey,
-          errorMessage: failureMessage,
+          errorMessage: error instanceof Error ? error.message : String(error),
           rawConfigSnapshot: strategy.configJson,
           elapsedMs: Date.now() - startedAt,
         });
-        runs.push({
-          strategyId: strategy.id,
-          strategyName: strategy.name,
-          status: 'FAILED',
-          recommendationCount: 0,
-          selectedSignals: {},
-          errorMessage: failureMessage,
-        });
       }
+    }
+
+    // 并发 persist：N 次串行 → 1 批并发
+    const settled = await Promise.all(prepared.map(async (entry) => {
+      if (entry.kind === 'failure') {
+        await this.persistStrategyRunFailure(prisma, {
+          strategy: entry.strategy,
+          traceId: input.traceId,
+          asOf: input.asOf,
+          clusterKey: input.clusterKey,
+          errorMessage: entry.errorMessage,
+          rawConfigSnapshot: entry.rawConfigSnapshot,
+          elapsedMs: entry.elapsedMs,
+        });
+        return {
+          run: {
+            strategyId: entry.strategy.id,
+            strategyName: entry.strategy.name,
+            status: 'FAILED' as const,
+            recommendationCount: 0,
+            selectedSignals: {},
+            errorMessage: entry.errorMessage,
+          } satisfies IStrategyRunSummary,
+          recommendationCount: 0,
+        };
+      }
+      const run = await this.persistStrategyRunSuccess(prisma, {
+        strategy: entry.strategy,
+        traceId: input.traceId,
+        asOf: input.asOf,
+        clusterKey: input.clusterKey,
+        config: entry.config,
+        candidates: entry.candidates,
+        selected: entry.selected,
+        diagnostics: entry.diagnostics,
+        elapsedMs: entry.elapsedMs,
+      });
+      return { run, recommendationCount: entry.selected.length };
+    }));
+
+    const runs: IStrategyRunSummary[] = settled.map(s => s.run);
+    let recommendationCount = 0;
+    for (const s of settled) {
+      recommendationCount += s.recommendationCount;
     }
 
     const successCount = runs.filter(run => run.status === 'SUCCESS').length;

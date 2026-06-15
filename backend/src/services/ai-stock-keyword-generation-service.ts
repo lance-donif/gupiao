@@ -381,8 +381,13 @@ export class AiStockKeywordGenerationService {
         continue;
       }
       const seen = new Set<string>();
+      // 维护 symbol 计数器，避免每次 filter O(n) → O(1)
+      const symbolCount = rows.reduce<Record<string, number>>((acc, row) => {
+        acc[row.symbol] = (acc[row.symbol] ?? 0) + 1;
+        return acc;
+      }, {});
       for (const keywordDraft of stockDraft.keywords) {
-        if (rows.filter(row => row.symbol === symbol).length >= KEYWORDS_PER_STOCK) {
+        if ((symbolCount[symbol] ?? 0) >= KEYWORDS_PER_STOCK) {
           break;
         }
         const keyword = toCleanString(keywordDraft.keyword);
@@ -427,6 +432,7 @@ export class AiStockKeywordGenerationService {
           validFrom: options.asOf,
           status: 'active',
         });
+        symbolCount[symbol] = (symbolCount[symbol] ?? 0) + 1;
       }
     }
 
@@ -434,7 +440,9 @@ export class AiStockKeywordGenerationService {
       throw new Error('AI stock keyword output has no valid keywords');
     }
 
-    const missingSymbols = stocks.filter(stock => !rows.some(row => row.symbol === stock.symbol));
+    // 用 Set 一次性查 missing symbols，O(n) 替代 O(n²)
+    const coveredSymbols = new Set(rows.map((row) => row.symbol));
+    const missingSymbols = stocks.filter((stock) => !coveredSymbols.has(stock.symbol));
     if (missingSymbols.length > 0) {
       throw new Error(`AI stock keyword output missing valid keywords for symbols: ${missingSymbols.map(stock => stock.symbol).join(', ')}`);
     }

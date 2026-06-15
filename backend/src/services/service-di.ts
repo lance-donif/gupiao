@@ -44,6 +44,14 @@ class InMemoryTransactionalClient implements IPrismaTransactionalClient {
       this.newsRecords.set(data.id, data);
       return Promise.resolve(data);
     },
+    createMany: ({ data }: { data: readonly IPrismaNewsRecord[] }): Promise<{ count: number }> => {
+      let count = 0;
+      for (const record of data) {
+        this.newsRecords.set(record.id, record);
+        count += 1;
+      }
+      return Promise.resolve({ count });
+    },
     delete: ({ where }: { where: { id: string } }): Promise<IPrismaNewsRecord> => {
       const record = this.newsRecords.get(where.id);
 

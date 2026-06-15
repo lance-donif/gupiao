@@ -513,11 +513,13 @@ function SecondaryExplainSurface({
   network,
   detail,
   loading,
+  snapshot,
 }: {
   evidence: NonNullable<ReturnType<typeof useStockEvidence>['data']> | null;
   network: DashboardNetworkPayload | null;
   detail: DashboardStockDetailPayload | null;
   loading: boolean;
+  snapshot: DashboardSnapshotPayload | null;
 }) {
   return (
     <section className="workstation-panel min-h-0 flex-1 rounded-lg">
@@ -529,6 +531,9 @@ function SecondaryExplainSurface({
             </TabsTrigger>
             <TabsTrigger value="network" className="h-6 px-3 text-[12px]">
               亲友网络
+            </TabsTrigger>
+            <TabsTrigger value="forecast" className="h-6 px-3 text-[12px]">
+              主题预测
             </TabsTrigger>
             <TabsTrigger value="status" className="h-6 px-3 text-[12px]">
               执行状态
@@ -548,11 +553,131 @@ function SecondaryExplainSurface({
         <TabsContent value="network" className="m-0 min-h-0 flex-1 p-4">
           <NetworkPanel network={network} />
         </TabsContent>
+        <TabsContent value="forecast" className="m-0 min-h-0 flex-1 p-4">
+          <ThemeForecastPanel snapshot={snapshot} />
+        </TabsContent>
         <TabsContent value="status" className="m-0 min-h-0 flex-1 p-4">
           <StatusPanel detail={detail} />
         </TabsContent>
       </Tabs>
     </section>
+  );
+}
+
+function ThemeForecastPanel({ snapshot }: { snapshot: DashboardSnapshotPayload | null }) {
+  const forecasts = snapshot?.theme_forecasts ?? [];
+  const gaps = snapshot?.expectation_gaps ?? [];
+  const bullish = forecasts.filter(f => f.direction === 'bullish');
+  const bearish = forecasts.filter(f => f.direction === 'bearish');
+
+  if (forecasts.length === 0 && gaps.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-[13px] text-muted-foreground">
+        暂无主题预测数据（需先运行每日推荐流水线）
+      </div>
+    );
+  }
+
+  return (
+    <ScrollArea className="h-full">
+      <div className="space-y-4">
+        {bullish.length > 0 && (
+          <div>
+            <div className="mb-2 flex items-center gap-1.5">
+              <div className="text-[13px] font-semibold text-emerald-700 dark:text-emerald-400">看涨主题</div>
+              <Badge variant="outline" className="number-figure h-4 px-1 text-[9px]">{bullish.length}</Badge>
+            </div>
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+              {bullish.map(f => (
+                <div
+                  key={f.theme}
+                  className={cn(
+                    'rounded-lg border p-3',
+                    f.weak_signal
+                      ? 'border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/20'
+                      : 'border-emerald-200 bg-emerald-50/50 dark:border-emerald-900/50 dark:bg-emerald-950/10',
+                  )}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="text-[14px] font-semibold">{f.theme}</div>
+                    <div className="number-figure text-[16px] font-bold text-emerald-600 dark:text-emerald-400">
+                      {(f.probability * 100).toFixed(0)}%
+                    </div>
+                  </div>
+                  {f.weak_signal && (
+                    <Badge className="mt-1 h-4 px-1 text-[9px] text-amber-700">弱信号</Badge>
+                  )}
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    <span className="text-[10px] text-muted-foreground">信号强度 {(f.signal_strength * 100).toFixed(0)}%</span>
+                    <span className="text-[10px] text-muted-foreground">·</span>
+                    <span className="text-[10px] text-muted-foreground">预期差 {f.expectation_gap.toFixed(3)}</span>
+                  </div>
+                  {f.related_symbols.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {f.related_symbols.slice(0, 5).map(s => (
+                        <span key={s} className="rounded bg-white/80 px-1 py-0 text-[10px] text-muted-foreground dark:bg-slate-900/50">
+                          {s}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {bearish.length > 0 && (
+          <div>
+            <div className="mb-2 flex items-center gap-1.5">
+              <div className="text-[13px] font-semibold text-rose-700 dark:text-rose-400">看跌主题</div>
+              <Badge variant="outline" className="number-figure h-4 px-1 text-[9px]">{bearish.length}</Badge>
+            </div>
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+              {bearish.map(f => (
+                <div key={f.theme} className="rounded-lg border border-rose-200 bg-rose-50/50 p-3 dark:border-rose-900/50 dark:bg-rose-950/10">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[14px] font-semibold">{f.theme}</div>
+                    <div className="number-figure text-[16px] font-bold text-rose-600 dark:text-rose-400">
+                      {(f.probability * 100).toFixed(0)}%
+                    </div>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    <span className="text-[10px] text-muted-foreground">信号强度 {(f.signal_strength * 100).toFixed(0)}%</span>
+                    <span className="text-[10px] text-muted-foreground">·</span>
+                    <span className="text-[10px] text-muted-foreground">预期差 {f.expectation_gap.toFixed(3)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {gaps.length > 0 && (
+          <div>
+            <div className="mb-2 flex items-center gap-1.5">
+              <div className="text-[13px] font-semibold text-amber-700 dark:text-amber-400">弱信号（预期差）</div>
+              <Badge variant="outline" className="number-figure h-4 px-1 text-[9px]">{gaps.length}</Badge>
+            </div>
+            <div className="space-y-1.5">
+              {gaps.map(g => (
+                <div key={g.keyword} className="flex items-center justify-between rounded-md border border-amber-200 bg-amber-50/30 px-3 py-2 dark:border-amber-900/40 dark:bg-amber-950/10">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-semibold">{g.keyword}</div>
+                    <div className="text-[10px] text-muted-foreground">
+                      图谱强度 {g.graph_strength.toFixed(3)} · 股价反应 {(g.price_reaction * 100).toFixed(2)}%
+                    </div>
+                  </div>
+                  <div className="number-figure shrink-0 text-[14px] font-bold text-amber-600 dark:text-amber-400">
+                    +{g.expectation_gap.toFixed(3)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </ScrollArea>
   );
 }
 
@@ -592,6 +717,7 @@ function StockWorkspace({
         network={network}
         detail={detail}
         loading={loading}
+        snapshot={snapshot}
       />
     </main>
   );
@@ -848,12 +974,21 @@ function EvidenceChainCard({
 }
 
 function NetworkPanel({ network }: { network: DashboardNetworkPayload | null }) {
+  const chains = React.useMemo(
+    () => (network && network.nodes.length >= 2 ? buildNetworkChains(network) : []),
+    [network],
+  );
+  const relations = React.useMemo(
+    () =>
+      network
+        ? [...network.relations].sort((left, right) => right.strength - left.strength)
+        : [],
+    [network],
+  );
+
   if (!network || network.nodes.length < 2) {
     return <EmptyBlock text="当前证据不足以形成稳定关系图" />;
   }
-
-  const chains = buildNetworkChains(network);
-  const relations = [...network.relations].sort((left, right) => right.strength - left.strength);
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
@@ -882,6 +1017,32 @@ function NetworkPanel({ network }: { network: DashboardNetworkPayload | null }) 
           {chains.length === 0 && <EmptyBlock text="当前证据不足以形成稳定关系图" />}
         </div>
       </div>
+      {network.related_theme_forecasts && network.related_theme_forecasts.length > 0 && (
+        <div className="workstation-control shrink-0 rounded-lg p-3">
+          <div className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold">
+            <Sparkles className="h-3.5 w-3.5 text-violet-500" />
+            关联主题预测
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {network.related_theme_forecasts.map(f => (
+              <span
+                key={f.theme}
+                className={cn(
+                  'rounded-md border px-2 py-1 text-[11px]',
+                  f.direction === 'bullish'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/20 dark:text-emerald-400'
+                    : f.direction === 'bearish'
+                      ? 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/20 dark:text-rose-400'
+                      : 'border-border/70 bg-muted/30 text-muted-foreground',
+                )}
+              >
+                {f.theme} {(f.probability * 100).toFixed(0)}%
+                {f.weak_signal && ' · 弱信号'}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <ScrollArea className="workstation-sunken min-h-0 flex-1 rounded-lg">
         <div className="space-y-2 p-3">
           {relations.map((row, index) => (
@@ -1181,15 +1342,21 @@ function EmptyBlock({ text, compact = false }: { text: string; compact?: boolean
 
 export default function DashboardPage() {
   const ctx = useAppShell();
-  const dispatchRefreshKey = ctx.lastDispatchOutcome
-    ? `${ctx.lastDispatchOutcome.trace_id}:${ctx.lastDispatchOutcome.finished_at}`
-    : null;
-  const snapshotState = useDashboardSnapshot({
+  
+  const dispatchRefreshKey = React.useMemo(() => {
+    return ctx.lastDispatchOutcome
+      ? `${ctx.lastDispatchOutcome.trace_id}:${ctx.lastDispatchOutcome.finished_at}`
+      : null;
+  }, [ctx.lastDispatchOutcome]);
+
+  const snapshotInput = React.useMemo(() => ({
     groupId: ctx.activeClusterId,
     displayDate: ctx.globalDate,
     strategyId: ctx.activeStrategyId,
     refreshKey: dispatchRefreshKey,
-  });
+  }), [ctx.activeClusterId, ctx.globalDate, ctx.activeStrategyId, dispatchRefreshKey]);
+
+  const snapshotState = useDashboardSnapshot(snapshotInput);
   const snapshot = snapshotState.data;
   const [selectedSymbol, setSelectedSymbol] = React.useState<string | null>(null);
 
@@ -1206,11 +1373,16 @@ export default function DashboardPage() {
     }
   }, [selectedSymbol, snapshot]);
 
-  const selected =
-    snapshot?.recommendations.find((row) => row.symbol === selectedSymbol) ??
-    snapshot?.recommendations[0] ??
-    null;
-  const traceId = pickTraceId(snapshot?.meta.trace_id, selected);
+  const selected = React.useMemo(() => {
+    if (!snapshot?.recommendations) return null;
+    return (
+      snapshot.recommendations.find((row) => row.symbol === selectedSymbol) ??
+      snapshot.recommendations[0] ??
+      null
+    );
+  }, [snapshot, selectedSymbol]);
+
+  const traceId = React.useMemo(() => pickTraceId(snapshot?.meta.trace_id, selected), [snapshot?.meta.trace_id, selected]);
 
   React.useEffect(() => {
     if (traceId) {
@@ -1218,22 +1390,30 @@ export default function DashboardPage() {
     }
   }, [ctx, traceId]);
 
-  const detail = useStockDetail({
+  const detailInput = React.useMemo(() => ({
     symbol: selected?.symbol ?? null,
     traceId,
     groupId: ctx.activeClusterId,
     strategyId: ctx.activeStrategyId,
-  });
-  const evidence = useStockEvidence({
+  }), [selected?.symbol, traceId, ctx.activeClusterId, ctx.activeStrategyId]);
+
+  const detail = useStockDetail(detailInput);
+
+  const evidenceInput = React.useMemo(() => ({
     symbol: selected?.symbol ?? null,
     traceId,
     groupId: ctx.activeClusterId,
-  });
-  const network = useStockNetwork({
+  }), [selected?.symbol, traceId, ctx.activeClusterId]);
+
+  const evidence = useStockEvidence(evidenceInput);
+
+  const networkInput = React.useMemo(() => ({
     symbol: selected?.symbol ?? null,
     traceId,
     groupId: ctx.activeClusterId,
-  });
+  }), [selected?.symbol, traceId, ctx.activeClusterId]);
+
+  const network = useStockNetwork(networkInput);
 
   return (
     <div className="dashboard-grid">

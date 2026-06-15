@@ -181,6 +181,16 @@ class PrismaNewsDelegateAdapter implements IPrismaNewsDelegate {
     return normalizeNewsRecord(created);
   }
 
+  public async createMany(args: { data: readonly IPrismaNewsRecord[] }): Promise<{ count: number }> {
+    // 透传到底层 Prisma delegate；批量写入不需要逐条规范化返回值
+    const result = await (this.delegate as unknown as {
+      createMany: (args: { data: readonly Record<string, unknown>[] }) => Promise<{ count: number }>;
+    }).createMany({
+      data: args.data.map(toPrismaNewsCreateInput),
+    });
+    return result;
+  }
+
   public async delete(args: { where: { id: string } }): Promise<IPrismaNewsRecord> {
     const deleted = await this.delegate.delete(args);
     return normalizeNewsRecord(deleted);

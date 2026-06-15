@@ -279,6 +279,14 @@ const longestCommonSubstringLength = (left: string, right: string): number => {
   if (left.length === 0 || right.length === 0) {
     return 0;
   }
+  
+  // Length difference pruning: abort if ratio is too skewed, preventing expensive O(N*M) calculation
+  const minLen = Math.min(left.length, right.length);
+  const maxLen = Math.max(left.length, right.length);
+  if (maxLen > 0 && minLen / maxLen < 0.6) {
+    return 0;
+  }
+
   const dp = Array.from({ length: left.length + 1 }, () => Array.from<number>({ length: right.length + 1 }).fill(0));
   let max = 0;
   for (let i = 1; i <= left.length; i += 1) {
@@ -1211,57 +1219,56 @@ const loadExistingMarketSignals = async (
   return results;
 };
 
-const loadRecentCandlesByStockId = async (
+const loadRecentCandlesRawSql = async (
   prisma: any,
   input: {
     readonly clusterKey: string;
     readonly asOf: Date;
     readonly stockIds: readonly string[];
-    readonly strategyConfig?: IStrategyExperimentConfig;
   },
+  lookbackDays: number,
 ): Promise<Map<string, any[]>> => {
-  if (input.stockIds.length === 0) {
-    return new Map();
-  }
+  const rows = await prisma.$queryRawUnsafe(
+    [
+      'SELECT s.id AS "stockId", c."tradingDay", c.open, c.high, c.low, c.close, c.volume',
+      'FROM "Stock" s',
+      'JOIN LATERAL (',
+      '  SELECT "tradingDay", open, high, low, close, volume',
+      '  FROM "Candle" c',
+      '  WHERE c."stockId" = s.id AND c."tradingDay" <= $2',
+      '  ORDER BY c."tradingDay" DESC',
+      `  LIMIT ${lookbackDays}`,
+      ') c ON TRUE',
+      'WHERE s."clusterKey" = $1 AND s.id = ANY($3::text[])',
+      'ORDER BY s.id ASC, c."tradingDay" DESC',
+    ].join(' '),
+    input.clusterKey,
+    input.asOf,
+    [...input.stockIds],
+  ) as readonly any[];
 
-  const lookbackDays = Math.max(
-    40,
-    input.strategyConfig?.fibonacciLookbackDays ?? 60,
-    input.strategyConfig?.supportResistanceLookbackDays ?? 60
-  );
+  const candlesByStockId = new Map<string, any[]>();
+  for (const row of rows) {
+    const stockId = String(row.stockId);
+    const list = candlesByStockId.get(stockId) ?? [];
+    list.push(row);
+    candlesByStockId.set(stockId, list);
+  }
+  return candlesByStockId;
+};
+
+const loadRecentCandlesPrismaFallback = async (
+  prisma: any,
+  input: {
+    readonly stockIds: readonly string[];
+    readonly asOf: Date;
+  },
+  lookbackDays: number,
+): Promise<Map<string, any[]>> => {
+  // Approximate the calendar days needed for the trading days lookback window
   const calendarDays = Math.ceil(lookbackDays * 1.6) + 15;
-
-  if (typeof prisma?.$queryRawUnsafe === 'function') {
-    const rows = await prisma.$queryRawUnsafe(
-      [
-        'SELECT s.id AS "stockId", c."tradingDay", c.open, c.high, c.low, c.close, c.volume',
-        'FROM "Stock" s',
-        'JOIN LATERAL (',
-        '  SELECT "tradingDay", open, high, low, close, volume',
-        '  FROM "Candle" c',
-        '  WHERE c."stockId" = s.id AND c."tradingDay" <= $2',
-        '  ORDER BY c."tradingDay" DESC',
-        `  LIMIT ${lookbackDays}`,
-        ') c ON TRUE',
-        'WHERE s."clusterKey" = $1 AND s.id = ANY($3::text[])',
-        'ORDER BY s.id ASC, c."tradingDay" DESC',
-      ].join(' '),
-      input.clusterKey,
-      input.asOf,
-      [...input.stockIds],
-    ) as readonly any[];
-
-    const candlesByStockId = new Map<string, any[]>();
-    for (const row of rows) {
-      const stockId = String(row.stockId);
-      const list = candlesByStockId.get(stockId) ?? [];
-      list.push(row);
-      candlesByStockId.set(stockId, list);
-    }
-    return candlesByStockId;
-  }
-
   const marketWindowStart = new Date(input.asOf.getTime() - calendarDays * 24 * 60 * 60 * 1000);
+  
   const candles = await prisma.candle.findMany({
     where: {
       stockId: { in: [...input.stockIds] },
@@ -1286,6 +1293,32 @@ const loadRecentCandlesByStockId = async (
     }
   }
   return candlesByStockId;
+};
+
+const loadRecentCandlesByStockId = async (
+  prisma: any,
+  input: {
+    readonly clusterKey: string;
+    readonly asOf: Date;
+    readonly stockIds: readonly string[];
+    readonly strategyConfig?: IStrategyExperimentConfig;
+  },
+): Promise<Map<string, any[]>> => {
+  if (input.stockIds.length === 0) {
+    return new Map();
+  }
+
+  const lookbackDays = Math.max(
+    40,
+    input.strategyConfig?.fibonacciLookbackDays ?? 60,
+    input.strategyConfig?.supportResistanceLookbackDays ?? 60
+  );
+
+  if (typeof prisma?.$queryRawUnsafe === 'function') {
+    return await loadRecentCandlesRawSql(prisma, input, lookbackDays);
+  }
+
+  return await loadRecentCandlesPrismaFallback(prisma, input, lookbackDays);
 };
 
 const persistMarketSignals = async (

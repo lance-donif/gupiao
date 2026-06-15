@@ -243,8 +243,10 @@ const isDirection = (value: unknown): value is CausalSignalDirection => {
 
 
 const DEFAULT_MAX_LLM_REQUEST_CHARS = 240_000;
-const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 30_000;
-const DEFAULT_LLM_MAX_TOKENS = 4096;
+// 超时 30s→120s、max_tokens 4096→8192：因果抽取 prompt 改用 deepseek-v4-flash + 中文因果结构化输出，
+// 单 batch（CAUSAL_SIGNAL_BATCH_SIZE=20）实际需要 40-90s、~6k tokens；保留 env 覆盖（CAUSAL_SIGNAL_LLM_REQUEST_TIMEOUT_MS / _LLM_MAX_TOKENS）。
+const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_LLM_MAX_TOKENS = 8192;
 const DEFAULT_LLM_NEWS_CONTENT_CHARS = 240;
 const LLM_CACHE_EXPIRES_AT = new Date('2099-12-31T23:59:59.999Z');
 
@@ -543,14 +545,19 @@ export class CausalSignalExtractionService {
         }
       };
 
+      // Load all cached candidates upfront to avoid N+1 queries in the loop
+      const globalCached = await this.loadCachedCandidates(prisma, input, input.news, newsById);
+      cacheHitCount += globalCached.cacheHitCount;
+
       for (let index = 0; index < input.news.length; index += batchSize) {
         const batchNews = input.news.slice(index, index + batchSize);
         const startedAt = Date.now();
-        const cachedBatch = await this.loadCachedCandidates(prisma, input, batchNews, newsById);
-        cacheHitCount += cachedBatch.cacheHitCount;
-        const newsToExtract = batchNews.filter(news => !cachedBatch.completedNewsIds.has(news.id));
+        
+        const batchCachedCandidates = globalCached.candidates.filter(c => batchNews.some(n => n.id === c.newsId));
+        const newsToExtract = batchNews.filter(news => !globalCached.completedNewsIds.has(news.id));
+        
         const freshBatch = await extractWithDynamicBatching(newsToExtract);
-        const batch = [...cachedBatch.candidates, ...freshBatch]
+        const batch = [...batchCachedCandidates, ...freshBatch]
           .map(candidate => validateCausalSignalCandidate(candidate, newsById));
         await this.recordExtractionCache(prisma, input, newsToExtract, batch);
         input.onBatchComplete?.({
@@ -711,19 +718,12 @@ export class CausalSignalExtractionService {
     }
 
     const ledger = new DataRefreshLedgerService();
-    const completed = new Set<string>();
-    for (const item of news) {
-      const cached = await ledger.getValid(prisma, {
-        dataKind: 'causal_signal_extraction',
-        source: this.cacheSourceKey,
-        clusterKey: input.clusterKey,
-        bucketKey: item.id,
-      }, input.asOf);
-      if (cached) {
-        completed.add(item.id);
-      }
-    }
-    return completed;
+    return await ledger.getValidBucketKeys(
+      prisma,
+      { dataKind: 'causal_signal_extraction', source: this.cacheSourceKey, clusterKey: input.clusterKey },
+      news.map(item => item.id),
+      input.asOf,
+    );
   }
 
   private async recordExtractionCache(

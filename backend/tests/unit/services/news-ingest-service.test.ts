@@ -62,6 +62,14 @@ class InMemoryTransactionalClient implements IPrismaTransactionalClient {
       this.newsRecords.set(data.id, data);
       return Promise.resolve(data);
     },
+    createMany: ({ data }: { data: readonly IPrismaNewsRecord[] }): Promise<{ count: number }> => {
+      let count = 0;
+      for (const record of data) {
+        this.newsRecords.set(record.id, record);
+        count += 1;
+      }
+      return Promise.resolve({ count });
+    },
     delete: ({ where }: { where: { id: string } }): Promise<IPrismaNewsRecord> => {
       const record = this.newsRecords.get(where.id);
 
@@ -82,10 +90,14 @@ class InMemoryTransactionalClient implements IPrismaTransactionalClient {
 
   public readonly rawNewsRecord = {
     create: ({ data }: { data: any }): Promise<any> => Promise.resolve(data),
+    createMany: ({ data }: { data: readonly any[] }): Promise<{ count: number }> =>
+      Promise.resolve({ count: data.length }),
   };
 
   public readonly normalizedNewsRecord = {
     create: ({ data }: { data: any }): Promise<any> => Promise.resolve(data),
+    createMany: ({ data }: { data: readonly any[] }): Promise<{ count: number }> =>
+      Promise.resolve({ count: data.length }),
   };
 
   public readonly stock = {
@@ -165,15 +177,33 @@ class FailingUnitOfWork implements IUnitOfWork {
 
         return Promise.resolve();
       },
+      addMany: (items: readonly NewsItem[]): Promise<void> => {
+        this.register(async ({ newsRepository }) => {
+          await newsRepository.addMany(items);
+        });
+        return Promise.resolve();
+      },
       addRawRecord: (record: any): Promise<void> => {
         this.register(async ({ newsRepository }) => {
           await newsRepository.addRawRecord(record);
         });
         return Promise.resolve();
       },
+      addManyRawRecords: (records: readonly any[]): Promise<void> => {
+        this.register(async ({ newsRepository }) => {
+          await newsRepository.addManyRawRecords(records);
+        });
+        return Promise.resolve();
+      },
       addNormalizedRecord: (record: any): Promise<void> => {
         this.register(async ({ newsRepository }) => {
           await newsRepository.addNormalizedRecord(record);
+        });
+        return Promise.resolve();
+      },
+      addManyNormalizedRecords: (records: readonly any[]): Promise<void> => {
+        this.register(async ({ newsRepository }) => {
+          await newsRepository.addManyNormalizedRecords(records);
         });
         return Promise.resolve();
       },

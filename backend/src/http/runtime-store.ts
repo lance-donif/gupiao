@@ -100,6 +100,21 @@ export class BackendRuntimeStore {
     return this.cluster.updateAutopilotPolicy(groupId, payload);
   }
 
+  public async evaluateAutopilot(groupId: string): Promise<{
+    readonly groupId: string;
+    readonly enabled: boolean;
+    readonly policy: unknown;
+    readonly message: string;
+  }> {
+    const policy = await this.cluster.getAutopilotPolicy(groupId);
+    return {
+      groupId,
+      enabled: Boolean((policy as any)?.enabled),
+      policy,
+      message: '策略状态已获取；完整评估（含收益/命中率统计）由调度器异步执行，结果写回 cluster_feedback',
+    };
+  }
+
   public async listBatches(limit: number) {
     return this.data.listBatches(limit);
   }

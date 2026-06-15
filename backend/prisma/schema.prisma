@@ -609,3 +609,49 @@ model StrategyPerformanceReport {
   @@unique([strategyId, asOf])
   @@index([clusterKey, asOf])
 }
+
+/// 弱信号/预期差快照：关键词图谱强度 vs 相关股票近期涨跌幅
+model ExpectationGapSnapshot {
+  id              String   @id @default(cuid())
+  traceId         String
+  asOf            DateTime
+  clusterKey      String   @default("global")
+  keyword         String
+  graphStrength   Decimal  @db.Decimal(10, 4)
+  priceReaction   Decimal  @db.Decimal(10, 4)
+  expectationGap  Decimal  @db.Decimal(10, 4)
+  isWeakSignal    Boolean
+  relatedSymbols  String[]
+  evidenceEdges   Json
+  reasons         String[]
+  createdAt       DateTime @default(now())
+
+  @@unique([traceId, keyword])
+  @@index([clusterKey, asOf, isWeakSignal])
+  @@index([clusterKey, expectationGap])
+}
+
+/// 主题/资产级预测：基于因果信号 + 预期差，输出"白银未来5日可能上涨"
+model ThemeForecast {
+  id                String   @id @default(cuid())
+  traceId           String
+  asOf              DateTime
+  clusterKey        String   @default("global")
+  theme             String
+  direction         String
+  probability       Decimal  @db.Decimal(5, 4)
+  horizon           Int      @default(5)
+  signalStrength    Decimal  @db.Decimal(10, 4)
+  expectationGap    Decimal  @db.Decimal(10, 4)
+  relatedSymbols    String[]
+  evidenceChain     Json
+  reasons           String[]
+  realizedDirection String?
+  realizedChangePct Decimal? @db.Decimal(8, 6)
+  isReconciled      Boolean  @default(false)
+  createdAt         DateTime @default(now())
+
+  @@unique([traceId, theme])
+  @@index([clusterKey, asOf, direction])
+  @@index([clusterKey, theme, asOf])
+}

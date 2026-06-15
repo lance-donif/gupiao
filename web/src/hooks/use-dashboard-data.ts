@@ -20,6 +20,22 @@ interface AsyncState<T> {
   reload: () => void;
 }
 
+const inflightCache = new Map<string, Promise<unknown>>();
+
+async function cachedLoad<T>(key: string, loader: () => Promise<T>): Promise<T> {
+  const cached = inflightCache.get(key);
+  if (cached) {
+    return cached as Promise<T>;
+  }
+  const promise = loader().finally(() => {
+    if (inflightCache.get(key) === promise) {
+      inflightCache.delete(key);
+    }
+  });
+  inflightCache.set(key, promise);
+  return promise;
+}
+
 function useAsync<T>(loader: () => Promise<T>, deps: React.DependencyList, enabled = true): AsyncState<T> {
   const [data, setData] = React.useState<T | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -36,7 +52,8 @@ function useAsync<T>(loader: () => Promise<T>, deps: React.DependencyList, enabl
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    loader()
+    const cacheKey = JSON.stringify([...deps, reloadToken]);
+    cachedLoad(cacheKey, loader)
       .then((payload) => {
         if (!controller.signal.aborted) {
           setData(payload);

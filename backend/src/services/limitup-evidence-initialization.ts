@@ -1104,19 +1104,6 @@ async function writeStockExposureCandidates(prisma: any, rows: readonly Record<s
   });
 }
 
-const loadNewsById = async (prisma: any, id: string): Promise<IHistoricalNewsRecord | null> => {
-  if (typeof prisma?.normalizedNewsRecord?.findUnique === 'function') {
-    const row = await prisma.normalizedNewsRecord.findUnique({ where: { id } });
-    return row ? readNewsRecord(row) : null;
-  }
-  if (typeof prisma?.normalizedNewsRecord?.findMany === 'function') {
-    const rows = await prisma.normalizedNewsRecord.findMany({ where: { id } });
-    const row = rows[0];
-    return row ? readNewsRecord(row) : null;
-  }
-  return null;
-};
-
 const parseAliasSuggestions = (value: unknown): readonly IAliasSuggestionDraft[] => {
   const payload = isRecord(value) ? value : {};
   const suggestions = Array.isArray(payload.aliasSuggestions) ? payload.aliasSuggestions : [];
@@ -1306,32 +1293,47 @@ export class KeywordAliasPromotionService {
     let promotedCount = 0;
     let rejectedCount = 0;
     if (!input.dryRun) {
-      for (const candidate of candidates) {
-        if (typeof candidate.id !== 'string') {
-          continue;
-        }
-        const news = await loadNewsById(prisma, String(candidate.sourceId));
+      const validCandidates = candidates.filter(candidate => typeof candidate.id === 'string');
+      if (validCandidates.length === 0) {
+        return { candidateCount: candidates.length, promotedCount: 0, rejectedCount: 0 };
+      }
+
+      // 批量预加载所有 news（消除 N+1：N 次 findUnique → 1 次 findMany）
+      const sourceIds = [...new Set(validCandidates.map((c: Record<string, unknown>) => String(c.sourceId)).filter(Boolean))];
+      const newsRows: readonly Record<string, unknown>[] = typeof prisma?.normalizedNewsRecord?.findMany === 'function'
+        ? (await prisma.normalizedNewsRecord.findMany({ where: { id: { in: sourceIds } } })) as readonly Record<string, unknown>[]
+        : [];
+      const newsById = new Map<string, IHistoricalNewsRecord>(
+        newsRows.map((row: Record<string, unknown>) => [String(row.id), readNewsRecord(row)] as const),
+      );
+
+      const toActivate: string[] = [];
+      const toReject: string[] = [];
+      for (const candidate of validCandidates) {
+        const id = String(candidate.id);
+        const news = newsById.get(String(candidate.sourceId)) ?? null;
         const evidenceText = String(candidate.evidenceText ?? '');
         if (!evidenceTextExists(news, evidenceText)) {
-          await prisma.keywordAlias.update({
-            where: { id: candidate.id },
-            data: {
-              status: 'rejected',
-              failureReason: 'evidence_text_not_found',
-            },
-          });
+          toReject.push(id);
           rejectedCount += 1;
-          continue;
         }
-        await prisma.keywordAlias.update({
-          where: { id: candidate.id },
-          data: {
-            status: 'active',
-            validFrom: input.validFrom,
-            failureReason: null,
-          },
+        else {
+          toActivate.push(id);
+          promotedCount += 1;
+        }
+      }
+
+      if (toReject.length > 0) {
+        await prisma.keywordAlias.updateMany({
+          where: { id: { in: toReject } },
+          data: { status: 'rejected', failureReason: 'evidence_text_not_found' },
         });
-        promotedCount += 1;
+      }
+      if (toActivate.length > 0) {
+        await prisma.keywordAlias.updateMany({
+          where: { id: { in: toActivate } },
+          data: { status: 'active', validFrom: input.validFrom, failureReason: null },
+        });
       }
     }
     else {
@@ -1366,20 +1368,56 @@ export class ExposureCandidateValidationService {
 
     let validatedCount = 0;
     let rejectedCount = 0;
+    if (candidates.length === 0) {
+      return { candidateCount: 0, validatedCount: 0, rejectedCount: 0 };
+    }
+
+    // 批量预加载所有 news（消除 N+1）
+    const sourceIds = [...new Set(candidates.map((c: Record<string, unknown>) => String(c.sourceId)).filter(Boolean))];
+    const newsRows: readonly Record<string, unknown>[] = typeof prisma?.normalizedNewsRecord?.findMany === 'function'
+      ? (await prisma.normalizedNewsRecord.findMany({ where: { id: { in: sourceIds } } })) as readonly Record<string, unknown>[]
+      : [];
+    const newsById = new Map<string, IHistoricalNewsRecord>(
+      newsRows.map((row: Record<string, unknown>) => [String(row.id), readNewsRecord(row)] as const),
+    );
+
+    const toValidate: Record<string, unknown>[] = [];
+    const toReject: Record<string, unknown>[] = [];
     for (const candidate of candidates) {
       const evidenceText = String(candidate.evidenceText ?? '');
-      const news = await loadNewsById(prisma, String(candidate.sourceId));
+      const news = newsById.get(String(candidate.sourceId)) ?? null;
       if (!evidenceTextExists(news, evidenceText)) {
         rejectedCount += 1;
-        if (!input.dryRun) {
-          await markCandidateStatus(prisma, candidate, 'rejected', 'evidence_text_not_found');
-        }
-        continue;
+        toReject.push(candidate);
       }
+      else {
+        validatedCount += 1;
+        toValidate.push(candidate);
+      }
+    }
 
-      validatedCount += 1;
-      if (!input.dryRun) {
-        await markCandidateStatus(prisma, candidate, 'validated', null);
+    if (!input.dryRun) {
+      // 批量 updateMany：1 次 round-trip 替代 N 次 update
+      const ops = [
+        ...(toReject.length > 0
+          ? [prisma.stockExposureCandidate.updateMany({
+              where: { id: { in: toReject.map(c => String(c.id)) } },
+              data: { status: 'rejected', failureReason: 'evidence_text_not_found' },
+            })]
+          : []),
+        ...(toValidate.length > 0
+          ? [prisma.stockExposureCandidate.updateMany({
+              where: { id: { in: toValidate.map(c => String(c.id)) } },
+              data: { status: 'validated', failureReason: null },
+            })]
+          : []),
+      ];
+      if (ops.length > 0) {
+        if (typeof prisma?.$transaction === 'function') {
+          await prisma.$transaction(ops);
+        } else {
+          await Promise.all(ops);
+        }
       }
     }
 
@@ -1409,20 +1447,48 @@ export class EvidencePromotionService {
     let rejectedCount = 0;
     const aliases: IKeywordAliasRecord[] = [];
 
+    if (candidates.length === 0) {
+      return { candidateCount: 0, promotedFactCount: 0, promotedAliasCount: 0, rejectedCount: 0 };
+    }
+
+    // 批量预加载所有 news（消除 N+1）
+    const sourceIds = [...new Set(candidates.map((c: Record<string, unknown>) => String(c.sourceId)).filter(Boolean))];
+    const newsRows: readonly Record<string, unknown>[] = typeof prisma?.normalizedNewsRecord?.findMany === 'function'
+      ? (await prisma.normalizedNewsRecord.findMany({ where: { id: { in: sourceIds } } })) as readonly Record<string, unknown>[]
+      : [];
+    const newsById = new Map<string, IHistoricalNewsRecord>(
+      newsRows.map((row: Record<string, unknown>) => [String(row.id), readNewsRecord(row)] as const),
+    );
+
+    const upsertOps: any[] = [];
+    const promoteOps: any[] = [];
+    const rejectedIds: string[] = [];
     for (const candidate of candidates) {
       const evidenceText = String(candidate.evidenceText ?? '');
-      const news = await loadNewsById(prisma, String(candidate.sourceId));
+      const news = newsById.get(String(candidate.sourceId)) ?? null;
       if (!evidenceTextExists(news, evidenceText)) {
         rejectedCount += 1;
-        await markCandidateStatus(prisma, candidate, 'rejected', 'evidence_text_not_found');
+        if (typeof candidate.id === 'string') {
+          rejectedIds.push(String(candidate.id));
+        }
         continue;
       }
 
-      if (!input.dryRun) {
-        await upsertStockExposureFact(prisma, candidate, input.validFrom);
-        await markCandidateStatus(prisma, candidate, 'promoted', null);
-      }
       promotedFactCount += 1;
+
+      if (!input.dryRun) {
+        // 每个 candidate 仍是单独 upsert（Prisma 不支持 batched upsert），
+        // 但全部装进 $transaction，单次 round-trip 替代 N 次。
+        upsertOps.push(buildStockExposureFactUpsert(prisma, candidate, input.validFrom));
+        if (typeof candidate.id === 'string') {
+          promoteOps.push(
+            prisma.stockExposureCandidate.update({
+              where: { id: String(candidate.id) },
+              data: { status: 'promoted', failureReason: null },
+            }),
+          );
+        }
+      }
 
       for (const alias of parseAliasSuggestions(candidate.evidenceJson)) {
         aliases.push({
@@ -1444,6 +1510,22 @@ export class EvidencePromotionService {
     }
 
     if (!input.dryRun) {
+      // 一次性 $transaction 提交所有 candidate 状态变更（rejected + promoted）
+      const statusOps: any[] = [];
+      if (rejectedIds.length > 0) {
+        statusOps.push(prisma.stockExposureCandidate.updateMany({
+          where: { id: { in: rejectedIds } },
+          data: { status: 'rejected', failureReason: 'evidence_text_not_found' },
+        }));
+      }
+      const allOps = [...statusOps, ...upsertOps, ...promoteOps].filter(Boolean);
+      if (allOps.length > 0) {
+        if (typeof prisma?.$transaction === 'function') {
+          await prisma.$transaction(allOps);
+        } else {
+          await Promise.all(allOps);
+        }
+      }
       promotedAliasCount = await new CoverageInitializationRepository(prisma).writeKeywordAliases(aliases);
     }
     else {
@@ -1459,29 +1541,14 @@ export class EvidencePromotionService {
   }
 }
 
-async function markCandidateStatus(
-  prisma: any,
-  candidate: Record<string, unknown>,
-  status: string,
-  failureReason: string | null,
-): Promise<void> {
-  if (typeof prisma?.stockExposureCandidate?.update !== 'function' || typeof candidate.id !== 'string') {
-    return;
-  }
-  await prisma.stockExposureCandidate.update({
-    where: { id: candidate.id },
-    data: {
-      status,
-      failureReason,
-    },
-  });
-}
-
-async function upsertStockExposureFact(
+function buildStockExposureFactUpsert(
   prisma: any,
   candidate: Record<string, unknown>,
   validFrom: Date,
-): Promise<void> {
+): any | null {
+  if (typeof prisma?.stockExposureFact?.upsert !== 'function') {
+    return null;
+  }
   const data = {
     traceId: candidate.traceId ?? null,
     clusterKey: String(candidate.clusterKey),
@@ -1504,39 +1571,30 @@ async function upsertStockExposureFact(
     validTo: null,
     status: 'active',
   };
-  if (typeof prisma?.stockExposureFact?.upsert === 'function') {
-    await prisma.stockExposureFact.upsert({
-      where: {
-        clusterKey_symbol_keyword_exposureType_source_sourceId: {
-          clusterKey: data.clusterKey,
-          symbol: data.symbol,
-          keyword: data.keyword,
-          exposureType: data.exposureType,
-          source: data.source,
-          sourceId: data.sourceId,
-        },
+  return prisma.stockExposureFact.upsert({
+    where: {
+      clusterKey_symbol_keyword_exposureType_source_sourceId: {
+        clusterKey: data.clusterKey,
+        symbol: data.symbol,
+        keyword: data.keyword,
+        exposureType: data.exposureType,
+        source: data.source,
+        sourceId: data.sourceId,
       },
-      create: data,
-      update: {
-        traceId: data.traceId,
-        stockName: data.stockName,
-        sourceName: data.sourceName,
-        confidence: data.confidence,
-        evidenceJson: data.evidenceJson,
-        memberCount: data.memberCount,
-        validFrom,
-        validTo: null,
-        status: 'active',
-      },
-    });
-    return;
-  }
-  if (typeof prisma?.stockExposureFact?.createMany === 'function') {
-    await prisma.stockExposureFact.createMany({
-      data: [data],
-      skipDuplicates: true,
-    });
-  }
+    },
+    create: data,
+    update: {
+      traceId: data.traceId,
+      stockName: data.stockName,
+      sourceName: data.sourceName,
+      confidence: data.confidence,
+      evidenceJson: data.evidenceJson,
+      memberCount: data.memberCount,
+      validFrom,
+      validTo: null,
+      status: 'active',
+    },
+  });
 }
 
 export class FactSnapshotService {

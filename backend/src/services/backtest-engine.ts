@@ -236,68 +236,42 @@ export class BacktestEngine {
         });
         const snapshotMap = new Map<string, any>(existingSnapshots.map((s: any) => [s.symbol, s]));
 
-        const updates: any[] = [];
         const finalYieldsMap = new Map<string, number>(); // 用于后续计算策略统计指标
         const basePriceMap = new Map<string, number>();
         const futureCandlesMap = new Map<string, any[]>();
+        const updates: any[] = [];
 
-        for (const rec of recommendations) {
-          const stock = stockMap.get(rec.symbol);
-          if (!stock) continue;
+        const reconItems = calculateReconciliationData({
+          recommendations,
+          stockMap,
+          candlesByStockId,
+          snapshotMap,
+          asOf,
+          scoreResult,
+        });
 
-          const stockCandles = candlesByStockId.get(stock.id) ?? [];
-          const baseCandles = stockCandles
-            .filter(c => c.tradingDay.getTime() <= asOf.getTime())
-            .sort((left, right) => right.tradingDay.getTime() - left.tradingDay.getTime());
-          const futureCandles = stockCandles
-            .filter(c => c.tradingDay.getTime() > asOf.getTime())
-            .sort((left, right) => left.tradingDay.getTime() - right.tradingDay.getTime());
-
-          if (baseCandles.length === 0 || futureCandles.length === 0) {
-            continue;
+        for (const item of reconItems) {
+          basePriceMap.set(item.symbol, item.p0);
+          futureCandlesMap.set(item.symbol, item.futureCandles);
+          if (item.finalYield !== null) {
+            finalYieldsMap.set(item.symbol, item.finalYield);
           }
-
-          const p0 = Number(baseCandles[0].close);
-          basePriceMap.set(rec.symbol, p0);
-          futureCandlesMap.set(rec.symbol, futureCandles);
-
-          const p1Candle = futureCandles[0];
-          const p3Candle = futureCandles.length >= 3 ? futureCandles[2] : null;
-          const p5Candle = futureCandles.length >= 5 ? futureCandles[4] : null;
-
-          const yield1Day = p1Candle ? (Number(p1Candle.close) - p0) / p0 : null;
-          const yield3Day = p3Candle ? (Number(p3Candle.close) - p0) / p0 : null;
-          const yield5Day = p5Candle ? (Number(p5Candle.close) - p0) / p0 : null;
-
-          const finalYield = yield5Day !== null ? yield5Day : (yield3Day !== null ? yield3Day : (yield1Day !== null ? yield1Day : null));
-          if (finalYield !== null) {
-            finalYieldsMap.set(rec.symbol, finalYield);
-          }
-
-          const currentSnapshot = snapshotMap.get(rec.symbol);
-          const originalBreakdown = currentSnapshot ? (currentSnapshot.scoreBreakdown as any) : {};
-          const updatedBreakdown = {
-            ...originalBreakdown,
-            scoringProfile: scoreResult.profileUsed,
-            halfLifeDaysUsed: scoreResult.halfLifeDaysUsed,
-            maxWindowDaysUsed: scoreResult.maxWindowDaysUsed,
-          };
 
           updates.push(
             prisma.recommendationSnapshot.update({
               where: {
                 traceId_symbol: {
                   traceId,
-                  symbol: rec.symbol,
+                  symbol: item.symbol,
                 },
               },
               data: {
-                realizedPrice: new Prisma.Decimal(p0),
-                realizedPriceTarget: p5Candle ? new Prisma.Decimal(Number(p5Candle.close)) : (p3Candle ? new Prisma.Decimal(Number(p3Candle.close)) : new Prisma.Decimal(Number(p1Candle.close))),
-                yield1Day: yield1Day !== null ? new Prisma.Decimal(yield1Day) : null,
-                yield3Day: yield3Day !== null ? new Prisma.Decimal(yield3Day) : null,
-                yield5Day: yield5Day !== null ? new Prisma.Decimal(yield5Day) : null,
-                scoreBreakdown: updatedBreakdown,
+                realizedPrice: new Prisma.Decimal(item.p0),
+                realizedPriceTarget: new Prisma.Decimal(item.realizedPriceTarget),
+                yield1Day: item.yield1Day !== null ? new Prisma.Decimal(item.yield1Day) : null,
+                yield3Day: item.yield3Day !== null ? new Prisma.Decimal(item.yield3Day) : null,
+                yield5Day: item.yield5Day !== null ? new Prisma.Decimal(item.yield5Day) : null,
+                scoreBreakdown: item.updatedBreakdown,
                 isReconciled: true,
               },
             })
@@ -361,6 +335,88 @@ export class BacktestEngine {
   }
 }
 
+export interface IReconciliationItem {
+  readonly symbol: string;
+  readonly p0: number;
+  readonly realizedPriceTarget: number;
+  readonly yield1Day: number | null;
+  readonly yield3Day: number | null;
+  readonly yield5Day: number | null;
+  readonly updatedBreakdown: any;
+  readonly finalYield: number | null;
+  readonly futureCandles: any[];
+}
+
+export const calculateReconciliationData = (params: {
+  readonly recommendations: readonly any[];
+  readonly stockMap: Map<string, any>;
+  readonly candlesByStockId: Map<string, any[]>;
+  readonly snapshotMap: Map<string, any>;
+  readonly asOf: Date;
+  readonly scoreResult: {
+    readonly profileUsed: string;
+    readonly halfLifeDaysUsed: number;
+    readonly maxWindowDaysUsed: number;
+  };
+}): IReconciliationItem[] => {
+  const results: IReconciliationItem[] = [];
+  for (const rec of params.recommendations) {
+    const stock = params.stockMap.get(rec.symbol);
+    if (!stock) continue;
+
+    const stockCandles = params.candlesByStockId.get(stock.id) ?? [];
+    const baseCandles = stockCandles
+      .filter(c => c.tradingDay.getTime() <= params.asOf.getTime())
+      .sort((left, right) => right.tradingDay.getTime() - left.tradingDay.getTime());
+    const futureCandles = stockCandles
+      .filter(c => c.tradingDay.getTime() > params.asOf.getTime())
+      .sort((left, right) => left.tradingDay.getTime() - right.tradingDay.getTime());
+
+    if (baseCandles.length === 0 || futureCandles.length === 0) {
+      continue;
+    }
+
+    const p0 = Number(baseCandles[0].close);
+    const p1Candle = futureCandles[0];
+    const p3Candle = futureCandles.length >= 3 ? futureCandles[2] : null;
+    const p5Candle = futureCandles.length >= 5 ? futureCandles[4] : null;
+
+    const yield1Day = p1Candle ? (Number(p1Candle.close) - p0) / p0 : null;
+    const yield3Day = p3Candle ? (Number(p3Candle.close) - p0) / p0 : null;
+    const yield5Day = p5Candle ? (Number(p5Candle.close) - p0) / p0 : null;
+
+    const realizedPriceTarget = p5Candle
+      ? Number(p5Candle.close)
+      : p3Candle
+      ? Number(p3Candle.close)
+      : Number(p1Candle.close);
+
+    const finalYield = yield5Day !== null ? yield5Day : (yield3Day !== null ? yield3Day : (yield1Day !== null ? yield1Day : null));
+
+    const currentSnapshot = params.snapshotMap.get(rec.symbol);
+    const originalBreakdown = currentSnapshot ? (currentSnapshot.scoreBreakdown as any) : {};
+    const updatedBreakdown = {
+      ...originalBreakdown,
+      scoringProfile: params.scoreResult.profileUsed,
+      halfLifeDaysUsed: params.scoreResult.halfLifeDaysUsed,
+      maxWindowDaysUsed: params.scoreResult.maxWindowDaysUsed,
+    };
+
+    results.push({
+      symbol: rec.symbol,
+      p0,
+      realizedPriceTarget,
+      yield1Day,
+      yield3Day,
+      yield5Day,
+      updatedBreakdown,
+      finalYield,
+      futureCandles,
+    });
+  }
+  return results;
+};
+
 async function generatePerformanceReports(
   prisma: any,
   input: {
@@ -388,6 +444,8 @@ async function generatePerformanceReports(
       recommendations: true,
     },
   });
+
+  const reportsToUpsertArgs: any[] = [];
 
   // 2. 为每个策略运行计算指标
   for (const run of strategyRuns) {
@@ -462,7 +520,7 @@ async function generatePerformanceReports(
       }
     }
 
-    await prisma.strategyPerformanceReport.upsert({
+    reportsToUpsertArgs.push({
       where: {
         strategyId_asOf: {
           strategyId: run.strategyId,
@@ -489,5 +547,12 @@ async function generatePerformanceReports(
         recommendationCount: recCount,
       },
     });
+  }
+
+  if (reportsToUpsertArgs.length === 1) {
+    await prisma.strategyPerformanceReport.upsert(reportsToUpsertArgs[0]);
+  } else if (reportsToUpsertArgs.length > 1) {
+    const queries = reportsToUpsertArgs.map((arg) => prisma.strategyPerformanceReport.upsert(arg));
+    await prisma.$transaction(queries);
   }
 }

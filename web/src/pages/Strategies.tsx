@@ -199,10 +199,12 @@ export default function StrategiesPage() {
   }
 
   const summaries = profits?.summaries ?? [];
+  const summaryById = React.useMemo(
+    () => new Map(summaries.map((item) => [item.strategy_id, item])),
+    [summaries],
+  );
   const selected = strategies.find((item) => item.id === selectedId) ?? strategies[0] ?? null;
-  const selectedSummary = selected
-    ? (summaries.find((item) => item.strategy_id === selected.id) ?? null)
-    : null;
+  const selectedSummary = selected ? (summaryById.get(selected.id) ?? null) : null;
   const selectedVm = selected ? buildStrategyViewModel(selected, selectedSummary) : null;
 
   return (
@@ -227,182 +229,30 @@ export default function StrategiesPage() {
           </div>
         </div>
         <ScrollArea className="min-h-0 flex-1 p-3 pt-2">
-          <div className="space-y-2 md:hidden">
-            {strategies.map((strategy) => {
-              const summary = summaries.find((item) => item.strategy_id === strategy.id) ?? null;
-              const vm = buildStrategyViewModel(strategy, summary);
-              return (
-                <div
-                  key={strategy.id}
-                  role="button"
-                  tabIndex={0}
-                  className={cn(
-                    'workstation-control w-full rounded-lg p-3 text-left transition-colors',
-                    selected?.id === strategy.id && 'bg-sky-50/80 shadow-[inset_3px_0_0_#2563eb]'
-                  )}
-                  onClick={() => setSelectedId(strategy.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      setSelectedId(strategy.id);
-                    }
-                  }}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="line-clamp-1 text-[13px] font-semibold">{strategy.name}</div>
-                      <div className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">
-                        {strategy.description || '无描述'}
-                      </div>
-                    </div>
-                    <Badge
-                      variant={strategy.enabled ? 'default' : 'secondary'}
-                      className="h-5 shrink-0 px-1.5 text-[10px]"
-                    >
-                      {vm.enabled_label}
-                    </Badge>
-                  </div>
-                  <div className="mt-3 grid gap-2">
-                    <SummaryRow label="筛选" value={vm.filter_summary} />
-                    <SummaryRow label="权重" value={vm.weight_summary} mono />
-                  </div>
-                  <div
-                    className="mt-3 flex justify-end gap-1"
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={() => openEditor(strategy)}
-                      title="编辑"
-                    >
-                      <Edit className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={() => void copyStrategy(strategy)}
-                      title="复制"
-                    >
-                      <Copy className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              );
-            })}
-            {strategies.length === 0 && <Empty text="当前集群无策略。" />}
-          </div>
-          <Table className="hidden overflow-hidden rounded-lg text-[12px] md:table">
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-[260px]">策略</TableHead>
-                <TableHead>筛选摘要</TableHead>
-                <TableHead>权重</TableHead>
-                <TableHead className="w-[120px]">状态</TableHead>
-                <TableHead className="w-[120px] text-right">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {strategies.map((strategy) => {
-                const summary = summaries.find((item) => item.strategy_id === strategy.id) ?? null;
-                const vm = buildStrategyViewModel(strategy, summary);
-                return (
-                  <TableRow
-                    key={strategy.id}
-                    className={cn(
-                      'cursor-pointer transition-colors hover:bg-white/80',
-                      selected?.id === strategy.id &&
-                        'bg-sky-50/80 shadow-[inset_3px_0_0_#2563eb] dark:bg-sky-950/20'
-                    )}
-                    onClick={() => setSelectedId(strategy.id)}
-                  >
-                    <TableCell>
-                      <div className="font-semibold">{strategy.name}</div>
-                      <div className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">
-                        {strategy.description || '无描述'}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{vm.filter_summary}</TableCell>
-                    <TableCell className="number-figure text-[11px]">{vm.weight_summary}</TableCell>
-                    <TableCell>
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void toggleStrategy(strategy);
-                        }}
-                      >
-                        <Badge
-                          variant={strategy.enabled ? 'default' : 'secondary'}
-                          className="h-5 px-1.5 text-[10px]"
-                        >
-                          {vm.enabled_label}
-                        </Badge>
-                      </button>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div
-                        className="flex justify-end gap-1"
-                        onClick={(event) => event.stopPropagation()}
-                      >
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => openEditor(strategy)}
-                          title="编辑"
-                        >
-                          <Edit className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => void copyStrategy(strategy)}
-                          title="复制"
-                        >
-                          <Copy className="h-3.5 w-3.5" />
-                        </Button>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-7 w-7" title="删除">
-                              <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>确认删除策略？</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                将删除「{strategy.name}」策略定义，历史收益记录保留。
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>取消</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={() => void deleteStrategy(strategy)}
-                                className="bg-rose-600 text-white hover:bg-rose-700"
-                              >
-                                删除
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-              {strategies.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
-                    当前集群无策略。
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
+          {strategies.length === 0 ? (
+            <Empty text="当前集群无策略。" />
+          ) : (
+            <>
+              <StrategyListMobile
+                strategies={strategies}
+                summaryById={summaryById}
+                selectedId={selected?.id ?? null}
+                onSelect={setSelectedId}
+                onEdit={openEditor}
+                onCopy={(strategy) => void copyStrategy(strategy)}
+              />
+              <StrategyListDesktop
+                strategies={strategies}
+                summaryById={summaryById}
+                selectedId={selected?.id ?? null}
+                onSelect={setSelectedId}
+                onEdit={openEditor}
+                onCopy={(strategy) => void copyStrategy(strategy)}
+                onDelete={(strategy) => void deleteStrategy(strategy)}
+                onToggle={(strategy) => void toggleStrategy(strategy)}
+              />
+            </>
+          )}
         </ScrollArea>
       </section>
 
@@ -494,6 +344,194 @@ export default function StrategiesPage() {
         onSave={() => void saveStrategy()}
       />
     </div>
+  );
+}
+
+function StrategyListMobile(props: {
+  strategies: readonly StrategyDefinition[];
+  summaryById: ReadonlyMap<string, StrategyProfitSummary>;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onEdit: (strategy: StrategyDefinition) => void;
+  onCopy: (strategy: StrategyDefinition) => void;
+}) {
+  return (
+    <div className="space-y-2 md:hidden">
+      {props.strategies.map((strategy) => {
+        const summary = props.summaryById.get(strategy.id) ?? null;
+        const vm = buildStrategyViewModel(strategy, summary);
+        return (
+          <div
+            key={strategy.id}
+            role="button"
+            tabIndex={0}
+            className={cn(
+              'workstation-control w-full rounded-lg p-3 text-left transition-colors',
+              props.selectedId === strategy.id && 'bg-sky-50/80 shadow-[inset_3px_0_0_#2563eb]'
+            )}
+            onClick={() => props.onSelect(strategy.id)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                props.onSelect(strategy.id);
+              }
+            }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="line-clamp-1 text-[13px] font-semibold">{strategy.name}</div>
+                <div className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">
+                  {strategy.description || '无描述'}
+                </div>
+              </div>
+              <Badge
+                variant={strategy.enabled ? 'default' : 'secondary'}
+                className="h-5 shrink-0 px-1.5 text-[10px]"
+              >
+                {vm.enabled_label}
+              </Badge>
+            </div>
+            <div className="mt-3 grid gap-2">
+              <SummaryRow label="筛选" value={vm.filter_summary} />
+              <SummaryRow label="权重" value={vm.weight_summary} mono />
+            </div>
+            <div className="mt-3 flex justify-end gap-1" onClick={(event) => event.stopPropagation()}>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => props.onEdit(strategy)}
+                title="编辑"
+              >
+                <Edit className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => props.onCopy(strategy)}
+                title="复制"
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function StrategyListDesktop(props: {
+  strategies: readonly StrategyDefinition[];
+  summaryById: ReadonlyMap<string, StrategyProfitSummary>;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onEdit: (strategy: StrategyDefinition) => void;
+  onCopy: (strategy: StrategyDefinition) => void;
+  onDelete: (strategy: StrategyDefinition) => void;
+  onToggle: (strategy: StrategyDefinition) => void;
+}) {
+  return (
+    <Table className="hidden overflow-hidden rounded-lg text-[12px] md:table">
+      <TableHeader>
+        <TableRow>
+          <TableHead className="w-[260px]">策略</TableHead>
+          <TableHead>筛选摘要</TableHead>
+          <TableHead>权重</TableHead>
+          <TableHead className="w-[120px]">状态</TableHead>
+          <TableHead className="w-[120px] text-right">操作</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {props.strategies.map((strategy) => {
+          const summary = props.summaryById.get(strategy.id) ?? null;
+          const vm = buildStrategyViewModel(strategy, summary);
+          return (
+            <TableRow
+              key={strategy.id}
+              className={cn(
+                'cursor-pointer transition-colors hover:bg-white/80',
+                props.selectedId === strategy.id &&
+                  'bg-sky-50/80 shadow-[inset_3px_0_0_#2563eb] dark:bg-sky-950/20'
+              )}
+              onClick={() => props.onSelect(strategy.id)}
+            >
+              <TableCell>
+                <div className="font-semibold">{strategy.name}</div>
+                <div className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">
+                  {strategy.description || '无描述'}
+                </div>
+              </TableCell>
+              <TableCell className="text-muted-foreground">{vm.filter_summary}</TableCell>
+              <TableCell className="number-figure text-[11px]">{vm.weight_summary}</TableCell>
+              <TableCell>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    props.onToggle(strategy);
+                  }}
+                >
+                  <Badge
+                    variant={strategy.enabled ? 'default' : 'secondary'}
+                    className="h-5 px-1.5 text-[10px]"
+                  >
+                    {vm.enabled_label}
+                  </Badge>
+                </button>
+              </TableCell>
+              <TableCell className="text-right">
+                <div className="flex justify-end gap-1" onClick={(event) => event.stopPropagation()}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => props.onEdit(strategy)}
+                    title="编辑"
+                  >
+                    <Edit className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => props.onCopy(strategy)}
+                    title="复制"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button variant="ghost" size="icon" className="h-7 w-7" title="删除">
+                        <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>确认删除策略？</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          将删除「{strategy.name}」策略定义，历史收益记录保留。
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>取消</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={() => props.onDelete(strategy)}
+                          className="bg-rose-600 text-white hover:bg-rose-700"
+                        >
+                          删除
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
   );
 }
 

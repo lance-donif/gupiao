@@ -21,6 +21,21 @@ export interface IFriendNetworkEngineInput {
   readonly sourceNewsFilePath: string;
   readonly asOf: Date;
   readonly newsItems: readonly IFriendNetworkNewsItem[];
+  // 结构化因果候选，作为图谱构建的主路径；为空时回退到共现逻辑
+  readonly causalSignals?: readonly ICausalSignalGraphInput[];
+}
+
+/**
+ * 从 CausalSignalCandidate 映射而来，用于构建因果驱动边：
+ * businessVariable(驱动原因) -> assetOrThemeKeyword(被驱动的资产/主题)
+ */
+export interface ICausalSignalGraphInput {
+  readonly newsId: string;
+  readonly businessVariable: string;
+  readonly assetOrThemeKeyword: string;
+  readonly direction: 'positive' | 'negative' | 'mixed' | 'neutral';
+  readonly confidence: number;
+  readonly evidenceText: string;
 }
 
 export interface IFriendNetworkNodeSnapshot {

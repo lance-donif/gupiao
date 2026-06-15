@@ -616,6 +616,28 @@ export interface DashboardExecutionHistoryItem {
   error_message: string | null;
 }
 
+export interface ThemeForecastItem {
+  theme: string;
+  direction: 'bullish' | 'bearish' | 'neutral';
+  probability: number;
+  horizon: number;
+  signal_strength: number;
+  expectation_gap: number;
+  related_symbols: string[];
+  weak_signal: boolean;
+  reasons: string[];
+}
+
+export interface ExpectationGapItem {
+  keyword: string;
+  graph_strength: number;
+  price_reaction: number;
+  expectation_gap: number;
+  is_weak_signal: boolean;
+  related_symbols: string[];
+  reasons: string[];
+}
+
 export interface DashboardSnapshotPayload {
   available: boolean;
   group_id: string;
@@ -625,6 +647,8 @@ export interface DashboardSnapshotPayload {
   default_symbol: string | null;
   recommendations: DashboardRecommendationItem[];
   execution_history: DashboardExecutionHistoryItem[];
+  theme_forecasts: ThemeForecastItem[];
+  expectation_gaps: ExpectationGapItem[];
   warnings: string[];
   sla: {
     status: 'ready' | 'failed' | 'running' | 'waiting' | 'no_trace';
@@ -856,6 +880,7 @@ export interface DashboardNetworkPayload {
     strength: number;
     source_type: '因果链' | '暴露映射' | '全局图谱';
   }>;
+  related_theme_forecasts: ThemeForecastItem[];
   network_preview: {
     explanation: string | null;
   };

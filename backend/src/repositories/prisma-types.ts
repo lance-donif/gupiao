@@ -37,6 +37,7 @@ export interface IPrismaStockRecord {
 
 export interface IPrismaNewsDelegate {
   create: (args: { data: IPrismaNewsRecord }) => Promise<IPrismaNewsRecord>;
+  createMany: (args: { data: readonly IPrismaNewsRecord[] }) => Promise<{ count: number }>;
   delete: (args: { where: { id: string } }) => Promise<IPrismaNewsRecord>;
   findUnique: (args: { where: { id: string } }) => Promise<IPrismaNewsRecord | null>;
   findMany: () => Promise<readonly IPrismaNewsRecord[]>;
@@ -77,10 +78,14 @@ export interface IPrismaNormalizedNewsRecord {
 
 export interface IPrismaRawNewsDelegate {
   create: (args: { data: IPrismaRawNewsRecord }) => Promise<IPrismaRawNewsRecord>;
+  createMany: (args: { data: readonly IPrismaRawNewsRecord[] }) => Promise<{ count: number }>;
 }
 
 export interface IPrismaNormalizedNewsDelegate {
   create: (args: { data: IPrismaNormalizedNewsRecord }) => Promise<IPrismaNormalizedNewsRecord>;
+  createMany: (
+    args: { data: readonly IPrismaNormalizedNewsRecord[] },
+  ) => Promise<{ count: number }>;
 }
 
 export interface IPrismaTransactionalClient {

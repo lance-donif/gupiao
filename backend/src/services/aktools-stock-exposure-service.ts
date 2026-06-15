@@ -266,55 +266,83 @@ const persistExposureRows = async (
     status: 'active',
   }));
 
-  for (const row of factRows) {
-    const data = {
-      traceId: row.traceId,
-      clusterKey: row.clusterKey,
-      symbol: row.symbol,
-      stockName: row.stockName,
-      keyword: row.keyword,
-      exposureType: row.exposureType,
-      taxonomyLevel: row.taxonomyLevel,
-      source: row.source,
-      sourceId: row.sourceId,
-      sourceName: row.sourceName,
-      confidence: row.confidence,
-      evidenceJson: row.evidenceJson,
-      memberCount: row.memberCount,
-      validFrom: row.validFrom,
-      validTo: row.validTo,
-      status: row.status,
-    };
+  // 批量 upsert：所有 upsert 装进 $transaction，单次 round-trip 替代 N 次串行
+  // 保留每行自己的 update payload（不能用 updateMany 替代，updateMany 同一桶内只能共享 data）
+  if (typeof prisma.stockExposureFact.upsert === 'function') {
+    const upsertOps = factRows.map(row => prisma.stockExposureFact.upsert({
+      where: {
+        clusterKey_symbol_keyword_exposureType_source_sourceId: {
+          clusterKey: row.clusterKey,
+          symbol: row.symbol,
+          keyword: row.keyword,
+          exposureType: row.exposureType,
+          source: row.source,
+          sourceId: row.sourceId,
+        },
+      },
+      create: {
+        traceId: row.traceId,
+        clusterKey: row.clusterKey,
+        symbol: row.symbol,
+        stockName: row.stockName,
+        keyword: row.keyword,
+        exposureType: row.exposureType,
+        taxonomyLevel: row.taxonomyLevel,
+        source: row.source,
+        sourceId: row.sourceId,
+        sourceName: row.sourceName,
+        confidence: row.confidence,
+        evidenceJson: row.evidenceJson,
+        memberCount: row.memberCount,
+        validFrom: row.validFrom,
+        validTo: row.validTo,
+        status: row.status,
+      },
+      update: {
+        traceId: row.traceId,
+        stockName: row.stockName,
+        sourceName: row.sourceName,
+        confidence: row.confidence,
+        evidenceJson: row.evidenceJson,
+        memberCount: row.memberCount,
+        validFrom: row.validFrom,
+        validTo: row.validTo,
+        status: row.status,
+      },
+    }));
 
-    if (typeof prisma.stockExposureFact.upsert === 'function') {
-      await prisma.stockExposureFact.upsert({
-        where: {
-          clusterKey_symbol_keyword_exposureType_source_sourceId: {
-            clusterKey: row.clusterKey,
-            symbol: row.symbol,
-            keyword: row.keyword,
-            exposureType: row.exposureType,
-            source: row.source,
-            sourceId: row.sourceId,
-          },
-        },
-        create: data,
-        update: {
-          traceId: row.traceId,
-          stockName: row.stockName,
-          sourceName: row.sourceName,
-          confidence: row.confidence,
-          evidenceJson: row.evidenceJson,
-          memberCount: row.memberCount,
-          validFrom: row.validFrom,
-          validTo: row.validTo,
-          status: row.status,
-        },
-      });
-      continue;
+    // Chunk transactions to prevent 5000ms timeout on massive dataset
+    const chunkSize = 100;
+    for (let i = 0; i < upsertOps.length; i += chunkSize) {
+      const chunk = upsertOps.slice(i, i + chunkSize);
+      await prisma.$transaction(chunk);
     }
+    return;
+  }
 
-    await prisma.stockExposureFact.createMany({ data: [data], skipDuplicates: true });
+  // 降级：createMany skipDuplicates（一次写入）
+  if (typeof prisma.stockExposureFact.createMany === 'function') {
+    await prisma.stockExposureFact.createMany({
+      data: factRows.map(row => ({
+        traceId: row.traceId,
+        clusterKey: row.clusterKey,
+        symbol: row.symbol,
+        stockName: row.stockName,
+        keyword: row.keyword,
+        exposureType: row.exposureType,
+        taxonomyLevel: row.taxonomyLevel,
+        source: row.source,
+        sourceId: row.sourceId,
+        sourceName: row.sourceName,
+        confidence: row.confidence,
+        evidenceJson: row.evidenceJson,
+        memberCount: row.memberCount,
+        validFrom: row.validFrom,
+        validTo: row.validTo,
+        status: row.status,
+      })),
+      skipDuplicates: true,
+    });
   }
 };
 
@@ -580,17 +608,20 @@ export class AkToolsStockExposureService {
     failures: string[],
   ): Promise<void> {
     const symbols = [...input.stockNameBySymbol.keys()].slice(0, input.symbolLimit ?? input.stockNameBySymbol.size);
-    for (const symbol of symbols) {
-      try {
-        const detail = await this.getRows('stock_individual_info_em', { symbol });
-        const rows = buildIndividualInfoRows({ base, rows: detail.rows, requestUrl: detail.requestUrl, symbol });
-        acceptedRows.push(...rows.accepted);
-        rejectedRows.push(...rows.rejected);
-      }
-      catch (error) {
-        failures.push(`stock_individual_info_em:${symbol}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+    // 并行抓取个股，错误仅记录不影响其他
+    await Promise.all(
+      symbols.map(async (symbol) => {
+        try {
+          const detail = await this.getRows('stock_individual_info_em', { symbol });
+          const rows = buildIndividualInfoRows({ base, rows: detail.rows, requestUrl: detail.requestUrl, symbol });
+          acceptedRows.push(...rows.accepted);
+          rejectedRows.push(...rows.rejected);
+        }
+        catch (error) {
+          failures.push(`stock_individual_info_em:${symbol}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }),
+    );
   }
 
   private async collectMovementRows(
@@ -604,23 +635,26 @@ export class AkToolsStockExposureService {
       { endpoint: 'stock_board_change_em', source: BOARD_CHANGE_SOURCE, sourceName: '板块异动' },
     ];
 
-    for (const spec of specs) {
-      try {
-        const detail = await this.getRows(spec.endpoint);
-        const rows = buildMovementRows({
-          base,
-          rows: detail.rows,
-          requestUrl: detail.requestUrl,
-          source: spec.source,
-          sourceName: spec.sourceName,
-        });
-        acceptedRows.push(...rows.accepted);
-        rejectedRows.push(...rows.rejected);
-      }
-      catch (error) {
-        failures.push(`${spec.endpoint}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+    // 并行抓取 2 个 endpoint
+    await Promise.all(
+      specs.map(async (spec) => {
+        try {
+          const detail = await this.getRows(spec.endpoint);
+          const rows = buildMovementRows({
+            base,
+            rows: detail.rows,
+            requestUrl: detail.requestUrl,
+            source: spec.source,
+            sourceName: spec.sourceName,
+          });
+          acceptedRows.push(...rows.accepted);
+          rejectedRows.push(...rows.rejected);
+        }
+        catch (error) {
+          failures.push(`${spec.endpoint}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }),
+    );
   }
 }
 

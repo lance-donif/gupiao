@@ -13,6 +13,7 @@ import type {
   IDashboardSnapshotPayload,
   IDashboardStockDetailPayload,
   IDispatchDailyInput,
+  IExpectationGapDisplayItem,
   ILiveQuotePayload,
   ILiveQuoteReader,
   IMLRecommendationQuery,
@@ -21,6 +22,7 @@ import type {
   IStrategyProfitPayload,
   IStrategyProfitQuery,
   IStrategyPerformanceReportPayload,
+  IThemeForecastDisplayItem,
 } from './types.js';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -2595,6 +2597,8 @@ export class RuntimeDataOperations {
         default_symbol: null,
         recommendations: [],
         execution_history: [],
+        theme_forecasts: [],
+        expectation_gaps: [],
         warnings: ['DATABASE_URL 未配置，无法读取 dashboard 聚合数据'],
         sla: {
           status: 'no_trace',
@@ -2827,6 +2831,10 @@ export class RuntimeDataOperations {
     const metaBatch = executionHistory.find(item => item.trace_id === metaTraceId) ?? executionHistory[0] ?? null;
     const sla = buildDashboardSla(recommendations, executionHistory, executionRows.rows, displayDate);
 
+    // 主题预测 + 弱信号/预期差
+    const themeForecasts = await this.loadThemeForecasts(metaTraceId, groupId);
+    const expectationGaps = await this.loadExpectationGaps(metaTraceId, groupId);
+
     return {
       available: recommendations.length > 0,
       group_id: groupId,
@@ -2836,6 +2844,8 @@ export class RuntimeDataOperations {
       default_symbol: recommendations[0]?.symbol ?? null,
       recommendations,
       execution_history: executionHistory,
+      theme_forecasts: themeForecasts,
+      expectation_gaps: expectationGaps,
       warnings: recommendations.length > 0 ? [] : ['当前日期无 RecommendationSnapshot 数据'],
       sla,
       quality: {
@@ -2858,6 +2868,75 @@ export class RuntimeDataOperations {
         finished_at: metaBatch?.finished_at ?? null,
       },
     };
+  }
+
+  private async loadThemeForecasts(traceId: string, groupId: string): Promise<readonly IThemeForecastDisplayItem[]> {
+    const pool = this.deps.options.pgPool;
+    if (!pool || !traceId) {
+      return [];
+    }
+    const clusterKey = `cluster-${groupId}`;
+    try {
+      const rows = await pool.query<{
+        theme: string; direction: string; probability: string; horizon: number;
+        signal_strength: string; expectation_gap: string; related_symbols: string[];
+        evidence_chain: { weakSignal?: boolean }; reasons: string[];
+      }>(
+        `SELECT theme, direction, probability::text, horizon, "signalStrength"::text AS signal_strength,
+                "expectationGap"::text AS expectation_gap, "relatedSymbols" AS related_symbols,
+                "evidenceChain" AS evidence_chain, reasons
+         FROM "ThemeForecast"
+         WHERE "traceId" = $1 AND "clusterKey" = $2 AND direction != 'neutral'
+         ORDER BY probability DESC LIMIT 10`,
+        [traceId, clusterKey],
+      );
+      return rows.rows.map(row => ({
+        theme: row.theme,
+        direction: (['bullish', 'bearish', 'neutral'].includes(row.direction) ? row.direction : 'neutral') as IThemeForecastDisplayItem['direction'],
+        probability: Number(row.probability),
+        horizon: row.horizon,
+        signal_strength: Number(row.signal_strength),
+        expectation_gap: Number(row.expectation_gap),
+        related_symbols: Array.isArray(row.related_symbols) ? row.related_symbols.map(String) : [],
+        weak_signal: Boolean(row.evidence_chain?.weakSignal),
+        reasons: Array.isArray(row.reasons) ? row.reasons.map(String) : [],
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  private async loadExpectationGaps(traceId: string, groupId: string): Promise<readonly IExpectationGapDisplayItem[]> {
+    const pool = this.deps.options.pgPool;
+    if (!pool || !traceId) {
+      return [];
+    }
+    const clusterKey = `cluster-${groupId}`;
+    try {
+      const rows = await pool.query<{
+        keyword: string; graph_strength: string; price_reaction: string;
+        expectation_gap: string; is_weak_signal: boolean; related_symbols: string[]; reasons: string[];
+      }>(
+        `SELECT keyword, "graphStrength"::text AS graph_strength, "priceReaction"::text AS price_reaction,
+                "expectationGap"::text AS expectation_gap, "isWeakSignal" AS is_weak_signal,
+                "relatedSymbols" AS related_symbols, reasons
+         FROM "ExpectationGapSnapshot"
+         WHERE "traceId" = $1 AND "clusterKey" = $2 AND "isWeakSignal" = true
+         ORDER BY "expectationGap" DESC LIMIT 10`,
+        [traceId, clusterKey],
+      );
+      return rows.rows.map(row => ({
+        keyword: row.keyword,
+        graph_strength: Number(row.graph_strength),
+        price_reaction: Number(row.price_reaction),
+        expectation_gap: Number(row.expectation_gap),
+        is_weak_signal: row.is_weak_signal,
+        related_symbols: Array.isArray(row.related_symbols) ? row.related_symbols.map(String) : [],
+        reasons: Array.isArray(row.reasons) ? row.reasons.map(String) : [],
+      }));
+    } catch {
+      return [];
+    }
   }
 
   public async getDashboardStockDetail(
@@ -3395,6 +3474,9 @@ export class RuntimeDataOperations {
       .slice(0, 4);
     const firstRelation = visibleRelations[0] ?? null;
 
+    // 关联主题预测：通过 StockExposureFact keyword → ThemeForecast theme 匹配
+    const relatedThemeForecasts = await this.loadRelatedThemeForecasts(traceId, groupId, symbol);
+
     return {
       trace_id: traceId,
       group_id: groupId,
@@ -3403,10 +3485,49 @@ export class RuntimeDataOperations {
       nodes: [...nodes.values()],
       edges: visibleEdges,
       relations: visibleRelations,
+      related_theme_forecasts: relatedThemeForecasts,
       network_preview: {
         explanation: firstRelation ? `${firstRelation.source} 通过 ${firstRelation.relation} 连接到 ${firstRelation.target}` : null,
       },
     };
+  }
+
+  private async loadRelatedThemeForecasts(traceId: string, groupId: string, symbol: string): Promise<readonly IThemeForecastDisplayItem[]> {
+    const pool = this.deps.options.pgPool;
+    if (!pool || !traceId || !symbol) {
+      return [];
+    }
+    const clusterKey = `cluster-${groupId}`;
+    try {
+      const rows = await pool.query<{
+        theme: string; direction: string; probability: string; horizon: number;
+        signal_strength: string; expectation_gap: string; related_symbols: string[];
+        evidence_chain: { weakSignal?: boolean }; reasons: string[];
+      }>(
+        `SELECT tf.theme, tf.direction, tf.probability::text, tf.horizon,
+                tf."signalStrength"::text AS signal_strength, tf."expectationGap"::text AS expectation_gap,
+                tf."relatedSymbols" AS related_symbols, tf."evidenceChain" AS evidence_chain, tf.reasons
+         FROM "ThemeForecast" tf
+         WHERE tf."traceId" = $1 AND tf."clusterKey" = $2
+           AND tf.direction != 'neutral'
+           AND $3 = ANY(tf."relatedSymbols")
+         ORDER BY tf.probability DESC LIMIT 5`,
+        [traceId, clusterKey, symbol],
+      );
+      return rows.rows.map(row => ({
+        theme: row.theme,
+        direction: (['bullish', 'bearish', 'neutral'].includes(row.direction) ? row.direction : 'neutral') as IThemeForecastDisplayItem['direction'],
+        probability: Number(row.probability),
+        horizon: row.horizon,
+        signal_strength: Number(row.signal_strength),
+        expectation_gap: Number(row.expectation_gap),
+        related_symbols: Array.isArray(row.related_symbols) ? row.related_symbols.map(String) : [],
+        weak_signal: Boolean(row.evidence_chain?.weakSignal),
+        reasons: Array.isArray(row.reasons) ? row.reasons.map(String) : [],
+      }));
+    } catch {
+      return [];
+    }
   }
 
   public async getGraph(_cutoffDate: string, _groupId: string, _maxNodes: number): Promise<Record<string, unknown>> {

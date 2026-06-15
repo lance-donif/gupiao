@@ -261,55 +261,79 @@ const persistExposureRows = async (
     status: 'active',
   }));
 
-  for (const row of factRows) {
-    const data = {
-      traceId: row.traceId,
-      clusterKey: row.clusterKey,
-      symbol: row.symbol,
-      stockName: row.stockName,
-      keyword: row.keyword,
-      exposureType: row.exposureType,
-      taxonomyLevel: row.taxonomyLevel,
-      source: row.source,
-      sourceId: row.sourceId,
-      sourceName: row.sourceName,
-      confidence: row.confidence,
-      evidenceJson: row.evidenceJson,
-      memberCount: row.memberCount,
-      validFrom: row.validFrom,
-      validTo: row.validTo,
-      status: row.status,
-    };
-    if (prisma.stockExposureFact.upsert) {
-      await prisma.stockExposureFact.upsert({
-        where: {
-          clusterKey_symbol_keyword_exposureType_source_sourceId: {
-            clusterKey: row.clusterKey,
-            symbol: row.symbol,
-            keyword: row.keyword,
-            exposureType: row.exposureType,
-            source: row.source,
-            sourceId: row.sourceId,
-          },
+  // 批量 upsert：所有 upsert 装进 $transaction，单次 round-trip 替代 N 次串行
+  if (prisma.stockExposureFact.upsert) {
+    const upsertOps = factRows.map(row => prisma.stockExposureFact.upsert({
+      where: {
+        clusterKey_symbol_keyword_exposureType_source_sourceId: {
+          clusterKey: row.clusterKey,
+          symbol: row.symbol,
+          keyword: row.keyword,
+          exposureType: row.exposureType,
+          source: row.source,
+          sourceId: row.sourceId,
         },
-        create: data,
-        update: {
-          traceId: row.traceId,
-          stockName: row.stockName,
-          sourceName: row.sourceName,
-          confidence: row.confidence,
-          evidenceJson: row.evidenceJson,
-          memberCount: row.memberCount,
-          validFrom: row.validFrom,
-          validTo: row.validTo,
-          status: row.status,
-        },
-      });
-      continue;
+      },
+      create: {
+        traceId: row.traceId,
+        clusterKey: row.clusterKey,
+        symbol: row.symbol,
+        stockName: row.stockName,
+        keyword: row.keyword,
+        exposureType: row.exposureType,
+        taxonomyLevel: row.taxonomyLevel,
+        source: row.source,
+        sourceId: row.sourceId,
+        sourceName: row.sourceName,
+        confidence: row.confidence,
+        evidenceJson: row.evidenceJson,
+        memberCount: row.memberCount,
+        validFrom: row.validFrom,
+        validTo: row.validTo,
+        status: row.status,
+      },
+      update: {
+        traceId: row.traceId,
+        stockName: row.stockName,
+        sourceName: row.sourceName,
+        confidence: row.confidence,
+        evidenceJson: row.evidenceJson,
+        memberCount: row.memberCount,
+        validFrom: row.validFrom,
+        validTo: row.validTo,
+        status: row.status,
+      },
+    }));
+    // Chunk transactions to prevent 5000ms timeout on massive dataset
+    const chunkSize = 100;
+    for (let i = 0; i < upsertOps.length; i += chunkSize) {
+      const chunk = upsertOps.slice(i, i + chunkSize);
+      await prisma.$transaction(chunk);
     }
+    return;
+  }
 
+  // 降级：createMany skipDuplicates（一次写入）
+  if (prisma.stockExposureFact.createMany) {
     await prisma.stockExposureFact.createMany({
-      data: [data],
+      data: factRows.map(row => ({
+        traceId: row.traceId,
+        clusterKey: row.clusterKey,
+        symbol: row.symbol,
+        stockName: row.stockName,
+        keyword: row.keyword,
+        exposureType: row.exposureType,
+        taxonomyLevel: row.taxonomyLevel,
+        source: row.source,
+        sourceId: row.sourceId,
+        sourceName: row.sourceName,
+        confidence: row.confidence,
+        evidenceJson: row.evidenceJson,
+        memberCount: row.memberCount,
+        validFrom: row.validFrom,
+        validTo: row.validTo,
+        status: row.status,
+      })),
       skipDuplicates: true,
     });
   }

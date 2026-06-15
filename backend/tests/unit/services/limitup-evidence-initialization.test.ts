@@ -209,6 +209,17 @@ class MockCoveragePrismaClient {
       };
       return this.exposureCandidates[index];
     },
+    updateMany: async (args: { where: { id?: { in?: string[] } }; data: any }) => {
+      const ids = new Set(args.where.id?.in ?? []);
+      let count = 0;
+      for (const row of this.exposureCandidates) {
+        if (ids.has(row.id)) {
+          Object.assign(row, args.data);
+          count += 1;
+        }
+      }
+      return { count };
+    },
   };
 
   public readonly stockExposureFact = {
@@ -281,6 +292,17 @@ class MockCoveragePrismaClient {
         ...args.data,
       };
       return this.keywordAliases[index];
+    },
+    updateMany: async (args: { where: { id?: { in?: string[] } }; data: any }) => {
+      const ids = new Set(args.where.id?.in ?? []);
+      let count = 0;
+      for (const row of this.keywordAliases) {
+        if (ids.has(row.id)) {
+          Object.assign(row, args.data);
+          count += 1;
+        }
+      }
+      return { count };
     },
   };
 

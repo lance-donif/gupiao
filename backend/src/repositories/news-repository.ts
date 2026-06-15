@@ -54,15 +54,44 @@ export class PrismaNewsRepository implements INewsRepository {
     });
   }
 
+  public async addMany(items: readonly NewsItem[]): Promise<void> {
+    if (items.length === 0) {
+      return;
+    }
+    await this.prisma.newsItem.createMany({
+      data: items.map(mapNewsItemToRecord),
+    });
+  }
+
   public async addRawRecord(record: IPrismaRawNewsRecord): Promise<void> {
     await this.prisma.rawNewsRecord.create({
       data: record,
     });
   }
 
+  public async addManyRawRecords(records: readonly IPrismaRawNewsRecord[]): Promise<void> {
+    if (records.length === 0) {
+      return;
+    }
+    await this.prisma.rawNewsRecord.createMany({
+      data: [...records],
+    });
+  }
+
   public async addNormalizedRecord(record: IPrismaNormalizedNewsRecord): Promise<void> {
     await this.prisma.normalizedNewsRecord.create({
       data: record,
+    });
+  }
+
+  public async addManyNormalizedRecords(
+    records: readonly IPrismaNormalizedNewsRecord[],
+  ): Promise<void> {
+    if (records.length === 0) {
+      return;
+    }
+    await this.prisma.normalizedNewsRecord.createMany({
+      data: [...records],
     });
   }
 

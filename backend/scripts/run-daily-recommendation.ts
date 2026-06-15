@@ -19,8 +19,12 @@ import {
   buildBeijingMinuteBucketKey,
   DataRefreshLedgerService,
 } from '../src/services/data-refresh-ledger-service.js';
+import { ExpectationGapService } from '../src/services/expectation-gap-service.js';
+import { ClusterUpgradeProposalService } from '../src/services/cluster-upgrade-proposal-service.js';
 import { createFriendNetworkEngine } from '../src/services/friend-network-engine.js';
 import { KeywordPerformancePenaltyService } from '../src/services/keyword-performance-penalty-service.js';
+import { ThemeForecastReconciliationService } from '../src/services/theme-forecast-reconciliation-service.js';
+import { ThemeForecastService } from '../src/services/theme-forecast-service.js';
 import {
   NewsIngestDeduplicationPipeline,
   NewsIngestNormalizationPipeline,
@@ -47,7 +51,7 @@ const DEFAULT_MAX_PER_INDUSTRY = 5;
 const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
 const DEFAULT_MIN_EXPOSURE_FACTS = process.env.TICKFLOW_API_KEY ? 500 : 100;
 const DEFAULT_TICKFLOW_REFRESH_INTERVAL_DAYS = 30;
-const DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE = 8;
+const DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE = 20;
 const NEWS_FETCH_CACHE_BUCKET_MINUTES = 15;
 const NEWS_FETCH_CACHE_TTL_MS = NEWS_FETCH_CACHE_BUCKET_MINUTES * 60 * 1000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -241,10 +245,20 @@ const publishLatestSnapshot = async (
     take: 10,
   });
 
+  const traceIds = traceRows.map(trace => trace.traceId);
+  const grouped = traceIds.length > 0
+    ? await prisma.recommendationSnapshot.groupBy({
+        by: ['traceId'],
+        where: { traceId: { in: traceIds } },
+        _count: { _all: true },
+      })
+    : [];
+  const recommendationCountByTraceId = new Map(
+    grouped.map(row => [row.traceId, row._count._all] as const),
+  );
+
   for (const trace of traceRows) {
-    const recommendationCount = await prisma.recommendationSnapshot.count({
-      where: { traceId: trace.traceId },
-    });
+    const recommendationCount = recommendationCountByTraceId.get(trace.traceId) ?? 0;
     if (recommendationCount > 0) {
       return {
         status: 'PUBLISHED',
@@ -1008,7 +1022,30 @@ const persistGraphSnapshot = async (
   asOf: Date,
   clusterKey: string,
   candidates: readonly INormalizedNewsCandidate[],
-): Promise<{ nodeCount: number; edgeCount: number }> => {
+): Promise<{ nodeCount: number; edgeCount: number; causalSignalCount: number }> => {
+  // 读取本 trace 已落库的 CausalSignalCandidate（status='candidate'），作为因果图谱的主输入
+  const causalRows = typeof prisma.causalSignalCandidate?.findMany === 'function'
+    ? await prisma.causalSignalCandidate.findMany({
+        where: {
+          traceId,
+          clusterKey,
+          status: 'candidate',
+        },
+      })
+    : [];
+  const causalSignals = causalRows
+    .filter((row: any) => row.businessVariable && row.assetOrThemeKeyword)
+    .map((row: any) => ({
+      newsId: String(row.newsId),
+      businessVariable: String(row.businessVariable),
+      assetOrThemeKeyword: String(row.assetOrThemeKeyword),
+      direction: (['positive', 'negative', 'mixed', 'neutral'].includes(row.direction)
+        ? row.direction
+        : 'neutral') as 'positive' | 'negative' | 'mixed' | 'neutral',
+      confidence: Number(row.confidence ?? 0.5),
+      evidenceText: String(row.evidenceText ?? row.event ?? ''),
+    }));
+
   const engine = createFriendNetworkEngine();
   const result = await engine.run({
     cluster: clusterKey,
@@ -1023,6 +1060,7 @@ const persistGraphSnapshot = async (
       capturedAt: asOf.toISOString(),
       source: candidate.source,
     })),
+    causalSignals,
   });
 
   await prisma.graphSnapshot.create({
@@ -1038,6 +1076,7 @@ const persistGraphSnapshot = async (
   return {
     nodeCount: result.graph.nodes.length,
     edgeCount: result.graph.relationships.length,
+    causalSignalCount: causalSignals.length,
   };
 };
 
@@ -1554,6 +1593,58 @@ async function main(): Promise<void> {
     markStepEnd('graph_snapshot', stepStartedAt);
     activeStep = null;
 
+    activeStep = 'expectation_gap';
+    stepStartedAt = markStepStart();
+    await TraceManager.startStepTrace(prisma, traceId, 'expectation_gap', {
+      clusterKey,
+      asOf: asOf.toISOString(),
+      description: '弱信号/预期差：图谱强度 vs 股价5日反应',
+    });
+    const expectationGapResult = await new ExpectationGapService().calculate(prisma, {
+      traceId,
+      asOf,
+      clusterKey,
+    });
+    markStepEnd('expectation_gap', stepStartedAt);
+    await TraceManager.completeStepTrace(prisma, traceId, 'expectation_gap', {
+      ...expectationGapResult,
+      weakSignalKeywords: expectationGapResult.topGaps
+        .filter(item => item.isWeakSignal)
+        .map(item => ({ keyword: item.keyword, expectationGap: item.expectationGap, relatedSymbols: item.relatedSymbols.slice(0, 5) })),
+      elapsedMs: stepTimings.expectation_gap,
+    });
+    activeStep = null;
+
+    activeStep = 'theme_forecast';
+    stepStartedAt = markStepStart();
+    await TraceManager.startStepTrace(prisma, traceId, 'theme_forecast', {
+      clusterKey,
+      asOf: asOf.toISOString(),
+      horizon: 5,
+      description: '主题/资产级预测：因果信号 + 预期差 → 未来5日上涨概率',
+    });
+    const themeForecastResult = await new ThemeForecastService().generate(prisma, {
+      traceId,
+      asOf,
+      clusterKey,
+    });
+    // 对账历史预测（独立于今日预测，评估过往准确率）
+    const themeReconciliationResult = await new ThemeForecastReconciliationService().reconcile(prisma, {
+      asOf,
+      clusterKey,
+    });
+    markStepEnd('theme_forecast', stepStartedAt);
+    await TraceManager.completeStepTrace(prisma, traceId, 'theme_forecast', {
+      forecast: themeForecastResult,
+      reconciliation: themeReconciliationResult,
+      topBullish: themeForecastResult.topForecasts
+        .filter(item => item.direction === 'bullish')
+        .slice(0, 10)
+        .map(item => ({ theme: item.theme, probability: item.probability, relatedSymbols: item.relatedSymbols.slice(0, 5), weakSignal: item.evidenceChain.weakSignal })),
+      elapsedMs: stepTimings.theme_forecast,
+    });
+    activeStep = null;
+
     activeStep = 'keyword_performance_penalty_refresh';
     stepStartedAt = markStepStart();
     await TraceManager.startStepTrace(prisma, traceId, 'keyword_performance_penalty_refresh', {
@@ -1607,7 +1698,59 @@ async function main(): Promise<void> {
     await TraceManager.completeStepTrace(prisma, traceId, 'strategy_experiment', strategyResult);
     activeStep = null;
 
-    const diagnostics: IDiagnosticQuery[] = [
+    activeStep = 'autopilot_evaluation';
+    stepStartedAt = markStepStart();
+    await TraceManager.startStepTrace(prisma, traceId, 'autopilot_evaluation', {
+      clusterKey,
+      asOf: asOf.toISOString(),
+      description: '集团自提升：双指标监控 → 生成升级建议（不自动升级）',
+    });
+    let autopilotEvalResult: { evaluated: boolean; proposals: readonly unknown[] } = { evaluated: false, proposals: [] };
+    try {
+      const runtimeStateStore = {
+        read: async () => {
+          try {
+            const raw = await readFile(path.resolve(process.cwd(), 'tmp', 'http-runtime', 'runtime-store.json'), 'utf8');
+            return JSON.parse(raw) as { readonly autopilot_policies: Readonly<Record<string, Record<string, unknown>>> };
+          } catch {
+            return { autopilot_policies: {} as Record<string, Record<string, unknown>> };
+          }
+        },
+      };
+      const proposalService = new ClusterUpgradeProposalService(runtimeStateStore);
+      const proposalResult = await proposalService.evaluateAndPropose(prisma, {
+        groupId: clusterKey,
+        asOf,
+        clusterKey,
+      });
+      autopilotEvalResult = {
+        evaluated: true,
+        proposals: proposalResult.shouldPropose
+          ? [{
+              groupId: proposalResult.groupId,
+              triggers: proposalResult.triggers,
+              failureReasons: proposalResult.failureReasons,
+              proposal: proposalResult.proposal,
+              recommendationStats: proposalResult.recommendationStats,
+              themeForecastStats: proposalResult.themeForecastStats,
+            }]
+          : [],
+      };
+      if (proposalResult.shouldPropose) {
+        console.log(`[autopilot_evaluation] ⚠️ 集团 ${clusterKey} 触发升级建议：${proposalResult.failureReasons.join('; ')}`);
+      }
+    } catch (error) {
+      autopilotEvalResult = { evaluated: false, proposals: [] };
+      console.error(`[autopilot_evaluation] 评估失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+    markStepEnd('autopilot_evaluation', stepStartedAt);
+    await TraceManager.completeStepTrace(prisma, traceId, 'autopilot_evaluation', {
+      ...autopilotEvalResult,
+      elapsedMs: stepTimings.autopilot_evaluation,
+    });
+    activeStep = null;
+
+      const diagnostics: IDiagnosticQuery[] = [
       {
         label: 'pipeline_counts',
         sql: [
@@ -1732,6 +1875,10 @@ async function main(): Promise<void> {
       causalSignalCandidates: causalSignalResult?.candidateCount ?? 0,
       graphNodes: graph.nodeCount,
       graphEdges: graph.edgeCount,
+      graphCausalSignalInputs: graph.causalSignalCount,
+      expectationGap: expectationGapResult,
+      themeForecast: themeForecastResult,
+      themeReconciliation: themeReconciliationResult,
       recommendationsCreated: backtestResult.recommendationsCreated,
       reconciledCount: backtestResult.reconciledCount,
       strategyCount: strategyResult.strategyCount,
@@ -1758,6 +1905,7 @@ async function main(): Promise<void> {
         visibleCandidates: visibleCandidates.length,
         graphNodes: graph.nodeCount,
         graphEdges: graph.edgeCount,
+        graphCausalSignalInputs: graph.causalSignalCount,
         stockExposureFactsVisible: exposureResult.factCount,
         stockExposureSymbolsVisible: exposureResult.symbolCount,
         aktoolsExposure: aktoolsExposureResult,

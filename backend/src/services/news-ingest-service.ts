@@ -78,19 +78,22 @@ export class NewsIngestService {
       });
     }
 
-    // 将采集到的原始新闻存入 RawNewsRecord (只读账本层)
-    for (const article of sourceResult.items) {
-      const titleHash = crypto.createHash('sha256').update(article.title).digest('hex');
-      await this.dependencies.unitOfWork.newsRepository.addRawRecord({
-        title: article.title,
-        content: article.summary,
-        source: article.metadata.provider,
-        url: article.url,
-        publishedAt: article.publishedAt,
-        clusterKey: request.cluster,
-        rawMetadata: article.metadata as any,
-        titleHash,
+    // 将采集到的原始新闻存入 RawNewsRecord (只读账本层) — 批量写入消除 N+1
+    if (sourceResult.items.length > 0) {
+      const rawRecords = sourceResult.items.map((article) => {
+        const titleHash = crypto.createHash('sha256').update(article.title).digest('hex');
+        return {
+          title: article.title,
+          content: article.summary,
+          source: article.metadata.provider,
+          url: article.url,
+          publishedAt: article.publishedAt,
+          clusterKey: request.cluster,
+          rawMetadata: article.metadata as any,
+          titleHash,
+        };
       });
+      await this.dependencies.unitOfWork.newsRepository.addManyRawRecords(rawRecords);
     }
 
     const stageReports: INewsIngestStageReport[] = [
@@ -195,12 +198,11 @@ export class NewsIngestService {
     candidates: readonly INormalizedNewsCandidate[],
     clusterKey: string,
   ): Promise<void> {
-    for (const item of newsItems) {
-      await this.dependencies.unitOfWork.newsRepository.add(item);
-    }
+    // 批量写入消除 N+1：一次 createMany 替代逐条 create
+    await this.dependencies.unitOfWork.newsRepository.addMany(newsItems);
 
-    for (const cand of candidates) {
-      await this.dependencies.unitOfWork.newsRepository.addNormalizedRecord({
+    if (candidates.length > 0) {
+      const normalizedRecords = candidates.map((cand) => ({
         id: cand.id,
         title: cand.title,
         content: cand.content,
@@ -210,7 +212,8 @@ export class NewsIngestService {
         clusterKey,
         reprintGroupId: cand.reprintGroupId ?? cand.id,
         reprintWeight: cand.reprintWeight ?? 1.0,
-      });
+      }));
+      await this.dependencies.unitOfWork.newsRepository.addManyNormalizedRecords(normalizedRecords);
     }
 
     await this.dependencies.unitOfWork.commit();

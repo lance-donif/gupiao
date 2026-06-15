@@ -22,9 +22,7 @@
       "src/pages/Trace.tsx"
     ],
     "ignoreDependencies": [
-      "@antv/g6",
-      "echarts",
-      "stylelint-config-standard"
+      "echarts"
     ],
     "ignoreExportsUsedInFile": {
       "type": true,
@@ -39,7 +37,6 @@
     }
   },
   "dependencies": {
-    "@antv/g6": "^5.1.1",
     "@vitejs/plugin-react": "^6.0.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -65,7 +62,6 @@
     "postcss-html": "^1.8.1",
     "prettier": "^3.8.3",
     "stylelint": "^17.12.0",
-    "stylelint-config-standard": "^40.0.0",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.14",

@@ -110,6 +110,36 @@ export class DataRefreshLedgerService {
     };
   }
 
+  /**
+   * 批量查询命中 ledger 缓存的 bucketKey 集合。
+   * 替代 N 次 getValid 循环，单次 round-trip。
+   */
+  public async getValidBucketKeys(
+    prisma: any,
+    key: Pick<IDataRefreshLedgerKey, 'dataKind' | 'source' | 'clusterKey'>,
+    bucketKeys: readonly string[],
+    now: Date,
+  ): Promise<ReadonlySet<string>> {
+    if (bucketKeys.length === 0) {
+      return new Set();
+    }
+    const rows = await prisma.$queryRawUnsafe(
+      [
+        'SELECT "bucketKey"',
+        'FROM "DataRefreshLedger"',
+        'WHERE "dataKind" = $1 AND source = $2 AND "clusterKey" = $3 AND "bucketKey" = ANY($4::text[])',
+        '  AND status = $5 AND "expiresAt" > $6',
+      ].join(' '),
+      key.dataKind,
+      key.source,
+      key.clusterKey,
+      bucketKeys as unknown as string,
+      'success',
+      now,
+    ) as readonly { bucketKey: string }[];
+    return new Set(rows.map(row => String(row.bucketKey)));
+  }
+
   public async recordSuccess<TSummary>(
     prisma: any,
     input: IRecordLedgerSuccessInput<TSummary>,

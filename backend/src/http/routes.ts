@@ -195,6 +195,11 @@ export const handleBackendRoute = async (
       writeJson(response, 200, await store.updateAutopilotPolicy(groupId, await readJsonBody(request)));
       return { handled: true, ok: true };
     }
+    if (method === 'POST') {
+      // 评估触发：由调度器异步执行 DB 查询并生成升级建议
+      writeJson(response, 200, await store.evaluateAutopilot(groupId));
+      return { handled: true, ok: true };
+    }
   }
 
   if (pathname === '/api/dispatch/daily' && method === 'POST') {

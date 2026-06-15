@@ -3,6 +3,7 @@ import type { IProviderNewsArticlePayload, IProviderNewsResponse, ISourceProvide
 
 import type { IBackendIntegrationConfig } from './integration-config.js';
 import type { INewsIngestResult } from './news-ingest-types.js';
+import type { IPrismaNewsRecord } from '../repositories/prisma-types.js';
 import type { PrismaClientAdapter } from './prisma-adapter.js';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -246,8 +247,18 @@ const createFailureReport = (
   };
 };
 
-const mapPersistedNews = async (prisma: PrismaClientAdapter): Promise<readonly IFinalIntegrationPersistedNewsSnapshot[]> => {
-  const records = await prisma.newsItem.findMany();
+const mapPersistedNews = async (
+  prisma: PrismaClientAdapter,
+  clusterKey: string,
+): Promise<readonly IFinalIntegrationPersistedNewsSnapshot[]> => {
+  // 按 cluster 过滤 + publishedAt desc 限制条数，避免全表扫描
+  // PrismaClientAdapter 类型签名是 findMany() 无参；用类型断言走 Prisma 完整签名
+  const findMany = prisma.newsItem.findMany as unknown as (args: unknown) => Promise<readonly IPrismaNewsRecord[]>;
+  const records = await findMany({
+    where: { clusterKey },
+    orderBy: { publishedAt: 'desc' },
+    take: 500,
+  });
 
   return records.map(record => ({
     id: record.id,
@@ -423,7 +434,7 @@ export class FinalIntegrationHarness {
           request.cluster,
           providerName,
           diagnostics,
-          await mapPersistedNews(prisma),
+          await mapPersistedNews(prisma, request.cluster),
           serviceResult.summary.failure.category,
           rawNewsFilePath,
         );
@@ -493,7 +504,7 @@ export class FinalIntegrationHarness {
         }));
       }
 
-      const persistedNews = await mapPersistedNews(prisma);
+      const persistedNews = await mapPersistedNews(prisma, request.cluster);
 
       return {
         status: agentRun.summary.success ? 'success' : 'failure',
@@ -533,7 +544,7 @@ export class FinalIntegrationHarness {
         request.cluster,
         providerName,
         diagnostics,
-        prisma ? await mapPersistedNews(prisma) : [],
+        prisma ? await mapPersistedNews(prisma, request.cluster) : [],
         'integration_exception',
         rawNewsFilePath,
       );
