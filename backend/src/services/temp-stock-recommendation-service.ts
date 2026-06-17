@@ -63,6 +63,7 @@ export interface ITempRecommendationSelectionDiagnostics {
   readonly signalTypeCounts: Record<string, number>;
   readonly excludedByStockFilter: number;
   readonly excludedByRecentWeekGain: number;
+  readonly excludedByRecentWeekLoss: number;
   readonly excludedByPrice: number;
   readonly excludedByPreviousDayStock: number;
   readonly excludedByPreviousDayKeyword: number;
@@ -93,9 +94,16 @@ interface IMarketSignalSummary {
   readonly momentum5dPct: number | null;
 }
 
-const SCORE_COMPONENT_PATTERN = /评分组件：证据\s+([\d.]+)\/45，图谱\s+([\d.]+)\/20，暴露\s+([\d.]+)\/15，市场\s+([\d.]+)\/20，总分\s+([\d.]+)\/100/u;
+const SCORE_COMPONENT_PATTERN = /评分组件：证据\s+([\d.]+)\/\d+，图谱\s+([\d.]+)\/\d+，暴露\s+([\d.]+)\/\d+，市场\s+([\d.]+)\/\d+，总分\s+([\d.]+)\/100/u;
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const INDUSTRY_MOMENTUM_PENALTY_THRESHOLD = -0.05;
+const INDUSTRY_MOMENTUM_PENALTY_MIN_FACTOR = 0.3;
+const MARKET_BREADTH_BEAR_THRESHOLD = 0.25;
+const MARKET_BREADTH_BULL_THRESHOLD = 0.40;
+const MARKET_BREADTH_BEAR_LIMIT_FACTOR = 0.5;
+const MARKET_BREADTH_NEUTRAL_LIMIT_FACTOR = 0.7;
+const MARKET_REGIME_MIN_RECOMMENDATIONS = 10;
 
 const createEmptyCooldownExclusions = (): IRecommendationCooldownExclusions => ({
   previousDayStockSymbols: new Set<string>(),
@@ -182,6 +190,7 @@ const buildShortfallReasons = (input: {
   readonly uniqueSignalTypes: number;
   readonly excludedByStockFilter: number;
   readonly excludedByRecentWeekGain: number;
+  readonly excludedByRecentWeekLoss: number;
   readonly excludedByPrice: number;
   readonly excludedByPreviousDayStock: number;
   readonly excludedByPreviousDayKeyword: number;
@@ -219,6 +228,10 @@ const buildShortfallReasons = (input: {
 
   if (input.excludedByRecentWeekGain > 0) {
     reasons.push(`推荐不足：已排除 ${input.excludedByRecentWeekGain} 只最近 5 个交易日涨幅超过 20% 的股票`);
+  }
+
+  if (input.excludedByRecentWeekLoss > 0) {
+    reasons.push(`推荐不足：已排除 ${input.excludedByRecentWeekLoss} 只极端下跌股票（5日跌超10%或20日跌超15%）`);
   }
 
   if (input.excludedByPrice > 0) {
@@ -301,6 +314,33 @@ const getRecentWeekGain = (recommendation: ITempStockRecommendation): number | n
 const isRecentWeekGainEligible = (recommendation: ITempStockRecommendation): boolean => {
   const recentWeekGain = getRecentWeekGain(recommendation);
   return recentWeekGain === null || recentWeekGain <= 0.2;
+};
+
+const DOWNWARD_MOMENTUM_5D_THRESHOLD = -0.10;
+const DOWNWARD_MOMENTUM_20D_THRESHOLD = -0.15;
+
+const getMomentum5dPct = (recommendation: ITempStockRecommendation): number | null => {
+  const raw = recommendation.scoreBreakdown.marketSignal?.momentum5dPct;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const getMomentum20dPct = (recommendation: ITempStockRecommendation): number | null => {
+  const raw = recommendation.scoreBreakdown.marketSignal?.momentum20dPct;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const isRecentWeekLossEligible = (recommendation: ITempStockRecommendation): boolean => {
+  const m5d = getMomentum5dPct(recommendation);
+  const m20d = getMomentum20dPct(recommendation);
+  if (m5d !== null && m5d < DOWNWARD_MOMENTUM_5D_THRESHOLD) {
+    return false;
+  }
+  if (m20d !== null && m20d < DOWNWARD_MOMENTUM_20D_THRESHOLD) {
+    return false;
+  }
+  return true;
 };
 
 const isPriceEligible = (recommendation: ITempStockRecommendation): boolean => {
@@ -509,18 +549,71 @@ export class TempStockRecommendationService {
       }];
     });
 
+    // 3.5 行业动量惩罚：如果某行业平均5日动量低于阈值，对该行业所有股票降权
+    const industryMomentumSums = new Map<string, { sum: number; count: number }>();
+    for (const candidate of candidates) {
+      const m5d = getMomentum5dPct(candidate);
+      if (m5d !== null) {
+        const industry = candidate.industry || '未归类';
+        const entry = industryMomentumSums.get(industry) ?? { sum: 0, count: 0 };
+        entry.sum += m5d;
+        entry.count += 1;
+        industryMomentumSums.set(industry, entry);
+      }
+    }
+
+    const industryPenaltyFactor = new Map<string, number>();
+    for (const [industry, { sum, count }] of industryMomentumSums.entries()) {
+      if (count === 0) continue;
+      const avgMomentum = sum / count;
+      if (avgMomentum < INDUSTRY_MOMENTUM_PENALTY_THRESHOLD) {
+        const factor = Math.max(INDUSTRY_MOMENTUM_PENALTY_MIN_FACTOR, 1 + avgMomentum);
+        industryPenaltyFactor.set(industry, Number(factor.toFixed(4)));
+      }
+    }
+
+    if (industryPenaltyFactor.size > 0) {
+      for (const candidate of candidates) {
+        const factor = industryPenaltyFactor.get(candidate.industry);
+        if (factor !== undefined) {
+          const originalScore = candidate.score;
+          candidate.score = Number((candidate.score * factor).toFixed(4));
+          candidate.reasons = [
+            ...candidate.reasons,
+            `行业动量惩罚：行业 [${candidate.industry}] 平均5日动量低于${(INDUSTRY_MOMENTUM_PENALTY_THRESHOLD * 100).toFixed(0)}%，惩罚因子 ${factor}，评分 ${originalScore.toFixed(4)} → ${candidate.score.toFixed(4)}`,
+          ];
+        }
+      }
+    }
+
+    // 3.6 市场宽度计算：根据全市场上涨比例动态调整推荐数量
+    let marketRegime: 'bull' | 'neutral' | 'bear' = 'neutral';
+    let effectiveLimit = limit;
+    const momentumCandidates = candidates.filter((c: any) => getMomentum5dPct(c) !== null);
+    if (momentumCandidates.length >= 10) {
+      const positiveCount = momentumCandidates.filter((c: any) => (getMomentum5dPct(c) ?? 0) > 0).length;
+      const marketBreadth = positiveCount / momentumCandidates.length;
+      if (marketBreadth < MARKET_BREADTH_BEAR_THRESHOLD) {
+        marketRegime = 'bear';
+        effectiveLimit = Math.max(MARKET_REGIME_MIN_RECOMMENDATIONS, Math.round(limit * MARKET_BREADTH_BEAR_LIMIT_FACTOR));
+      } else if (marketBreadth < MARKET_BREADTH_BULL_THRESHOLD) {
+        marketRegime = 'neutral';
+        effectiveLimit = Math.max(MARKET_REGIME_MIN_RECOMMENDATIONS, Math.round(limit * MARKET_BREADTH_NEUTRAL_LIMIT_FACTOR));
+      }
+    }
+
     candidates.sort((a: any, b: any) => b.score - a.score || a.symbol.localeCompare(b.symbol));
 
     // 4. 按主贡献信号类型限制单类数量，避免一个主题占满榜单。
     const selector = new TempRecommendationSelector();
     const initialSelection = selector.selectTopRecommendationsWithDiagnostics(
       candidates as unknown as readonly ITempStockRecommendation[],
-      limit,
+      effectiveLimit,
       maxPerIndustry,
       cooldownExclusions,
     );
 
-    const supplementalCandidates = initialSelection.recommendations.length < limit && candidates.length > 0
+    const supplementalCandidates = initialSelection.recommendations.length < effectiveLimit && candidates.length > 0
       ? await this.buildSupplementalMovementRecommendations(
           prisma,
           asOf,
@@ -533,7 +626,7 @@ export class TempStockRecommendationService {
     const selection = supplementalCandidates.length > 0
       ? selector.selectTopRecommendationsWithDiagnostics(
           combinedCandidates as unknown as readonly ITempStockRecommendation[],
-          limit,
+          effectiveLimit,
           maxPerIndustry,
           cooldownExclusions,
         )
@@ -541,6 +634,9 @@ export class TempStockRecommendationService {
     const selected = selection.recommendations;
 
     // 5. 组装 RecommendationSnapshot 快照数据
+    const marketRegimeReason = effectiveLimit !== limit
+      ? `市场状态 [${marketRegime}]：全市场上涨比例偏低，推荐数量从 ${limit} 调整为 ${effectiveLimit}`
+      : `市场状态 [${marketRegime}]：推荐数量保持 ${limit}`;
     const snapshotData = selected.map((item: any, index: number) => {
       return {
         traceId,
@@ -551,7 +647,7 @@ export class TempStockRecommendationService {
         stockName: item.stockName,
         industry: item.industry,
         finalScore: new Prisma.Decimal(item.score),
-        reasons: item.reasons,
+        reasons: [...item.reasons, marketRegimeReason],
         scoreBreakdown: item.scoreBreakdown,
         isReconciled: false,
       };
@@ -954,8 +1050,10 @@ export class TempRecommendationSelector {
     const excludedByStockFilter = recommendations.length - stockEligibleRecommendations.length;
     const gainEligibleRecommendations = stockEligibleRecommendations.filter(isRecentWeekGainEligible);
     const excludedByRecentWeekGain = stockEligibleRecommendations.length - gainEligibleRecommendations.length;
-    const priceEligibleRecommendations = gainEligibleRecommendations.filter(isPriceEligible);
-    const excludedByPrice = gainEligibleRecommendations.length - priceEligibleRecommendations.length;
+    const lossEligibleRecommendations = gainEligibleRecommendations.filter(isRecentWeekLossEligible);
+    const excludedByRecentWeekLoss = gainEligibleRecommendations.length - lossEligibleRecommendations.length;
+    const priceEligibleRecommendations = lossEligibleRecommendations.filter(isPriceEligible);
+    const excludedByPrice = lossEligibleRecommendations.length - priceEligibleRecommendations.length;
     const previousStockEligibleRecommendations = priceEligibleRecommendations;
     const excludedByPreviousDayStock = 0;
     const eligibleRecommendations = previousStockEligibleRecommendations;
@@ -995,6 +1093,7 @@ export class TempRecommendationSelector {
       signalTypeCounts: Object.fromEntries(signalTypeCounts.entries()),
       excludedByStockFilter,
       excludedByRecentWeekGain,
+      excludedByRecentWeekLoss,
       excludedByPrice,
       excludedByPreviousDayStock,
       excludedByPreviousDayKeyword,
@@ -1009,6 +1108,7 @@ export class TempRecommendationSelector {
         uniqueSignalTypes,
         excludedByStockFilter,
         excludedByRecentWeekGain,
+        excludedByRecentWeekLoss,
         excludedByPrice,
         excludedByPreviousDayStock,
         excludedByPreviousDayKeyword,

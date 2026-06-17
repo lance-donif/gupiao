@@ -203,6 +203,7 @@ export interface ILiveQuotePayload {
   readonly price: number | null;
   readonly day_low: number | null;
   readonly day_high: number | null;
+  readonly change_pct: number | null;
   readonly market_time: string | null;
   readonly source: LiveQuoteSource;
   readonly status: LiveQuoteStatus;

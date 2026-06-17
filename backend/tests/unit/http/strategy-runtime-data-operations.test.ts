@@ -37,6 +37,7 @@ describe('strategy runtime data operations', () => {
       price: 10.4,
       day_low: 9.8,
       day_high: 10.8,
+      change_pct: null,
       market_time: '2026-06-01T05:51:27.000Z',
       source: 'tickflow',
       status: 'LIVE',
@@ -519,6 +520,7 @@ describe('strategy runtime data operations', () => {
               low: '9.8000',
               high: '10.2000',
               capturedAt: '2026-05-25T09:00:00.000Z',
+              prevClose: '9.5000',
             }],
           };
         }
@@ -579,7 +581,7 @@ describe('strategy runtime data operations', () => {
     const detail = await data.getDashboardStockDetail('600001', 'trace-detail-1', 'main');
 
     expect(detail.ui_summary.system_health.pipeline_health_label).toBe('已完成');
-    expect(detail.live_quote).toEqual({
+    expect(detail.live_quote).toMatchObject({
       price: 10,
       day_low: 9.8,
       day_high: 10.2,
@@ -587,6 +589,7 @@ describe('strategy runtime data operations', () => {
       source: 'candle_fallback',
       status: 'FALLBACK',
     });
+    expect(detail.live_quote.change_pct).toBeCloseTo(0.0526, 3);
     expect(queries.some(sql => sql.includes('AND (r."asOf" + interval'))).toBe(false);
   });
 

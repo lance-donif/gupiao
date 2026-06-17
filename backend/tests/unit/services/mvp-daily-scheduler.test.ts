@@ -9,7 +9,7 @@ describe('mvp daily scheduler', () => {
   it('returns the fixed MVP schedule table with execution metadata', () => {
     const schedule = getMvpScheduleTable();
 
-    expect(schedule).toHaveLength(8);
+    expect(schedule).toHaveLength(9);
     expect(schedule.map(task => task.id)).toEqual([
       'stock_list_check',
       'daily_candle_incremental',
@@ -19,6 +19,7 @@ describe('mvp daily scheduler', () => {
       'publish_snapshot',
       'tickflow_industry_exposure_refresh',
       'history_gap_repair',
+      'reconcile_recommendations',
     ]);
     expect(schedule[0]).toMatchObject({
       id: 'stock_list_check',
@@ -49,6 +50,7 @@ describe('mvp daily scheduler', () => {
       'bun dist/scripts/run-daily-recommendation.js --publish-only',
       'bun dist/scripts/sync-tickflow-stock-exposure.js',
       'bun dist/scripts/sync-stock-history.js --mode repair-gaps',
+      'bun dist/scripts/reconcile-historical-recommendations.js',
     ]);
   });
 

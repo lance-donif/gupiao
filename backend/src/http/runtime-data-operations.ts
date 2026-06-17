@@ -180,6 +180,7 @@ interface ILiveQuoteDbRow {
   readonly low: string | number | null;
   readonly high: string | number | null;
   readonly capturedAt: string | null;
+  readonly prevClose: string | number | null;
 }
 
 interface ITickFlowQuoteExtension {
@@ -352,6 +353,7 @@ export const createTickFlowQuoteReader = (options: ITickFlowQuoteReaderOptions):
             price,
             day_low: toPositiveNumberOrNull(quote.low),
             day_high: toPositiveNumberOrNull(quote.high),
+            change_pct: null,
             market_time: parseQuoteTime(quote.timestamp),
             source: 'tickflow',
             status: 'LIVE',
@@ -1385,9 +1387,17 @@ export class RuntimeDataOperations {
     const fallbackRows = await pool.query<ILiveQuoteDbRow>(
       [
         'SELECT DISTINCT ON (s.symbol) s.symbol, c."tradingDay"::text AS "tradingDay",',
-        '       c.close::text AS close, c.low::text AS low, c.high::text AS high, c."capturedAt"::text AS "capturedAt"',
+        '       c.close::text AS close, c.low::text AS low, c.high::text AS high, c."capturedAt"::text AS "capturedAt",',
+        '       prev.close::text AS "prevClose"',
         'FROM public."Stock" s',
         'JOIN public."Candle" c ON c."stockId" = s.id',
+        'LEFT JOIN LATERAL (',
+        '  SELECT p.close',
+        '  FROM public."Candle" p',
+        '  WHERE p."stockId" = s.id AND p."tradingDay" < c."tradingDay"',
+        '  ORDER BY p."tradingDay" DESC',
+        '  LIMIT 1',
+        ') prev ON true',
         'WHERE s."clusterKey" = $1 AND s.symbol = ANY($2::text[])',
         'ORDER BY s.symbol ASC, c."tradingDay" DESC',
       ].join(' '),
@@ -1400,14 +1410,28 @@ export class RuntimeDataOperations {
       if (!symbol || price === null) {
         continue;
       }
+      const preClose = toPositiveNumberOrNull(row.prevClose);
+      const changePct = price !== null && preClose != null && preClose > 0
+        ? (price - preClose) / preClose
+        : null;
       fallbackBySymbol.set(symbol, {
         price,
         day_low: toPositiveNumberOrNull(row.low),
         day_high: toPositiveNumberOrNull(row.high),
+        change_pct: changePct,
         market_time: toNullableIsoText(row.capturedAt ?? row.tradingDay),
         source: 'candle_fallback',
         status: 'FALLBACK',
       });
+    }
+
+    // 同时缓存每个 symbol 的 prevClose 以便外部行情也能计算涨跌幅
+    const preCloseBySymbol = new Map<string, number | null>();
+    for (const row of fallbackRows.rows) {
+      const symbol = normalizeStockSymbol(row.symbol);
+      if (symbol && !preCloseBySymbol.has(symbol)) {
+        preCloseBySymbol.set(symbol, toPositiveNumberOrNull(row.prevClose));
+      }
     }
 
     let externalQuotes: ReadonlyMap<string, ILiveQuotePayload> = new Map();
@@ -1427,11 +1451,18 @@ export class RuntimeDataOperations {
     for (const symbol of normalizedSymbols) {
       const external = externalQuotes.get(symbol);
       const fallback = fallbackBySymbol.get(symbol);
+      const basePreClose = preCloseBySymbol.get(symbol) ?? null;
       if (external?.price !== null && external?.price !== undefined) {
+        const extPrice = external.price;
+        const extChangePct = external.change_pct
+          ?? (extPrice !== null && basePreClose != null && basePreClose > 0
+            ? (extPrice - basePreClose) / basePreClose
+            : null);
         quotes.set(symbol, {
-          price: external.price,
-          day_low: external.day_low ?? fallback?.day_low ?? external.price,
-          day_high: external.day_high ?? fallback?.day_high ?? external.price,
+          price: extPrice,
+          day_low: external.day_low ?? fallback?.day_low ?? extPrice,
+          day_high: external.day_high ?? fallback?.day_high ?? extPrice,
+          change_pct: extChangePct ?? fallback?.change_pct ?? null,
           market_time: external.market_time ?? fallback?.market_time ?? null,
           source: external.source,
           status: external.status,
@@ -1446,6 +1477,7 @@ export class RuntimeDataOperations {
         price: null,
         day_low: null,
         day_high: null,
+        change_pct: null,
         market_time: null,
         source: 'unavailable',
         status: 'UNAVAILABLE',
@@ -2667,6 +2699,16 @@ export class RuntimeDataOperations {
             'WHERE e."clusterKey" = $1',
             '  AND (e."asOf" + interval \'8 hours\')::date = $2::date',
             '  AND e."strategyId" = $3',
+            '  AND e."traceId" = (',
+            '    SELECT t."traceId"',
+            '    FROM public."RunTrace" t',
+            '    WHERE t."clusterKey" = $1',
+            '      AND (t."asOf" + interval \'8 hours\')::date = $2::date',
+            '    ORDER BY',
+            '      CASE WHEN t.status = \'SUCCESS\' THEN 0 ELSE 1 END ASC,',
+            '      t."triggeredAt" DESC',
+            '    LIMIT 1',
+            '  )',
             'ORDER BY e.rank ASC, e.symbol ASC',
           ].join(' '),
           [clusterKey, displayDate, normalizedStrategyId],
@@ -2703,6 +2745,16 @@ export class RuntimeDataOperations {
             ') c ON true',
             'WHERE r."clusterKey" = $1',
             '  AND (r."asOf" + interval \'8 hours\')::date = $2::date',
+            '  AND r."traceId" = (',
+            '    SELECT t."traceId"',
+            '    FROM public."RunTrace" t',
+            '    WHERE t."clusterKey" = $1',
+            '      AND (t."asOf" + interval \'8 hours\')::date = $2::date',
+            '    ORDER BY',
+            '      CASE WHEN t.status = \'SUCCESS\' THEN 0 ELSE 1 END ASC,',
+            '      t."triggeredAt" DESC',
+            '    LIMIT 1',
+            '  )',
             'ORDER BY r.rank ASC, r.symbol ASC',
           ].join(' '),
           [clusterKey, displayDate],
@@ -3107,6 +3159,7 @@ export class RuntimeDataOperations {
       price: null,
       day_low: null,
       day_high: null,
+      change_pct: null,
       market_time: null,
       source: 'unavailable',
       status: 'UNAVAILABLE',

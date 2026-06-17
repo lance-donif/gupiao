@@ -848,7 +848,7 @@ describe('scoring contribution engine', () => {
     const snapshot = mockDb.stockFeatureSnapshotsCreated[0];
     const newsFrequencyScore = Number(snapshot.newsFrequencyScore);
     expect(snapshot.symbol).toBe('600000');
-    expect(newsFrequencyScore).toBeLessThanOrEqual(45.0);
+    expect(newsFrequencyScore).toBeLessThanOrEqual(35.0);
     expect(newsFrequencyScore).toBeGreaterThan(20.0);
     expect(snapshot.reasons).toEqual(expect.arrayContaining([
       expect.stringContaining('评分组件：证据'),
@@ -1005,9 +1005,9 @@ describe('scoring contribution engine', () => {
     const aggregatedScore = Number(snapshot.aggregatedScore);
 
     expect(Number(snapshot.boardMatchScore)).toBeGreaterThan(0);
-    expect(relationConfidenceScore).toBe(12);
-    expect(weakSignalBonus).toBe(8);
-    expect(aggregatedScore).toBeCloseTo(newsFrequencyScore + Number(snapshot.boardMatchScore) + 20, 4);
+    expect(relationConfidenceScore).toBe(9);
+    expect(weakSignalBonus).toBe(6);
+    expect(aggregatedScore).toBeCloseTo(newsFrequencyScore + Number(snapshot.boardMatchScore) + 15, 4);
     expect(snapshot.reasons).toEqual(expect.arrayContaining([
       expect.stringContaining('图谱关系置信度封顶 2.00'),
       expect.stringContaining('图谱弱信号封顶 1.00'),

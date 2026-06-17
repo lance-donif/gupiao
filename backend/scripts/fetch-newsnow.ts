@@ -357,7 +357,12 @@ async function fetchCategoryWithRetry(
 export async function fetchNewsNowToFile(outputDirectory = path.resolve(process.cwd(), 'tmp')): Promise<IFetchNewsNowToFileResult> {
   console.log('正在用 Playwright 抓取 NewsNow（多分类）...');
 
-  const browser = await chromium.launch({ headless: true });
+  // 允许通过环境变量显式指定 chromium 可执行路径（容器/宿主 build 号不一致时的兜底），
+  // 不指定时传 undefined，由 Playwright 按默认路径查找，行为不变。
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined,
+  });
 
   try {
     const categories = await discoverNewsNowCategories(browser);

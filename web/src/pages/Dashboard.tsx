@@ -411,6 +411,10 @@ function ScoreStack({ detail }: { detail: DashboardStockDetailPayload | null }) 
 function ActionPlanStrip({ detail }: { detail: DashboardStockDetailPayload | null }) {
   const trigger = detail?.ui_summary.buy_trigger;
   const quote = detail?.live_quote;
+  const changePct = quote?.change_pct ?? null;
+  const changeTone = changePct !== null
+    ? changePct >= 0 ? 'text-red-500' : 'text-emerald-600'
+    : 'text-muted-foreground';
   const items = [
     {
       label: '买入条件',
@@ -418,6 +422,7 @@ function ActionPlanStrip({ detail }: { detail: DashboardStockDetailPayload | nul
       icon: Target,
       tone: 'text-sky-600',
     },
+    { label: '涨跌幅', value: formatPercent(changePct), icon: TrendingUp, tone: changeTone },
     { label: '实时价', value: formatPrice(quote?.price), icon: Radio, tone: 'text-cyan-600' },
     {
       label: '今日最低',
@@ -487,6 +492,10 @@ function ReasonGrid({ detail }: { detail: DashboardStockDetailPayload | null }) 
 
 function MarketQuoteCard({ detail }: { detail: DashboardStockDetailPayload | null }) {
   const quote = detail?.live_quote;
+  const changePct = quote?.change_pct ?? null;
+  const changeColor = changePct !== null
+    ? changePct >= 0 ? 'text-red-500' : 'text-emerald-600'
+    : 'text-muted-foreground';
   return (
     <div className="workstation-control rounded-lg p-3">
       <div className="flex items-center justify-between gap-2">
@@ -495,7 +504,8 @@ function MarketQuoteCard({ detail }: { detail: DashboardStockDetailPayload | nul
           {formatQuoteSource(quote?.source)}
         </Badge>
       </div>
-      <div className="mt-3 grid grid-cols-3 gap-2">
+      <div className="mt-3 grid grid-cols-4 gap-2">
+        <MiniMetric label="涨跌幅" value={formatPercent(changePct)} className={changeColor} />
         <MiniMetric label="实时价" value={formatPrice(quote?.price)} />
         <MiniMetric label="今日最低" value={formatPrice(quote?.day_low)} />
         <MiniMetric label="今日最高" value={formatPrice(quote?.day_high)} />
@@ -1315,11 +1325,11 @@ function Metric({ label, value, icon }: { label: string; value: string; icon: Re
   );
 }
 
-function MiniMetric({ label, value }: { label: string; value: string }) {
+function MiniMetric({ label, value, className }: { label: string; value: string; className?: string }) {
   return (
     <div className="workstation-control rounded-md px-2 py-1">
       <div className="text-[10px] leading-4 text-muted-foreground">{label}</div>
-      <div className="number-figure text-[12px] font-semibold leading-4">{value}</div>
+      <div className={cn('number-figure text-[12px] font-semibold leading-4', className)}>{value}</div>
     </div>
   );
 }

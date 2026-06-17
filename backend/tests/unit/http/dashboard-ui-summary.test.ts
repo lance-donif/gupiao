@@ -85,7 +85,7 @@ function stock(overrides: Partial<IDashboardStockDetailPayload> = {}): IDashboar
     macro_mainline: '半导体',
     latest_close: 10,
     latest_trading_day: '2026-05-27',
-    live_quote: { price: 10, day_low: null, day_high: null, market_time: null, source: 'candle_fallback', status: 'FALLBACK' },
+    live_quote: { price: 10, day_low: null, day_high: null, change_pct: null, market_time: null, source: 'candle_fallback', status: 'FALLBACK' },
     score_breakdown: {
       evidence: 44.8,
       graph: 12,

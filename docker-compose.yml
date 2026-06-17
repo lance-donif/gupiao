@@ -49,8 +49,6 @@ services:
       DATABASE_URL: "postgresql://gupiao:password@postgres:5432/gupiaodb"
       REDIS_URL: "redis://redis:6379/0"
       NODE_ENV: production
-      LLM_SMART_BASE_URL: "http://host.docker.internal:8080/v1"
-      LLM_CHEAP_BASE_URL: "http://host.docker.internal:8080/v1"
       AKTOOLS_BASE_URL: "http://aktools:8010"
       AKTOOLS_BOARD_LIMIT: "20"
       AKTOOLS_SYMBOL_LIMIT: "20"
@@ -91,8 +89,6 @@ services:
       DATABASE_URL: "postgresql://gupiao:password@postgres:5432/gupiaodb"
       REDIS_URL: "redis://redis:6379/0"
       NODE_ENV: production
-      LLM_SMART_BASE_URL: "http://host.docker.internal:8080/v1"
-      LLM_CHEAP_BASE_URL: "http://host.docker.internal:8080/v1"
       AKTOOLS_BASE_URL: "http://aktools:8010"
       AKTOOLS_BOARD_LIMIT: "20"
       AKTOOLS_SYMBOL_LIMIT: "20"

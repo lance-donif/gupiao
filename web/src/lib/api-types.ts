@@ -738,6 +738,7 @@ export interface LiveQuotePayload {
   price: number | null;
   day_low: number | null;
   day_high: number | null;
+  change_pct: number | null;
   market_time: string | null;
   source: 'tickflow' | 'yahoo_finance' | 'candle_fallback' | 'unavailable';
   status: 'LIVE' | 'FALLBACK' | 'UNAVAILABLE';

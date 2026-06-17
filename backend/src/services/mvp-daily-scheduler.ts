@@ -109,6 +109,15 @@ const MVP_SCHEDULE_TABLE: readonly IMvpScheduleTask[] = [
     failureStrategy: 'fail fast for the current repair batch; retry on the next scheduler cycle',
     commandHint: 'bun dist/scripts/sync-stock-history.js --mode repair-gaps',
   },
+  {
+    id: 'reconcile_recommendations',
+    description: 'Reconcile historical recommendations with actual returns and update keyword penalties.',
+    cadence: 'daily',
+    beijingTime: { hour: 16, minute: 45 },
+    dataFrequency: 'daily after candle sync batch',
+    failureStrategy: 'fail gracefully; log errors but do not block downstream scoring tasks',
+    commandHint: 'bun dist/scripts/reconcile-historical-recommendations.js',
+  },
 ];
 
 export const getMvpScheduleTable = (): readonly IMvpScheduleTask[] => {

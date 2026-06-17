@@ -139,10 +139,10 @@ const GRAPH_WEAK_SIGNAL_CAP = 1.0;
 const GRAPH_WEAK_NODE_BONUS = 0.5;
 const GRAPH_WEAK_EDGE_BONUS = 0.25;
 const BROAD_EXPOSURE_MIN_WEIGHT = 0.08;
-const EVIDENCE_SCORE_MAX = 45;
-const GRAPH_SCORE_MAX = 20;
+const EVIDENCE_SCORE_MAX = 35;
+const GRAPH_SCORE_MAX = 15;
 const EXPOSURE_PRECISION_SCORE_MAX = 15;
-const MARKET_SIGNAL_SCORE_MAX = 20;
+const MARKET_SIGNAL_SCORE_MAX = 35;
 const MOVEMENT_CONFIRMATION_SCORE_CAP = 2;
 const MOVEMENT_CONFIRMATION_UNIT_SCORE = 0.8;
 const MAX_MOVEMENT_EVIDENCE_PER_SYMBOL = 3;
@@ -739,7 +739,10 @@ const calculateEvidenceComponentScore = (keywordContribSums: ReadonlyMap<string,
   for (const sumFinalContrib of keywordContribSums.values()) {
     evidencePower += Math.min(3, Math.log1p(Math.max(0, sumFinalContrib)) * 1.8);
   }
-  return Number(clamp(EVIDENCE_SCORE_MAX * (1 - Math.exp(-evidencePower / 1.8)), 0, EVIDENCE_SCORE_MAX).toFixed(4));
+  const baseScore = EVIDENCE_SCORE_MAX * (1 - Math.exp(-evidencePower / 1.8));
+  // 证据多样性加分：多于1个不同关键词时，给予额外加分，避免单一关键词垄断评分
+  const diversityBonus = Math.min(5, (keywordContribSums.size - 1) * 1.5);
+  return Number(clamp(baseScore + diversityBonus, 0, EVIDENCE_SCORE_MAX).toFixed(4));
 };
 
 const calculateGraphComponentScores = (
@@ -748,10 +751,10 @@ const calculateGraphComponentScores = (
 ): { relationScore: number; weakSignalScore: number; total: number } => {
   const relationScore = GRAPH_RELATION_CONFIDENCE_CAP <= 0
     ? 0
-    : (Math.min(rawRelationConfidenceScore, GRAPH_RELATION_CONFIDENCE_CAP) / GRAPH_RELATION_CONFIDENCE_CAP) * 12;
+    : (Math.min(rawRelationConfidenceScore, GRAPH_RELATION_CONFIDENCE_CAP) / GRAPH_RELATION_CONFIDENCE_CAP) * 9;
   const weakSignalScore = GRAPH_WEAK_SIGNAL_CAP <= 0
     ? 0
-    : (Math.min(rawWeakSignalBonus, GRAPH_WEAK_SIGNAL_CAP) / GRAPH_WEAK_SIGNAL_CAP) * 8;
+    : (Math.min(rawWeakSignalBonus, GRAPH_WEAK_SIGNAL_CAP) / GRAPH_WEAK_SIGNAL_CAP) * 6;
   const total = Number(clamp(relationScore + weakSignalScore, 0, GRAPH_SCORE_MAX).toFixed(4));
   return {
     relationScore: Number(relationScore.toFixed(4)),
@@ -1835,7 +1838,7 @@ export class ScoringContributionEngine {
       const newsFrequencyScore = calculateEvidenceComponentScore(contribsByKeyword);
       for (const [keyword, sumFinalContrib] of contribsByKeyword.entries()) {
         reasons.push(
-          `关键词 [${keyword}] 累计净贡献值 ${sumFinalContrib.toFixed(4)}，证据贡献组件累计后映射为 ${newsFrequencyScore.toFixed(4)}/45 (基于 ${profile} 衰减)`,
+          `关键词 [${keyword}] 累计净贡献值 ${sumFinalContrib.toFixed(4)}，证据贡献组件累计后映射为 ${newsFrequencyScore.toFixed(4)}/${EVIDENCE_SCORE_MAX} (基于 ${profile} 衰减)`,
         );
       }
 
@@ -1927,7 +1930,7 @@ export class ScoringContributionEngine {
         weakSignalBonus: new Prisma.Decimal(weakSignalBonus),
         aggregatedScore: new Prisma.Decimal(aggregatedScore),
         reasons: [
-          `评分组件：证据 ${newsFrequencyScore.toFixed(4)}/45，图谱 ${graphScores.total.toFixed(4)}/20，暴露 ${boardMatchScore.toFixed(4)}/15，市场 ${marketSignal.score.toFixed(4)}/20，总分 ${aggregatedScore.toFixed(4)}/100`,
+          `评分组件：证据 ${newsFrequencyScore.toFixed(4)}/${EVIDENCE_SCORE_MAX}，图谱 ${graphScores.total.toFixed(4)}/${GRAPH_SCORE_MAX}，暴露 ${boardMatchScore.toFixed(4)}/${EXPOSURE_PRECISION_SCORE_MAX}，市场 ${marketSignal.score.toFixed(4)}/${MARKET_SIGNAL_SCORE_MAX}，总分 ${aggregatedScore.toFixed(4)}/100`,
           ...reasons,
           `marketSignal=${JSON.stringify({
             score: marketSignal.score,
