@@ -18,16 +18,10 @@ import type {
   MetricsOverview,
   PromotePreflightResponse,
   RealtimeQuote,
-  RuntimeGraphOut,
   StrategyConfig,
   StrategyDefinition,
   StrategyPerformanceReport,
   StrategyProfitPayload,
-  TraceCostOut,
-  TraceEvent,
-  TraceOverview,
-  TracePage,
-  TraceStep,
 } from './api-types';
 
 export type * from './api-types';
@@ -242,44 +236,6 @@ export const api = {
     return http<RealtimeQuote>(
       `/api/ml-recommendations/stocks/${encodeURIComponent(ticker)}/realtime`,
     );
-  },
-  getTraceOverview(traceId: string) {
-    return http<TraceOverview>(`/api/trace/${encodeURIComponent(traceId)}/overview`);
-  },
-  getTraceSteps(traceId: string, cursor?: number, limit = 200) {
-    const qs = new URLSearchParams({ limit: String(limit) });
-    if (cursor !== undefined) {
-      qs.set('cursor', String(cursor));
-    }
-    return http<TracePage<TraceStep>>(`/api/trace/${encodeURIComponent(traceId)}/steps?${qs.toString()}`);
-  },
-  getTraceEvents(traceId: string, cursor?: number, limit = 500) {
-    const qs = new URLSearchParams({ limit: String(limit) });
-    if (cursor !== undefined) {
-      qs.set('cursor', String(cursor));
-    }
-    return http<TracePage<TraceEvent>>(`/api/trace/${encodeURIComponent(traceId)}/events?${qs.toString()}`);
-  },
-  getTraceCosts(traceId: string) {
-    return http<TraceCostOut>(`/api/trace/${encodeURIComponent(traceId)}/llm-costs`);
-  },
-  getExecutionGraph(traceId: string, maxNodes = 2000) {
-    return http<RuntimeGraphOut>(
-      `/api/graph/execution?trace_id=${encodeURIComponent(traceId)}&max_nodes=${maxNodes}`,
-    );
-  },
-  getCausalGraph(traceId: string, maxNodes = 2000) {
-    return http<RuntimeGraphOut>(
-      `/api/graph/causal?trace_id=${encodeURIComponent(traceId)}&max_nodes=${maxNodes}`,
-    );
-  },
-  createTraceEventSource(traceId: string, lastEventId?: number) {
-    const qs = new URLSearchParams();
-    if (lastEventId !== undefined) {
-      qs.set('last_event_id', String(lastEventId));
-    }
-    const suffix = qs.toString() ? `?${qs.toString()}` : '';
-    return new EventSource(`/api/trace/${encodeURIComponent(traceId)}/stream${suffix}`);
   },
   listConfigByCategory(category: ConfigCategory) {
     return http<{ items: ConfigItem[] }>(`/api/config/${encodeURIComponent(category)}`);

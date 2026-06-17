@@ -5,11 +5,6 @@ import type {
   DashboardNetworkPayload,
   DashboardSnapshotPayload,
   DashboardStockDetailPayload,
-  TraceCostOut,
-  TraceEvent,
-  TraceOverview,
-  TracePage,
-  TraceStep,
 } from '@/lib/api-types';
 import { api } from '@/lib/api';
 
@@ -137,26 +132,3 @@ export function useBatchProgress(input: { groupId: string; displayDate: string }
   );
 }
 
-export function useTraceDetail(traceId: string) {
-  const overview = useAsync<TraceOverview>(
-    () => api.getTraceOverview(traceId),
-    [traceId],
-    Boolean(traceId),
-  );
-  const steps = useAsync<TracePage<TraceStep>>(
-    () => api.getTraceSteps(traceId, undefined, 200),
-    [traceId],
-    Boolean(traceId),
-  );
-  const events = useAsync<TracePage<TraceEvent>>(
-    () => api.getTraceEvents(traceId, undefined, 200),
-    [traceId],
-    Boolean(traceId),
-  );
-  const costs = useAsync<TraceCostOut>(
-    () => api.getTraceCosts(traceId),
-    [traceId],
-    Boolean(traceId),
-  );
-  return { overview, steps, events, costs };
-}

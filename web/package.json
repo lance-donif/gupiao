@@ -16,11 +16,7 @@
     "check:all": "bun run lint:style && bun run check:deps"
   },
   "knip": {
-    "ignoreFiles": [
-      "src/components/ui/dialog.tsx",
-      "src/features/cluster/types.ts",
-      "src/pages/Trace.tsx"
-    ],
+    "ignoreFiles": [],
     "ignoreDependencies": [
       "echarts"
     ],
