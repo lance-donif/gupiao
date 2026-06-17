@@ -1,7 +1,6 @@
 export * from './ai-stock-keyword-generation-service.js';
 export * from './aktools-stock-exposure-service.js';
 export * from './causal-signal-extraction-service.js';
-export * from './final-integration.js';
 export * from './friend-network-ai-adapter.js';
 export * from './friend-network-builder.js';
 export * from './friend-network-engine.js';

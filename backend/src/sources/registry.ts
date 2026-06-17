@@ -1,14 +1,6 @@
-import type { ISelectableSource, ISourceSelectionStrategy } from '../index.js';
-import type { ISource } from '../patterns/creational/source-factory.js';
 import type { INewsSourceRequest, IProviderNewsResponse, IProviderStockResponse, ISourceProvider, ISourceProviderRateLimiterDependencies, IStockSourceRequest } from './index.js';
 import {
-  FirstAvailableStrategy,
-  HighestPriorityAvailableStrategy,
-
-} from '../index.js';
-import {
   AkShareMarketSource,
-
   TavilyNewsSource,
   withRateLimit,
   YahooFinanceMarketSource,
@@ -22,6 +14,10 @@ export interface ISourceProviderDependencies extends ISourceProviderRateLimiterD
   readonly akshareMarketProvider: ISourceProvider<IStockSourceRequest, IProviderStockResponse>;
 }
 
+export interface ISource {
+  readonly kind: string;
+}
+
 export interface IRegisteredSource extends ISource {
   readonly name: string;
   readonly sourceKind: SourceKind;
@@ -29,18 +25,6 @@ export interface IRegisteredSource extends ISource {
   createSource: () => TavilyNewsSource | YahooFinanceMarketSource | AkShareMarketSource;
 
   isAvailable: () => boolean;
-}
-
-export interface IRegisteredSelectableSource<TSource extends IRegisteredSource = IRegisteredSource> {
-  readonly name: string;
-  readonly source: TSource;
-  readonly priority: number;
-  readonly available: boolean;
-}
-
-export interface ISelectionCandidate<TKind extends SourceKind = SourceKind> {
-  readonly kind: TKind;
-  readonly priority: number;
 }
 
 export class TavilyNewsSourceEntry implements IRegisteredSource {
@@ -156,96 +140,9 @@ export class SourceRegistryFactory {
   }
 }
 
-export const toSelectionCandidate = <TKind extends SourceKind>(
-  source: RegisteredSourceFor<TKind>,
-  priority: number,
-): {
-  readonly name: string;
-  readonly source: RegisteredSourceFor<TKind>;
-  readonly priority: number;
-  readonly available: boolean;
-} => {
-  return {
-    name: source.name,
-    source,
-    priority,
-    available: source.isAvailable(),
-  };
-};
-
-export type RegisteredSelectableSource<TSource extends RegisteredSourceFor<SourceKind> = RegisteredSourceFor<SourceKind>> = {
-  readonly name: string;
-  readonly source: TSource;
-  readonly priority: number;
-  readonly available: boolean;
-} & ISelectableSource;
-
-export class RegisteredSourceSelectionStrategyAdapter
-implements ISourceSelectionStrategy<RegisteredSelectableSource> {
-  public constructor(private readonly baseStrategy: ISourceSelectionStrategy<ISelectableSource>) {}
-
-  public select(sources: readonly RegisteredSelectableSource[]): RegisteredSelectableSource | null {
-    const selected = this.baseStrategy.select(sources);
-
-    return sources.find(source => source === selected) ?? null;
-  }
-}
-
-export const createAvailableSelectionStrategy = (
-  strategy: 'first-available' | 'highest-priority-available' = 'highest-priority-available',
-): RegisteredSourceSelectionStrategyAdapter => {
-  if (strategy === 'first-available') {
-    return new RegisteredSourceSelectionStrategyAdapter(new FirstAvailableStrategy());
-  }
-
-  return new RegisteredSourceSelectionStrategyAdapter(new HighestPriorityAvailableStrategy());
-};
-
-export class SourceSelectionService {
-  public constructor(
-    private readonly registryFactory: SourceRegistryFactory,
-    private readonly selectionStrategy: ISourceSelectionStrategy<RegisteredSelectableSource>,
-  ) {}
-
-  public select<TKind extends SourceKind>(
-    candidates: readonly ISelectionCandidate<TKind>[],
-  ): {
-    readonly kind: TKind;
-    readonly source: RegisteredSourceFor<TKind>;
-  } | null {
-    const selectableCandidates = candidates.map((candidate) => {
-      const source = this.registryFactory.create(candidate.kind);
-
-      return {
-        kind: candidate.kind,
-        name: source.name,
-        priority: candidate.priority,
-        source,
-        available: source.isAvailable(),
-      } as const;
-    });
-
-    const selected = this.selectionStrategy.select(selectableCandidates);
-
-    if (!selected) {
-      return null;
-    }
-
-    const matchedCandidate = selectableCandidates.find(candidate => candidate.source === selected.source);
-
-    if (!matchedCandidate) {
-      return null;
-    }
-
-    return {
-      kind: matchedCandidate.kind,
-      source: matchedCandidate.source,
-    };
-  }
-}
-
 export const createSourceRegistryFactory = (
   dependencies: ISourceProviderDependencies,
 ): SourceRegistryFactory => {
   return new SourceRegistryFactory(dependencies);
 };
+
