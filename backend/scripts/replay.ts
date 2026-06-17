@@ -91,7 +91,7 @@ const pickStepSummary = (
   return readObject(step?.[summaryKind]);
 };
 
-export const resolveReplayParamsFromTrace = (
+const resolveReplayParamsFromTrace = (
   runTrace: any,
 ): IReplayParams | undefined => {
   if (!runTrace) {
@@ -132,7 +132,7 @@ export const resolveReplayParamsFromTrace = (
   };
 };
 
-export const resolveReplayParamsFromSnapshot = (historicalRecs: readonly any[]): IReplayParams | undefined => {
+const resolveReplayParamsFromSnapshot = (historicalRecs: readonly any[]): IReplayParams | undefined => {
   const baseRec = historicalRecs[0];
   if (!baseRec) {
     return undefined;

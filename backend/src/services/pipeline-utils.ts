@@ -11,10 +11,10 @@ import type { INewsSourceArticle } from '../sources/contracts.js';
 import type { PublicNewsSourceMode } from './public-news-source-orchestrator.js';
 import { createDefaultPublicNewsSourceOrchestrator } from './public-news-source-orchestrator.js';
 
-export const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
-export const NEWS_FETCH_CACHE_BUCKET_MINUTES = 15;
-export const NEWS_FETCH_CACHE_TTL_MS = NEWS_FETCH_CACHE_BUCKET_MINUTES * 60 * 1000;
-export const SCORING_EXPOSURE_SOURCES = [
+const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
+const NEWS_FETCH_CACHE_BUCKET_MINUTES = 15;
+const NEWS_FETCH_CACHE_TTL_MS = NEWS_FETCH_CACHE_BUCKET_MINUTES * 60 * 1000;
+const SCORING_EXPOSURE_SOURCES = [
   'tickflow_sw_universe',
   'akshare_industry_board_em',
   'akshare_concept_board_em',
@@ -22,7 +22,7 @@ export const SCORING_EXPOSURE_SOURCES = [
   'manual_verified',
   'test_exposure',
 ];
-export const SCORING_EXPOSURE_TYPES = [
+const SCORING_EXPOSURE_TYPES = [
   'industry_exposure',
   'concept_exposure',
   'business_exposure',
@@ -131,7 +131,7 @@ export const createTraceId = (asOf: Date, clusterKey: string): string => {
   return `daily-${clusterKey}-${dateKey}-${suffix}`;
 };
 
-export const createStableNewsRecordId = (
+const createStableNewsRecordId = (
   source: string,
   title: string,
   summary: string,
@@ -211,7 +211,7 @@ export const getNewsSourceMode = (
   throw new Error(`Invalid --news-source-mode/NEWS_SOURCE_MODE: ${raw}. Supported values: baseline, expanded`);
 };
 
-export const loadNewsNowArticles = async (filePath: string, asOf: Date): Promise<readonly IDailyArticle[]> => {
+const loadNewsNowArticles = async (filePath: string, asOf: Date): Promise<readonly IDailyArticle[]> => {
   const payload = JSON.parse(await readFile(filePath, 'utf8')) as INewsNowPayload;
   const fetchedAt = payload.fetchedAt ? new Date(payload.fetchedAt) : asOf;
   const publishedAt = Number.isNaN(fetchedAt.getTime()) || fetchedAt > asOf ? asOf : fetchedAt;
@@ -242,7 +242,7 @@ export const loadNewsNowArticles = async (filePath: string, asOf: Date): Promise
   });
 };
 
-export const fetchAkToolsArticles = async (asOf: Date): Promise<{
+const fetchAkToolsArticles = async (asOf: Date): Promise<{
   readonly articles: readonly IDailyArticle[];
   readonly breakdown: Record<string, number>;
 }> => {
@@ -290,7 +290,7 @@ export const fetchAkToolsArticles = async (asOf: Date): Promise<{
   };
 };
 
-export const serializeArticles = (articles: readonly IDailyArticle[]): IAktoolsNewsFetchSummary['articles'] => {
+const serializeArticles = (articles: readonly IDailyArticle[]): IAktoolsNewsFetchSummary['articles'] => {
   return articles.map(article => ({
     title: article.title,
     summary: article.summary,
@@ -300,7 +300,7 @@ export const serializeArticles = (articles: readonly IDailyArticle[]): IAktoolsN
   }));
 };
 
-export const deserializeArticles = (
+const deserializeArticles = (
   rows: readonly IAktoolsNewsFetchSummary['articles'][number][],
 ): readonly IDailyArticle[] => {
   return rows.map((row) => {
@@ -321,7 +321,7 @@ export const deserializeArticles = (
   });
 };
 
-export const resolveAkToolsNewsWithCache = async (
+const resolveAkToolsNewsWithCache = async (
   prisma: any,
   traceId: string,
   clusterKey: string,
@@ -368,7 +368,7 @@ export const resolveAkToolsNewsWithCache = async (
   };
 };
 
-export const resolveNewsNowWithCache = async (
+const resolveNewsNowWithCache = async (
   prisma: any,
   traceId: string,
   clusterKey: string,
@@ -419,7 +419,7 @@ export const resolveNewsNowWithCache = async (
   };
 };
 
-export const resolvePublicNewsWithCache = async (
+const resolvePublicNewsWithCache = async (
   prisma: any,
   args: Record<string, string>,
   traceId: string,

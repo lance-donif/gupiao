@@ -37,7 +37,7 @@ const toIsoString = (value: Date | string): string => {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
 };
 
-export class PgContributionDetailReader implements IContributionDetailReader {
+class PgContributionDetailReader implements IContributionDetailReader {
   public constructor(private readonly client: IMinimalPgClient) {}
 
   public async getContributionDetail(query: IContributionDetailQuery): Promise<IContributionDetailPayload> {

@@ -42,7 +42,7 @@ const pickLatestClose = (artifacts: IBackendArtifacts, symbol: string): number |
   return hit?.price ?? null;
 };
 
-export const partitionRecommendations = (artifacts: IBackendArtifacts): IPartitionedRecommendations => {
+const partitionRecommendations = (artifacts: IBackendArtifacts): IPartitionedRecommendations => {
   const sorted = [...artifacts.recommendationFile.recommendations].sort((left, right) => right.score - left.score);
   const ranked = sorted.map((item, index) => ({
     rank: index + 1,

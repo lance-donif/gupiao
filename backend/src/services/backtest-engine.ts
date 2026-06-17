@@ -40,7 +40,7 @@ export interface IBacktestRunResult {
   readonly maxWindowDaysUsed: number;
 }
 
-export const resolveBacktestReplayTraceSummary = (input: IBacktestRunInput): IBacktestReplayTraceSummary => {
+const resolveBacktestReplayTraceSummary = (input: IBacktestRunInput): IBacktestReplayTraceSummary => {
   const newsWindowDays = input.newsWindowDays ?? 7;
   const limit = input.recommendationLimit ?? 30;
   const maxPerIndustry = input.maxPerIndustry ?? 5;
@@ -347,7 +347,7 @@ export interface IReconciliationItem {
   readonly futureCandles: any[];
 }
 
-export const calculateReconciliationData = (params: {
+const calculateReconciliationData = (params: {
   readonly recommendations: readonly any[];
   readonly stockMap: Map<string, any>;
   readonly candlesByStockId: Map<string, any[]>;

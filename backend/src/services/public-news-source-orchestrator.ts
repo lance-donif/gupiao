@@ -318,7 +318,7 @@ export const parseSinaFinanceRollHtml = (input: IParseSinaFinanceRollHtmlInput):
   return articles;
 };
 
-export class RssNewsSourceAdapter implements IPublicNewsSourceAdapter {
+class RssNewsSourceAdapter implements IPublicNewsSourceAdapter {
   public readonly name: string;
 
   private readonly fetchImpl: typeof fetch;
@@ -370,7 +370,7 @@ export class RssNewsSourceAdapter implements IPublicNewsSourceAdapter {
   }
 }
 
-export class GoogleNewsRssSourceAdapter extends RssNewsSourceAdapter {
+class GoogleNewsRssSourceAdapter extends RssNewsSourceAdapter {
   public constructor(options: {
     readonly keywords?: readonly string[];
     readonly fetchImpl?: typeof fetch;
@@ -387,7 +387,7 @@ export class GoogleNewsRssSourceAdapter extends RssNewsSourceAdapter {
   }
 }
 
-export class SinaFinanceRollSourceAdapter implements IPublicNewsSourceAdapter {
+class SinaFinanceRollSourceAdapter implements IPublicNewsSourceAdapter {
   public readonly name = 'sina-finance-roll';
 
   private readonly pageUrl: string;

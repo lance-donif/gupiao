@@ -1,5 +1,3 @@
-import { execSync } from 'node:child_process';
-
 export type MvpScheduleCadence = 'daily' | 'weekly' | 'monthly';
 
 export interface IMvpBeijingTime {
@@ -124,10 +122,6 @@ export const getMvpScheduleTable = (): readonly IMvpScheduleTask[] => {
   return MVP_SCHEDULE_TABLE;
 };
 
-export const getMvpScheduleTask = (taskId: string): IMvpScheduleTask | undefined => {
-  return MVP_SCHEDULE_TABLE.find(task => task.id === taskId);
-};
-
 const filterScheduleTasks = (taskIds: readonly string[] | undefined): readonly IMvpScheduleTask[] => {
   if (!taskIds || taskIds.length === 0) {
     return MVP_SCHEDULE_TABLE;
@@ -246,29 +240,3 @@ export const getNextScheduledRunBeijing = (
   return nextRun;
 };
 
-export const executeTask = (task: IMvpScheduleTask): { stdout: string; stderr: string; code: number | null } => {
-  let stdout = '';
-  let stderr = '';
-  let code: number | null = 0;
-
-  try {
-    stdout = execSync(task.commandHint, {
-      cwd: process.cwd(),
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 1_800_000,
-    });
-  }
-  catch (error) {
-    const err = error as { status?: number | null; stdout?: string; stderr?: string; message?: string };
-    code = err.status ?? 1;
-    stdout = err.stdout ?? '';
-    stderr = err.stderr ?? (err.message ?? String(error));
-  }
-
-  return {
-    stdout,
-    stderr,
-    code,
-  };
-};

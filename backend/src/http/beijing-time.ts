@@ -29,7 +29,7 @@ const parseBeijingIsoLike = (value: string): Date | null => {
   return parsed;
 };
 
-export const toBeijingDateTime = (value: Date | string | number = new Date()): string => {
+const toBeijingDateTime = (value: Date | string | number = new Date()): string => {
   const date
     = value instanceof Date
       ? value

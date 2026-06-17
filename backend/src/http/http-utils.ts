@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-export const readRequestBody = async (request: IncomingMessage): Promise<string> => {
+const readRequestBody = async (request: IncomingMessage): Promise<string> => {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk));
