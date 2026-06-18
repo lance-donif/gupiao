@@ -1,4 +1,6 @@
 import { fetchWithRetry } from './ai-client-utils.js';
+import { extractJsonObject } from '../lib/openai-utils.js';
+import { normalizeBaseUrl } from '../lib/url-utils.js';
 
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_MAX_REQUEST_CHARS = 240000;
@@ -134,19 +136,6 @@ const toConfidence = (value: unknown): number | null => {
     return null;
   }
   return numberValue;
-};
-
-const normalizeBaseUrl = (baseUrl: string): string => baseUrl.replace(/\/+$/u, '');
-
-const extractJsonObject = (content: string): string => {
-  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/u);
-  const candidate = fenced?.[1] ?? content;
-  const start = candidate.indexOf('{');
-  const end = candidate.lastIndexOf('}');
-  if (start < 0 || end < start) {
-    throw new Error('AI stock keyword response does not contain JSON object');
-  }
-  return candidate.slice(start, end + 1);
 };
 
 const buildPrompt = (stocks: readonly IStockRow[]): string => {

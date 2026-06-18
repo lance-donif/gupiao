@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { hasPrismaDelegateMethod } from './prisma-utils.js';
+import { clamp, toNumber } from '../lib/number-utils.js';
 
 /**
  * 弱信号/预期差引擎
@@ -55,15 +56,6 @@ interface IGraphEdge {
   readonly relationType?: string;
   readonly evidence?: readonly string[];
 }
-
-const toNumber = (value: unknown): number => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-};
-
-const clamp = (value: number, min: number, max: number): number => {
-  return Math.max(min, Math.min(value, max));
-};
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null;

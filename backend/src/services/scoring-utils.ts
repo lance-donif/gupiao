@@ -1,9 +1,5 @@
 const BROAD_EXPOSURE_MIN_WEIGHT = 0.08;
 
-export const clamp = (value: number, min: number, max: number): number => {
-  return Math.max(min, Math.min(value, max));
-};
-
 export const normalizeDecimalNumber = (value: unknown, fallback: number): number => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;

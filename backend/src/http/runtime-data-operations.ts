@@ -38,6 +38,9 @@ import {
   buildNonTradingRecommendationDocuments,
   buildRecommendationDocuments,
 } from './recommendation-builders.js';
+import { clamp01, toNumberOrNull } from '../lib/number-utils.js';
+import { toIsoText, toNullableIsoText } from '../lib/date-utils.js';
+import { normalizeBaseUrl } from '../lib/url-utils.js';
 import { ensureCluster } from './runtime-store-shared.js';
 import { buildTraceCosts, buildTraceOverview, paginateRows } from './secondary-builders.js';
 import { buildRuntimeGraph } from './trace-builders.js';
@@ -234,38 +237,12 @@ const normalizeDateFilter = (value?: string | null): string | null => {
   return /^\d{4}-\d{2}-\d{2}$/u.test(trimmed) ? trimmed : null;
 };
 
-const toIsoText = (value: unknown): string => {
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-  return String(value ?? '');
-};
-
-const toNullableIsoText = (value: unknown): string | null => {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  return toIsoText(value);
-};
-
-const toNumberOrNull = (value: unknown): number | null => {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-};
-
 const toPositiveNumberOrNull = (value: unknown): number | null => {
   const parsed = toNumberOrNull(value);
   return parsed !== null && parsed > 0 ? parsed : null;
 };
 
 const DEFAULT_TICKFLOW_BASE_URL = 'https://api.tickflow.org';
-
-const normalizeBaseUrl = (value: string): string => {
-  return value.endsWith('/') ? value.slice(0, -1) : value;
-};
 
 const toTickFlowSymbol = (symbol: string): string => {
   const normalized = symbol.trim().toUpperCase();
@@ -693,8 +670,6 @@ const median = (values: readonly number[]): number | null => {
 };
 
 const hasOwn = (value: Record<string, unknown>, key: string): boolean => Object.hasOwn(value, key);
-
-const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
 const stageByIndex = (index: number, total: number): 'A' | 'B' | 'C' => {
   const aCutoff = Math.max(1, Math.ceil(total * 0.3));

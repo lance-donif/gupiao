@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { toNumberOrNull } from '../lib/number-utils.js';
 
 export interface IKeywordPerformancePenaltyRefreshInput {
   readonly asOf: Date;
@@ -24,14 +25,6 @@ const DEFAULT_COOLDOWN_DAYS = 7;
 const DEFAULT_LOSS_THRESHOLD_PCT = -0.03;
 const DEFAULT_PENALTY_FACTOR = 0.6;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
-const toNumberOrNull = (value: unknown): number | null => {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-};
 
 const minAvailableYield = (row: Record<string, unknown>): number | null => {
   const values = [row.yield1Day, row.yield3Day, row.yield5Day]

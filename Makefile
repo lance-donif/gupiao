@@ -54,9 +54,9 @@ format-web: ## Format TypeScript/Vue code only
 	@echo "🌐 Formatting TypeScript/Vue code..."
 	cd web && bunx prettier --write .
 
-format-backend: ## Format TypeScript code in backend/ (eslint --fix)
+format-backend: ## Format TypeScript code in backend/ (check:fix)
 	@echo "🧩 Formatting TypeScript (backend/)..."
-	cd backend && bun run lint -- --fix
+	cd backend && bun run check:fix
 
 # Code Quality
 # ------------
@@ -66,7 +66,7 @@ lint-server: ## Lint Python code
 
 lint-web: ## Lint TypeScript/Vue code
 	@echo "Linting web code..."
-	cd web && bun run lint || true
+	cd web && bun run check:all || true
 
 lint-backend: ## Lint TypeScript backend code
 	@echo "Linting backend code..."
@@ -83,10 +83,6 @@ complexity: ## Analyze cyclomatic complexity across codebase
 
 complexity-server: ## Analyze Python complexity only
 	@echo "⚠️  RETIRED: server/ is no longer the active backend."
-
-complexity-web: ## Analyze TypeScript/Vue complexity only
-	@echo "🌐 Analyzing TypeScript/Vue complexity..."
-	cd web && bun run lint:complexity || true
 
 test-server: ## Run server tests
 	@echo "⚠️  RETIRED: server/ is no longer the active backend. Use: make test-backend"

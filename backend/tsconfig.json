@@ -26,9 +26,7 @@
     "tests/**/*.ts",
     "scripts/fetch-newsnow.ts",
     "scripts/run-daily-recommendation.ts",
-    "scripts/run-mvp-daily-scheduler.ts",
     "scripts/sync-stocks.ts",
-    "scripts/sync-tickflow-stock-exposure.ts",
     "prisma.config.ts"
   ],
   "exclude": ["dist", "node_modules"]

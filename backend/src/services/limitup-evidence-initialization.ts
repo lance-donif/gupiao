@@ -4,11 +4,12 @@ import type {
   IKeywordAliasRecord,
 } from '../repositories/coverage-initialization-repository.js';
 
-import crypto from 'node:crypto';
-
 import { Prisma } from '@prisma/client';
 import { CoverageInitializationRepository } from '../repositories/coverage-initialization-repository.js';
 import { fetchWithRetry } from './ai-client-utils.js';
+import { toNumber } from '../lib/number-utils.js';
+import { stableHash } from '../lib/hash-utils.js';
+import { extractJsonObject } from '../lib/openai-utils.js';
 
 export type LimitUpCaseMode = 'touch' | 'sealed';
 export type CoverageGapMissReason = 'no_evidence_chain' | 'score_too_low' | 'filtered_out' | 'not_in_stock_pool';
@@ -238,11 +239,6 @@ const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 };
 
-const toNumber = (value: unknown, fallback = 0): number => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-};
-
 const toDate = (value: unknown): Date => {
   if (value instanceof Date) {
     return value;
@@ -305,8 +301,6 @@ const evidenceTextExists = (news: IHistoricalNewsRecord | null, evidenceText: st
   }
   return normalizeSourceText(`${news.title}。${news.content}`).includes(normalizeSourceText(evidenceText));
 };
-
-const stableHash = (value: unknown): string => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 const sortByStableJson = <T>(rows: readonly T[]): readonly T[] => {
   return [...rows].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
@@ -739,16 +733,6 @@ const buildExposureCandidatePrompt = (input: IExposureCandidateExtractionInput):
       })),
     }, null, 2),
   ].join('\n');
-};
-
-const extractJsonObject = (content: string): string => {
-  const fenced = content.match(/```json\s*([\s\S]*?)\s*```/iu);
-  if (fenced?.[1]) {
-    return fenced[1].trim();
-  }
-  const first = content.indexOf('{');
-  const last = content.lastIndexOf('}');
-  return first >= 0 && last > first ? content.slice(first, last + 1) : content.trim();
 };
 
 interface IOpenAiCompatibleExposureCandidateExtractorOptions {

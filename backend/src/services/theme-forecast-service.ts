@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { hasPrismaDelegateMethod } from './prisma-utils.js';
+import { clamp } from '../lib/number-utils.js';
 
 /**
  * 主题/资产级预测服务
@@ -61,10 +62,6 @@ const GENERIC_KEYWORD_BLACKLIST = new Set([
 
 const hasDelegate = (prisma: any, delegateName: string, methodName: string): boolean => {
   return hasPrismaDelegateMethod(prisma, delegateName, methodName);
-};
-
-const clamp = (value: number, min: number, max: number): number => {
-  return Math.max(min, Math.min(value, max));
 };
 
 interface IAggregatedTheme {

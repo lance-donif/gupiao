@@ -5,7 +5,6 @@ import { CoverageInitializationRepository } from '../repositories/coverage-initi
 import { FactSnapshotService } from './limitup-evidence-initialization.js';
 import { IStrategyExperimentConfig } from './strategy-experiment-core.js';
 import {
-  clamp,
   normalizeDecimalNumber,
   normalizeDirectionWeight,
   normalizeKeyword,
@@ -13,6 +12,7 @@ import {
   calculateTimeDecay,
   calculateExposureBreadthWeight,
 } from './scoring-utils.js';
+import { clamp, toNumber } from '../lib/number-utils.js';
 
 
 
@@ -761,11 +761,6 @@ const calculateGraphComponentScores = (
     weakSignalScore: Number(weakSignalScore.toFixed(4)),
     total,
   };
-};
-
-const toNumber = (value: unknown): number => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 };
 
 const average = (values: readonly number[]): number | null => {

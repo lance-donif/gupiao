@@ -10,6 +10,7 @@ import type { INormalizedNewsCandidate } from './news-ingest-pipeline.js';
 import type { INewsSourceArticle } from '../sources/contracts.js';
 import type { PublicNewsSourceMode } from './public-news-source-orchestrator.js';
 import { createDefaultPublicNewsSourceOrchestrator } from './public-news-source-orchestrator.js';
+import { dateKey } from '../lib/date-utils.js';
 
 const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
 const NEWS_FETCH_CACHE_BUCKET_MINUTES = 15;
@@ -126,9 +127,8 @@ export const getBeijingDateKey = (date: Date): string => {
 };
 
 export const createTraceId = (asOf: Date, clusterKey: string): string => {
-  const dateKey = asOf.toISOString().slice(0, 10);
   const suffix = crypto.randomBytes(4).toString('hex');
-  return `daily-${clusterKey}-${dateKey}-${suffix}`;
+  return `daily-${clusterKey}-${dateKey(asOf)}-${suffix}`;
 };
 
 const createStableNewsRecordId = (

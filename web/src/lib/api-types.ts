@@ -1,29 +1,6 @@
 export interface DispatchResponse { trace_id: string; celery_task_id: string }
 
-export interface BatchBrief {
-  id: string;
-  group_id: string;
-  group_version_id: string;
-  target_trading_date: string;
-  status: string;
-  trace_id: string;
-  run_fingerprint: string;
-  enqueued_at: number;
-  started_at?: string | null;
-  finished_at?: string | null;
-  graph_done: boolean;
-  chroma_done: boolean;
-  market_cached_done: boolean;
-  schema_checked_count?: number;
-  schema_mismatch_count?: number;
-  schema_mismatch_rate?: number;
-  promote_blocked_by_quality?: boolean;
-  quality_warnings_json?: string;
-  error_code?: string | null;
-  error_message?: string | null;
-}
-
-export interface BatchProgressNode {
+interface BatchProgressNode {
   node_id: string;
   node_label: string;
   sequence_no: number;
@@ -49,176 +26,27 @@ export interface BatchProgress {
   nodes: BatchProgressNode[];
 }
 
-export interface BatchNodeResultSummaryCard {
-  key: string;
-  label: string;
-  value: string;
-}
-
-export interface BatchNodeResultSection {
-  key: string;
-  label: string;
-  kind: 'scalar' | 'object' | 'list';
-  total_count: number;
-  page: number;
-  page_size: number;
-  has_more: boolean;
-  items: Array<Record<string, unknown>>;
-  fields: Record<string, unknown>;
-}
-
-export interface BatchNodeResult {
-  batch_id: string;
-  node_id: string;
-  node_label: string;
-  status: string;
-  source: 'node_snapshot';
-  summary_cards: BatchNodeResultSummaryCard[];
-  sections: BatchNodeResultSection[];
-}
-
-export interface DailyReportEvidence {
-  evidence_id: string;
-  source: string;
-  title: string;
-  url: string;
-  event_ts_or_publish_ts: number;
-  snippet: string;
-  schema_version: string;
-  anchor_status: 'ANCHOR_OK' | 'ANCHOR_MULTI_HIT' | 'ANCHOR_MISS' | 'UNAVAILABLE';
-  created_at?: string | null;
-}
-
-export interface DailyReportPath {
-  hop_index: number;
-  src_entity: string;
-  dst_entity: string;
-  relation_type: string;
-  relation_confidence: number;
-  source_diversity_score?: number;
-  conflict_penalty?: number;
-  path_score?: number;
-  direction?: 'OUTBOUND' | 'INBOUND' | 'UNKNOWN';
-  edge_fact_id?: string | null;
-  anchor_status: 'ANCHOR_OK' | 'ANCHOR_MULTI_HIT' | 'ANCHOR_MISS' | 'UNAVAILABLE';
-  evidences: DailyReportEvidence[];
-}
-
-export interface DailyReportStock {
-  ticker: string;
-  name: string;
-  stage: 'A' | 'B' | 'C';
-  total_score: number;
-  confidence?: number | null;
-  confidence_reason?: string | null;
-  macro_mainline?: string | null;
-  macro_reason?: string | null;
-  why_this_stock: { short: string; detail: string };
-  why_now: string | { detail: string };
-  stage_strategy?: {
-    watch_signals?: string[];
-    trigger_to_B?: string;
-    entry_trigger?: string;
-    stop_loss_rule?: string;
-    take_profit_rule?: string;
-    position_suggestion?: string;
-    do_not_chase_reason?: string;
-    second_chance_trigger?: string;
-  };
-  falsification_conditions: string[];
-  risk_summary?: string;
-  hard_c_reasons?: string[];
-  tradeability_flags?: {
-    tradeable: boolean;
-    reasons: string[];
-    candles_used: number;
-  };
-  evidence_paths: DailyReportPath[];
-  tech_details?: Record<string, unknown> | null;
-  graph_data?: unknown;
-  evidence_tier?: 'E1' | 'E0';
-  evidence_path_count?: number;
-  selection_reason_codes?: string[];
-  selection_reason_texts_zh?: string[];
-  latest_close?: number | string | null;
-  amount?: number | string | null;
-  market_cap?: number | string | null;
-  ret_5d?: number | string | null;
-  quality_filter_tags?: string[];
-  quality_filter_texts_zh?: string[];
-  candidate_source?: string;
-  candidate_source_confidence?: number | null;
-  trade_plan?: {
-    buy_when: string;
-    buy_price_ref: number | null;
-    buy_price_range: [number, number] | null;
-    stop_loss_price: number | null;
-    take_profit_range: [number, number] | null;
-    sell_when: string;
-  };
-  friend_chain?: {
-    nodes: string[];
-    edges: { rel_zh: string; polarity: 1 | -1; weight: number | null }[];
-    text: string;
-    source: 'CAUSAL' | 'EVIDENCE_FALLBACK';
-  };
-}
-
-export interface DailyReportPayload {
-  available: boolean;
-  report_kind: 'PERSISTED' | 'EMPTY';
-  warnings: string[];
-  summary_text?: string;
-  hotspot_overview?: {
-    primary_hotspots: string[];
-    overflow_hotspots: string[];
-    weak_signals: string[];
-    hotspot_debug: {
-      theme_caps_applied: number;
-      deduped_theme_count: number;
-      dropped_same_theme_count: number;
-      source_news_count: number;
-      duplicate_news_count: number;
-      weak_signal_count: number;
-      weak_signal_appended_count: number;
-      weak_signal_overflow_count: number;
-    };
-  };
-  news_diagnostics?: {
-    source_distribution: Record<string, number>;
-    raw_count: number;
-    exact_dedup_count: number;
-    semantic_dedup_count: number;
-    cross_batch_duplicate_count: number;
-    duplicate_title_count: number;
-    translated_count: number;
-    final_input_count: number;
-  };
+export interface BatchBrief {
+  id: string;
   group_id: string;
   group_version_id: string;
-  display_date: string;
-  as_of_trade_date: string;
-  recommendation_kind: 'TRADING' | 'NON_TRADING_SPECIAL';
-  stage_rules_version: string;
-  batch_quality: {
-    schema_checked_count: number;
-    schema_mismatch_count: number;
-    schema_mismatch_rate: number;
-    degraded: boolean;
-    promote_blocked_by_quality: boolean;
-  };
-  recommendations: {
-    A: DailyReportStock[];
-    B: DailyReportStock[];
-    C: DailyReportStock[];
-  };
-  meta: {
-    batch_id: string;
-    trace_id: string;
-    run_fingerprint: string;
-    created_at: string;
-    status: string;
-  };
+  target_trading_date: string;
+  status: string;
+  trace_id: string;
+  run_fingerprint: string;
+  enqueued_at: number;
+  started_at?: string | null;
+  finished_at?: string | null;
+  graph_done: boolean;
+  chroma_done: boolean;
+  market_cached_done: boolean;
+  schema_checked_count?: number;
+  schema_mismatch_count?: number;
+  schema_mismatch_rate?: number;
+  promote_blocked_by_quality?: boolean;
+  quality_warnings_json?: string;
+  error_code?: string | null;
+  error_message?: string | null;
 }
 
 export interface ClusterSummary {
@@ -233,126 +61,14 @@ export interface ClusterSummary {
   updated_at?: string | null;
 }
 
-export interface ClusterVersion {
-  id: string;
-  group_id: string;
-  version: number;
-  prompts_dir: string;
-  created_at: string | null;
-}
-
-export interface ClusterFeedback {
-  id?: string;
-  group_id: string;
-  group_version_id: string;
-  display_date: string;
-  ticker: string;
-  score: number;
-  reason?: string | null;
-  trace_id?: string;
-  created_at?: string;
-  updated_at?: string;
-  deleted?: boolean;
-}
-
-export interface GraphNode { id: string; label: string; type: string }
-export interface GraphEdge {
-  source: string;
-  target: string;
-  label: string;
-  type: string;
-  event_ts?: number | null;
-  confidence?: number | null;
-}
-export interface GraphOut { nodes: GraphNode[]; edges: GraphEdge[] }
-export interface PromotePreflightResponse {
-  group_id: string;
-  stage_rules_version: string;
-  eval_rules_version: string;
-  rules_pair_key: string;
-  gate_profile: string;
-  gate_passed: boolean;
-  gate_failed_reasons: string[];
-  matured_valid_ab_tradeable_count: number;
-  c_class_rate: number | null;
-  warnings: string[];
-}
-
-export interface ContributionDetailRow {
-  newsId: string;
-  keyword: string;
-  sourceKeyword?: string | null;
-  matchedExposureKeyword?: string | null;
-  exposureFactId?: string | null;
-  matchMethod?: string | null;
-  matchConfidence?: number | null;
-  baseFrequencyScore: number;
-  timeDecayedScore: number;
-  reprintPenaltyScore: number;
-  finalContribScore: number;
-  reasons: string[];
-  asOf: string;
-  clusterKey: string;
-}
-
-export interface ContributionDetailPayload {
-  traceId: string;
-  symbol: string;
-  totalContribution: number;
-  rows: ContributionDetailRow[];
-}
-
-export interface MetricsOverview {
-  last_ts?: number | null;
-  events: Record<string, number>;
-  levels: Record<string, number>;
-  avg_lag_seconds?: number | null;
-  schema_mismatch_rate_latest?: number | null;
-  schema_mismatch_block_count?: number;
-  leadtime_breakout_median_latest?: number | null;
-  no_breakout_rate_latest?: number | null;
-  promote_gate_block_count?: number;
-  latest_trade_date?: string | null;
-  stock_count_latest?: number;
-}
-
-export interface RealtimeQuote {
-  price: number | null;
-  change: number | null;
-  change_pct: number | null;
-  volume: number | null;
-  high: number | null;
-  low: number | null;
-  open: number | null;
-  pre_close: number | null;
-  timestamp?: string | null;
-  source?: string;
-  amount?: number | null;
-  market_cap?: number | null;
-  intraday?: RealtimeQuotePoint[];
-  minute_points?: RealtimeQuotePoint[];
-  points?: RealtimeQuotePoint[];
-  series?: RealtimeQuotePoint[];
-}
-
-export interface RealtimeQuotePoint {
-  time?: string | null;
-  timestamp?: string | null;
-  price?: number | string | null;
-  close?: number | string | null;
-  value?: number | string | null;
-}
-
-export type ConfigCategory = 'ai' | 'akshare' | 'strategy' | 'system';
-
-export interface StrategyConfigWeights {
+interface StrategyConfigWeights {
   evidence: number;
   graph: number;
   exposure: number;
   market: number;
 }
 
-export interface StrategyMarketWeights {
+interface StrategyMarketWeights {
   momentum5d: number;
   momentum20d: number;
   volumeRatio: number;
@@ -397,6 +113,16 @@ export interface StrategyDefinition {
   last_error_message: string | null;
 }
 
+interface StrategyProfitHorizonResult {
+  trading_day: string | null;
+  price: number | null;
+  return_pct: number | null;
+  status: 'LIVE' | 'FINAL' | 'PENDING' | 'NO_CURRENT_PRICE' | 'NO_BASE_PRICE';
+  price_source: 'tickflow' | 'yahoo_finance' | 'candle_fallback' | 'unavailable' | 'settlement';
+  price_time: string | null;
+  settlement_note: string | null;
+}
+
 export interface StrategyProfitRow {
   strategy_id: string;
   strategy_name: string;
@@ -426,16 +152,6 @@ export interface StrategyProfitRow {
     t5: StrategyProfitHorizonResult;
   };
   recommendation_key: string;
-}
-
-export interface StrategyProfitHorizonResult {
-  trading_day: string | null;
-  price: number | null;
-  return_pct: number | null;
-  status: 'LIVE' | 'FINAL' | 'PENDING' | 'NO_CURRENT_PRICE' | 'NO_BASE_PRICE';
-  price_source: 'tickflow' | 'yahoo_finance' | 'candle_fallback' | 'unavailable' | 'settlement';
-  price_time: string | null;
-  settlement_note: string | null;
 }
 
 export interface StrategyProfitHorizonSummary {
@@ -486,14 +202,6 @@ export interface StrategyPerformanceReport {
   created_at: string;
 }
 
-export interface ConfigItem {
-  key: string;
-  value: string;
-  category: ConfigCategory;
-  label: string;
-  is_secret: boolean;
-}
-
 export interface DashboardRecommendationItem {
   symbol: string;
   stock_name: string;
@@ -517,7 +225,7 @@ export interface DashboardRecommendationItem {
   win_rate_t3: number | null;
 }
 
-export interface DashboardExecutionHistoryItem {
+interface DashboardExecutionHistoryItem {
   trace_id: string;
   batch_id: string;
   started_at: string | null;
@@ -531,7 +239,7 @@ export interface DashboardExecutionHistoryItem {
   error_message: string | null;
 }
 
-export interface ThemeForecastItem {
+interface ThemeForecastItem {
   theme: string;
   direction: 'bullish' | 'bearish' | 'neutral';
   probability: number;
@@ -543,7 +251,7 @@ export interface ThemeForecastItem {
   reasons: string[];
 }
 
-export interface ExpectationGapItem {
+interface ExpectationGapItem {
   keyword: string;
   graph_strength: number;
   price_reaction: number;
@@ -592,6 +300,52 @@ export interface DashboardSnapshotPayload {
     status: string | null;
     started_at: string | null;
     finished_at: string | null;
+  };
+}
+
+interface LiveQuotePayload {
+  price: number | null;
+  day_low: number | null;
+  day_high: number | null;
+  change_pct: number | null;
+  market_time: string | null;
+  source: 'tickflow' | 'yahoo_finance' | 'candle_fallback' | 'unavailable';
+  status: 'LIVE' | 'FALLBACK' | 'UNAVAILABLE';
+}
+
+interface DashboardUiSummary {
+  decision: {
+    headline: string;
+    action_state: 'strong_buy' | 'watch_pullback' | 'observe' | 'avoid';
+    action_label: '强推荐' | '等待回踩' | '继续观察' | '暂不买入';
+    score_formula: string;
+  };
+  buy_trigger: {
+    trigger_label: string;
+    buy_price_ref_label: string;
+    stop_loss_label: string;
+    position_label: string;
+  };
+  why_stock: {
+    conclusion: string;
+    key_evidence: string;
+    mapping_reason: string;
+    risk_note: string;
+  };
+  why_now: Array<{
+    label: string;
+    detail: string;
+    tone: 'positive' | 'neutral' | 'warning';
+  }>;
+  primary_evidence: {
+    chain_id: string | null;
+    mapping_short: string;
+    mapping_explanation: string;
+  };
+  system_health: {
+    data_updated_at: string | null;
+    schema_health_label: string;
+    pipeline_health_label: string;
   };
 }
 
@@ -647,52 +401,6 @@ export interface DashboardStockDetailPayload {
   falsification_conditions: string[];
   concept_tags: string[];
   ui_summary: DashboardUiSummary;
-}
-
-export interface LiveQuotePayload {
-  price: number | null;
-  day_low: number | null;
-  day_high: number | null;
-  change_pct: number | null;
-  market_time: string | null;
-  source: 'tickflow' | 'yahoo_finance' | 'candle_fallback' | 'unavailable';
-  status: 'LIVE' | 'FALLBACK' | 'UNAVAILABLE';
-}
-
-export interface DashboardUiSummary {
-  decision: {
-    headline: string;
-    action_state: 'strong_buy' | 'watch_pullback' | 'observe' | 'avoid';
-    action_label: '强推荐' | '等待回踩' | '继续观察' | '暂不买入';
-    score_formula: string;
-  };
-  buy_trigger: {
-    trigger_label: string;
-    buy_price_ref_label: string;
-    stop_loss_label: string;
-    position_label: string;
-  };
-  why_stock: {
-    conclusion: string;
-    key_evidence: string;
-    mapping_reason: string;
-    risk_note: string;
-  };
-  why_now: Array<{
-    label: string;
-    detail: string;
-    tone: 'positive' | 'neutral' | 'warning';
-  }>;
-  primary_evidence: {
-    chain_id: string | null;
-    mapping_short: string;
-    mapping_explanation: string;
-  };
-  system_health: {
-    data_updated_at: string | null;
-    schema_health_label: string;
-    pipeline_health_label: string;
-  };
 }
 
 export interface DashboardEvidenceChainItem {

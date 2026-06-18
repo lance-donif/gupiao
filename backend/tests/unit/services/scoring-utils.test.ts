@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { clamp } from '../../../src/lib/number-utils.js';
 import {
-  clamp,
   normalizeDecimalNumber,
   normalizeDirectionWeight,
   normalizeKeyword,

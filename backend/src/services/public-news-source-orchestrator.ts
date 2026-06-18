@@ -1,6 +1,6 @@
 import type { INewsSourceArticle } from '../sources/contracts.js';
 import crypto from 'node:crypto';
-import * as cheerio from 'cheerio';
+import { toNonEmptyString } from '../lib/url-utils.js';
 
 export type PublicNewsSourceMode = 'baseline' | 'expanded';
 
@@ -108,12 +108,20 @@ export const DEFAULT_GOOGLE_NEWS_KEYWORDS: readonly string[] = [
 
 const normalizeWhitespace = (value: string): string => value.trim().replace(/\s+/gu, ' ');
 
-const toNonEmptyString = (value: string | undefined): string | null => {
-  const normalized = normalizeWhitespace(value ?? '');
-  return normalized.length > 0 ? normalized : null;
-};
+const decodeCdata = (value: string): string => value.replace(/<!\[CDATA\[(.*?)\]\]>/gsu, '$1');
 
-const stripHtml = (value: string): string => normalizeWhitespace(cheerio.load(value).text() || value);
+const decodeHtmlEntities = (value: string): string =>
+  value
+    .replace(/&lt;/gu, '<')
+    .replace(/&gt;/gu, '>')
+    .replace(/&quot;/gu, '"')
+    .replace(/&#39;/gu, "'")
+    .replace(/&apos;/gu, "'")
+    .replace(/&nbsp;/gu, ' ')
+    .replace(/&amp;/gu, '&');
+
+const stripHtml = (value: string): string =>
+  normalizeWhitespace(decodeHtmlEntities(decodeCdata(value).replace(/<[^>]+>/gu, ''))) || value;
 
 const parsePublishedAt = (raw: string | null, capturedAt: Date): Date => {
   if (!raw) {
@@ -191,28 +199,49 @@ export const createGoogleNewsRssUrls = (keywords: readonly string[]): readonly s
   });
 };
 
+const extractTagText = (block: string, tagName: string): string | undefined => {
+  const match = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'iu').exec(block);
+  return match ? decodeHtmlEntities(decodeCdata(match[1])) : undefined;
+};
+
+const extractEntryLink = (block: string): string | undefined => {
+  const links = [...block.matchAll(/<link\b([^>]*)>/giu)];
+  for (const [, attrs] of links) {
+    if (!attrs) continue;
+    const rel = /rel=["']([^"']*)["']/iu.exec(attrs)?.[1];
+    const href = /href=["']([^"']*)["']/iu.exec(attrs)?.[1];
+    if (href && rel === 'alternate') return href;
+  }
+  for (const [, attrs] of links) {
+    if (!attrs) continue;
+    const href = /href=["']([^"']*)["']/iu.exec(attrs)?.[1];
+    if (href) return href;
+  }
+  return undefined;
+};
+
 export const parseRssXml = (input: IParseRssXmlInput): readonly INewsSourceArticle[] => {
-  const $ = cheerio.load(input.xml, { xmlMode: true });
   const articles: INewsSourceArticle[] = [];
   const requestId = `${input.sourceName}-${input.capturedAt.toISOString()}`;
 
-  $('item').each((_index, element) => {
-    const node = $(element);
-    const title = toNonEmptyString(node.find('title').first().text());
-    const summaryRaw = toNonEmptyString(node.find('description').first().text())
-      ?? toNonEmptyString(node.find('content\\:encoded').first().text())
+  const itemMatches = [...input.xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/giu)];
+  for (const [, block] of itemMatches) {
+    if (!block) continue;
+    const title = toNonEmptyString(extractTagText(block, 'title'));
+    const summaryRaw = toNonEmptyString(extractTagText(block, 'description'))
+      ?? toNonEmptyString(extractTagText(block, 'content:encoded'))
       ?? title;
     const summary = summaryRaw ? stripHtml(summaryRaw) : null;
-    const link = toNonEmptyString(node.find('link').first().text())
-      ?? toNonEmptyString(node.find('guid').first().text());
+    const link = toNonEmptyString(extractTagText(block, 'link'))
+      ?? toNonEmptyString(extractTagText(block, 'guid'));
     const publishedAt = parsePublishedAt(
-      toNonEmptyString(node.find('pubDate').first().text())
-      ?? toNonEmptyString(node.find('dc\\:date').first().text()),
+      toNonEmptyString(extractTagText(block, 'pubDate'))
+      ?? toNonEmptyString(extractTagText(block, 'dc:date')),
       input.capturedAt,
     );
 
     if (!title || !summary) {
-      return;
+      continue;
     }
 
     const recordId = createRecordId(input.sourceName, input.feedUrl, title, link ?? '', publishedAt);
@@ -232,25 +261,25 @@ export const parseRssXml = (input: IParseRssXmlInput): readonly INewsSourceArtic
         contentQuality: summary.length > title.length + 4 ? 'summary' : 'title_only',
       },
     });
-  });
+  }
 
-  $('entry').each((_index, element) => {
-    const node = $(element);
-    const title = toNonEmptyString(node.find('title').first().text());
-    const summaryRaw = toNonEmptyString(node.find('summary').first().text())
-      ?? toNonEmptyString(node.find('content').first().text())
+  const entryMatches = [...input.xml.matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/giu)];
+  for (const [, block] of entryMatches) {
+    if (!block) continue;
+    const title = toNonEmptyString(extractTagText(block, 'title'));
+    const summaryRaw = toNonEmptyString(extractTagText(block, 'summary'))
+      ?? toNonEmptyString(extractTagText(block, 'content'))
       ?? title;
     const summary = summaryRaw ? stripHtml(summaryRaw) : null;
-    const link = toNonEmptyString(node.find('link[rel="alternate"]').first().attr('href'))
-      ?? toNonEmptyString(node.find('link').first().attr('href'));
+    const link = toNonEmptyString(extractEntryLink(block));
     const publishedAt = parsePublishedAt(
-      toNonEmptyString(node.find('published').first().text())
-      ?? toNonEmptyString(node.find('updated').first().text()),
+      toNonEmptyString(extractTagText(block, 'published'))
+      ?? toNonEmptyString(extractTagText(block, 'updated')),
       input.capturedAt,
     );
 
     if (!title || !summary) {
-      return;
+      continue;
     }
 
     const recordId = createRecordId(input.sourceName, input.feedUrl, title, link ?? '', publishedAt);
@@ -270,28 +299,27 @@ export const parseRssXml = (input: IParseRssXmlInput): readonly INewsSourceArtic
         contentQuality: summary.length > title.length + 4 ? 'summary' : 'title_only',
       },
     });
-  });
+  }
 
   return articles;
 };
 
 export const parseSinaFinanceRollHtml = (input: IParseSinaFinanceRollHtmlInput): readonly INewsSourceArticle[] => {
-  const $ = cheerio.load(input.html);
   const articles: INewsSourceArticle[] = [];
   const seen = new Set<string>();
   const requestId = `sina-finance-roll-${input.capturedAt.toISOString()}`;
 
-  $('a[href]').each((_index, element) => {
-    const node = $(element);
-    const title = toNonEmptyString(node.text());
-    const rawHref = toNonEmptyString(node.attr('href'));
-    if (!title || title.length < 12 || !rawHref) {
-      return;
+  const anchorMatches = [...input.html.matchAll(/<a\b[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/giu)];
+  for (const [, rawHref, inner] of anchorMatches) {
+    if (!rawHref || !inner) continue;
+    const title = toNonEmptyString(stripHtml(inner));
+    if (!title || title.length < 12) {
+      continue;
     }
 
     const url = new URL(rawHref, input.pageUrl).toString();
     if (!isSinaFinanceArticleUrl(url) || seen.has(url)) {
-      return;
+      continue;
     }
     seen.add(url);
 
@@ -313,7 +341,7 @@ export const parseSinaFinanceRollHtml = (input: IParseSinaFinanceRollHtmlInput):
         publishedAtSource: 'capturedAt',
       },
     });
-  });
+  }
 
   return articles;
 };

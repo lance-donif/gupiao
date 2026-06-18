@@ -82,7 +82,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: gupiao-scheduler
-    command: ["bun", "run", "dist/scripts/run-mvp-daily-scheduler.js"]
+    command: ["node", "dist/scripts/run-daily-recommendation.js"]
     env_file:
       - .env
     environment:

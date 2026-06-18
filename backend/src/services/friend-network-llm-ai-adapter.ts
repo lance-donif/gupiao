@@ -5,6 +5,8 @@ import type {
 } from './friend-network-types.js';
 import { requireEnvironmentValue } from './integration-config.js';
 import { fetchWithRetry } from './ai-client-utils.js';
+import { extractJsonObject } from '../lib/openai-utils.js';
+import { normalizeBaseUrl } from '../lib/url-utils.js';
 
 interface IOpenAiCompatibleMessage {
   readonly role: 'system' | 'user';
@@ -36,10 +38,6 @@ interface IRefinedAiDecisionEnvelope {
   readonly decisions?: readonly IRefinedAiDecision[];
 }
 
-const normalizeBaseUrl = (value: string): string => {
-  return value.endsWith('/') ? value.slice(0, -1) : value;
-};
-
 const buildPrompt = (candidates: readonly IAiRelationshipCandidate[]): string => {
   return [
     '你是股票亲友关系图谱裁决器。',
@@ -53,21 +51,6 @@ const buildPrompt = (candidates: readonly IAiRelationshipCandidate[]): string =>
     '返回格式：{"decisions":[...]}。',
     JSON.stringify(candidates, null, 2),
   ].join('\n');
-};
-
-const extractJsonObject = (content: string): string => {
-  const fenced = content.match(/```json\s*([\s\S]*?)\s*```/i);
-  if (fenced?.[1]) {
-    return fenced[1].trim();
-  }
-
-  const firstBrace = content.indexOf('{');
-  const lastBrace = content.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return content.slice(firstBrace, lastBrace + 1);
-  }
-
-  return content.trim();
 };
 
 const isRelationType = (value: unknown): value is IAiRelationshipDecision['relationType'] => {

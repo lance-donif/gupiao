@@ -1,6 +1,7 @@
 import type { INewsSourceRequest, IProviderNewsArticlePayload, IProviderNewsResponse, IProviderRequestMetadata, ISourceProvider, ISourceProviderHealthStatus } from '../sources/contracts.js';
 import crypto from 'node:crypto';
 import { SourceFailureCategory } from '../sources/contracts.js';
+import { normalizeBaseUrl, toNonEmptyString } from '../lib/url-utils.js';
 
 export interface IAkToolsNewsProviderOptions {
   readonly baseUrl: string;
@@ -56,19 +57,6 @@ const fetchWithTimeout = async (
       clearTimeout(timer);
     }
   }
-};
-
-const normalizeBaseUrl = (baseUrl: string): string => {
-  return baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
-};
-
-const toNonEmptyString = (value: unknown): string | null => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const normalized = value.trim();
-  return normalized.length > 0 ? normalized : null;
 };
 
 const parseAktoolsDate = (raw: string): Date | null => {

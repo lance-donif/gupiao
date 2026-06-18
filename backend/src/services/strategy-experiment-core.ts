@@ -1,4 +1,5 @@
 import { normalizeSelectionSignalType } from './temp-stock-recommendation-service.js';
+import { clamp } from '../lib/number-utils.js';
 
 export interface IStrategyExperimentWeights {
   readonly evidence: number;
@@ -122,8 +123,6 @@ export interface IStrategyExperimentSelectionDiagnostics {
   readonly skippedBySignalTypeCap: number;
   readonly shortfallReasons: readonly string[];
 }
-
-const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
 const parseNumber = (value: unknown, field: string): number => {
   if (typeof value !== 'number' && typeof value !== 'string') {

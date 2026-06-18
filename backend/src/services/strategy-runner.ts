@@ -16,6 +16,7 @@ import {
 } from './strategy-experiment-core.js';
 import { normalizeSelectionSignalType } from './temp-stock-recommendation-service.js';
 import { calculateMarketSignalScore } from './scoring-contribution-engine.js';
+import { toNumber } from '../lib/number-utils.js';
 
 export interface IStrategyDefinitionRow {
   readonly id: string;
@@ -46,11 +47,6 @@ export interface IStrategyExperimentExecutionResult {
   readonly recommendationCount: number;
   readonly runs: readonly IStrategyRunSummary[];
 }
-
-const toNumber = (value: unknown, fallback = 0): number => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-};
 
 const toDate = (value: unknown): Date => {
   if (value instanceof Date) {

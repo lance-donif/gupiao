@@ -5,6 +5,7 @@ import type {
   IStockExposureRejectedRecord,
 } from './stock-exposure-types.js';
 import crypto from 'node:crypto';
+import { normalizeBaseUrl } from '../lib/url-utils.js';
 
 interface ITickFlowUniverseSummary {
   readonly id?: string;
@@ -55,10 +56,6 @@ export interface ITickFlowStockExposureSyncResult {
 const TICKFLOW_SOURCE = 'tickflow_sw_universe';
 const DEFAULT_BASE_URL = 'https://api.tickflow.org';
 const SW_UNIVERSE_PATTERN = /^CN_Equity_SW([123])_\d+$/u;
-
-const normalizeBaseUrl = (value: string): string => {
-  return value.endsWith('/') ? value.slice(0, -1) : value;
-};
 
 export const isSupportedTickFlowSwUniverse = (universe: ITickFlowUniverseSummary): boolean => {
   return (

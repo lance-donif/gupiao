@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { hasPrismaDelegateMethod } from './prisma-utils.js';
+import { toNumber } from '../lib/number-utils.js';
 
 /**
  * 主题预测 T+5 对账服务
@@ -32,11 +33,6 @@ const RECONCILIATION_LOOKBACK_DAYS = 15;  // 日历日，覆盖约10个交易日
 
 const hasDelegate = (prisma: any, delegateName: string, methodName: string): boolean => {
   return hasPrismaDelegateMethod(prisma, delegateName, methodName);
-};
-
-const toNumber = (value: unknown): number => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 };
 
 const classifyRealizedDirection = (changePct: number): 'up' | 'down' | 'flat' => {

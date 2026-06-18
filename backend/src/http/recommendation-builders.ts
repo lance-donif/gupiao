@@ -1,4 +1,5 @@
 import type { IBackendArtifacts } from './types.js';
+import { clamp } from '../lib/number-utils.js';
 
 interface IRankedRecommendation {
   readonly rank: number;
@@ -19,8 +20,6 @@ interface IPartitionedRecommendations {
     readonly C: readonly IRankedRecommendation[];
   };
 }
-
-const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
 const computeStage = (index: number, total: number): 'A' | 'B' | 'C' => {
   if (total <= 2) {

@@ -6,6 +6,7 @@ import type {
   StockExposureType,
 } from './stock-exposure-types.js';
 import crypto from 'node:crypto';
+import { normalizeBaseUrl, toNonEmptyString } from '../lib/url-utils.js';
 
 type AkRecord = Readonly<Record<string, unknown>>;
 
@@ -46,18 +47,8 @@ const INDIVIDUAL_SOURCE = 'akshare_individual_info_em';
 const STOCK_CHANGES_SOURCE = 'akshare_stock_changes_em';
 const BOARD_CHANGE_SOURCE = 'akshare_board_change_em';
 
-const normalizeBaseUrl = (value: string): string => value.endsWith('/') ? value.slice(0, -1) : value;
-
 const hashPayload = (value: unknown): string => {
   return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
-};
-
-const toNonEmptyString = (value: unknown): string | null => {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  const text = String(value).trim();
-  return text.length > 0 ? text : null;
 };
 
 const pickString = (record: AkRecord, keys: readonly string[]): string | null => {

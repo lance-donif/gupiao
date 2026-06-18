@@ -1,0 +1,22 @@
+# Checklist
+
+- [x] `backend/package.json` 已移除 `playwright`、`cheerio`、`yahoo-finance2`、`tsx`、`dotenv`
+- [x] `backend/src/services/public-news-source-orchestrator.ts` 不再导入 `cheerio`
+- [x] `backend/scripts/fetch-newsnow.ts` 不再导入 `playwright`
+- [x] `backend/scripts/build-friend-network*.ts` 已删除
+- [x] `backend/scripts/replay.ts` 已删除
+- [x] `scripts/analyze_complexity.py` 和 `scripts/generate_*.py` 已删除
+- [x] `.playwright-cli/` 下 YAML 快照已删除
+- [x] 后端重复工具函数已合并到 `backend/src/lib/*-utils.ts`
+- [x] `web/package.json` 已移除 `@playwright/test`、`markdownlint-cli2`、`autoprefixer`、`postcss-html`、`tw-animate-css`
+- [x] `web/tailwind.config.cjs`、`web/playwright.config.ts`、`web/tests/setup.ts` 已删除
+- [x] `web/src/lib/api-types.ts` 中未使用类型已删除
+- [x] `web/src/lib/api.ts` 中未使用方法已删除
+- [x] `Makefile` 中无效目标已修复
+- [x] `scripts/release_gate_ci_light.sh` 已改用 `bun`
+- [x] `docker-compose.yml` scheduler command 指向有效入口
+- [x] `.env.example` 中无代码读取的变量已清理
+- [x] `cd backend && bun run check:fix` 通过
+- [x] `cd backend && bun run typecheck` 通过
+- [x] `cd backend && bun test` 通过
+- [x] 2026-06-18 今日推荐成功执行并生成 `RecommendationSnapshot`

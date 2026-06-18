@@ -6,8 +6,8 @@ cd "$REPO_ROOT"
 
 echo "[release_gate_ci_light] running backend static gates (TypeScript)"
 
-pnpm --dir backend typecheck
-pnpm --dir backend lint
-pnpm --dir backend test
+cd backend && bun run typecheck
+cd backend && bun run lint
+cd backend && bun run test
 
 echo "[release_gate_ci_light] ok"

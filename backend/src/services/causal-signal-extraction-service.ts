@@ -1,6 +1,8 @@
 import { Prisma } from '@prisma/client';
 import { DataRefreshLedgerService } from './data-refresh-ledger-service.js';
 import { fetchWithRetry } from './ai-client-utils.js';
+import { extractJsonObject } from '../lib/openai-utils.js';
+import { normalizeBaseUrl } from '../lib/url-utils.js';
 
 export type CausalSignalDirection = 'positive' | 'negative' | 'mixed' | 'neutral';
 
@@ -220,23 +222,6 @@ interface IOpenAiCompatibleCausalSignalExtractorOptions {
   readonly requestTimeoutMs?: number;
   readonly maxTokens?: number;
 }
-
-const extractJsonObject = (content: string): string => {
-  const fenced = content.match(/```json\s*([\s\S]*?)\s*```/i);
-  if (fenced?.[1]) {
-    return fenced[1].trim();
-  }
-
-  const firstBrace = content.indexOf('{');
-  const lastBrace = content.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return content.slice(firstBrace, lastBrace + 1);
-  }
-
-  return content.trim();
-};
-
-const normalizeBaseUrl = (value: string): string => value.endsWith('/') ? value.slice(0, -1) : value;
 
 const isDirection = (value: unknown): value is CausalSignalDirection => {
   return value === 'positive' || value === 'negative' || value === 'mixed' || value === 'neutral';

@@ -10,6 +10,8 @@
  * - ThemeForecast（isReconciled=true）：direction 命中 realizedDirection
  */
 import { hasPrismaDelegateMethod } from './prisma-utils.js';
+import { toNumber } from '../lib/number-utils.js';
+import { dateKey } from '../lib/date-utils.js';
 
 export interface IUpgradeProposalInput {
   readonly groupId: string;
@@ -86,11 +88,6 @@ interface IAutopilotPolicy {
 
 const hasDelegate = (prisma: any, delegateName: string, methodName: string): boolean => {
   return hasPrismaDelegateMethod(prisma, delegateName, methodName);
-};
-
-const toNumber = (value: unknown): number => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 };
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -253,11 +250,11 @@ export class ClusterUpgradeProposalService {
       if (yield5Day === null) {
         continue;
       }
-      const dateKey = (rec.asOf instanceof Date ? rec.asOf : new Date(String(rec.asOf))).toISOString().slice(0, 10);
-      const existing = byDay.get(dateKey) ?? emptyDayValue();
+      const dayKey = dateKey(rec.asOf);
+      const existing = byDay.get(dayKey) ?? emptyDayValue();
       existing.date = rec.asOf instanceof Date ? rec.asOf : new Date(String(rec.asOf));
       existing.values.push(yield5Day);
-      byDay.set(dateKey, existing);
+      byDay.set(dayKey, existing);
     }
 
     const dailyAverages = [...byDay.values()].map(item => ({
@@ -304,8 +301,8 @@ export class ClusterUpgradeProposalService {
     const byDay = new Map<string, { date: Date; hits: number; total: number }>();
     const emptyHitValue = (): { date: Date; hits: number; total: number } => ({ date: new Date(), hits: 0, total: 0 });
     for (const forecast of forecasts) {
-      const dateKey = (forecast.asOf instanceof Date ? forecast.asOf : new Date(String(forecast.asOf))).toISOString().slice(0, 10);
-      const existing = byDay.get(dateKey) ?? emptyHitValue();
+      const dayKey = dateKey(forecast.asOf);
+      const existing = byDay.get(dayKey) ?? emptyHitValue();
       existing.date = forecast.asOf instanceof Date ? forecast.asOf : new Date(String(forecast.asOf));
       existing.total += 1;
       const isHit = (String(forecast.direction) === 'bullish' && String(forecast.realizedDirection) === 'up')
@@ -314,7 +311,7 @@ export class ClusterUpgradeProposalService {
       if (isHit) {
         existing.hits += 1;
       }
-      byDay.set(dateKey, existing);
+      byDay.set(dayKey, existing);
     }
 
     const dailyHitRates = [...byDay.values()].map(item => ({

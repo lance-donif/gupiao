@@ -1,5 +1,6 @@
 import type { IDailyReportSnapshotQuery, IDailyReportSnapshotReader } from './types.js';
 import { nowBeijingDateTime } from './beijing-time.js';
+import { toNumberOrNull } from '../lib/number-utils.js';
 
 interface IMinimalPgClient {
   query: <T>(sql: string, values?: readonly unknown[]) => Promise<{ rows: readonly T[] }>;
@@ -38,14 +39,6 @@ interface IEvidenceContributionRow {
   readonly matchMethod: string | null;
   readonly matchConfidence: number | null;
 }
-
-const toNumberOrNull = (value: unknown): number | null => {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-};
 
 const scoreBreakdownNumber = (breakdown: Record<string, unknown>, key: string): number => {
   return toNumberOrNull(breakdown[key]) ?? 0;
