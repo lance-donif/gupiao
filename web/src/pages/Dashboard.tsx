@@ -182,7 +182,7 @@ function RecommendationRail({
   return (
     <aside
       data-state={isOpen ? 'open' : 'closed'}
-      className="recommendation-rail flex min-h-0 flex-col rounded-r-lg bg-card"
+      className="recommendation-rail flex min-h-0 flex-col rounded-r-2xl bg-card"
     >
       <div className="flex h-11 shrink-0 items-center justify-between border-b border-border/70 px-3">
         <div className="flex items-center gap-1.5">
@@ -208,7 +208,7 @@ function RecommendationRail({
                 }
               }}
               className={cn(
-                'workstation-control relative grid min-h-[68px] w-full grid-cols-[34px_minmax(0,1fr)_58px] items-center gap-2 rounded-md px-2.5 py-2 text-left hover:border-sky-200 hover:bg-white dark:hover:border-sky-900/60 dark:hover:bg-sky-950/20',
+                'workstation-control relative grid min-h-[68px] w-full grid-cols-[34px_minmax(0,1fr)_58px] items-center gap-2 rounded-xl px-2.5 py-2 text-left hover:border-sky-200 hover:bg-white dark:hover:border-sky-900/60 dark:hover:bg-sky-950/20',
                 selectedSymbol === row.symbol &&
                   'border-sky-300 bg-sky-50 ring-2 ring-sky-100 shadow-[var(--shadow-soft)] before:absolute before:inset-y-2 before:left-0 before:w-1 before:rounded-r before:bg-sky-500 dark:border-sky-800 dark:bg-sky-950/30 dark:ring-sky-950'
               )}
@@ -225,19 +225,19 @@ function RecommendationRail({
                 {(row.win_rate_t1 != null || row.win_rate_t3 != null) && (
                   <div className="mt-0.5 flex gap-1">
                     {row.win_rate_t1 != null && (
-                      <span className="rounded bg-emerald-50 px-1 py-0 text-[10px] leading-4 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400">
+                      <span className="number-figure rounded bg-emerald-50 px-1 py-0 text-[10px] leading-4 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400">
                         T+1 {Math.round(row.win_rate_t1 * 100)}%
                       </span>
                     )}
                     {row.win_rate_t3 != null && (
-                      <span className="rounded bg-sky-50 px-1 py-0 text-[10px] leading-4 text-sky-700 dark:bg-sky-950/30 dark:text-sky-400">
+                      <span className="number-figure rounded bg-sky-50 px-1 py-0 text-[10px] leading-4 text-sky-700 dark:bg-sky-950/30 dark:text-sky-400">
                         T+3 {Math.round(row.win_rate_t3 * 100)}%
                       </span>
                     )}
                   </div>
                 )}
               </div>
-              <div className="text-right rounded-md bg-white/72 px-1.5 py-1 shadow-[var(--shadow-control)]">
+              <div className="text-right rounded-sm bg-white/72 px-1.5 py-1 shadow-[var(--shadow-control)]">
                 <div className="number-figure text-[15px] font-bold leading-5 text-foreground">
                   {Math.round(row.total_score)}
                 </div>
@@ -256,7 +256,7 @@ function RecommendationRail({
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="absolute right-[-14px] top-1/2 -translate-y-1/2 z-40 flex h-16 w-3.5 items-center justify-center rounded-r-md border-y border-r border-border bg-white shadow-[var(--shadow-control)] text-muted-foreground hover:w-5 active:scale-95 transition-all duration-150 focus-visible:outline-none"
+        className="absolute right-[-14px] top-1/2 -translate-y-1/2 z-40 flex h-16 w-3.5 items-center justify-center rounded-r-md border-y border-r border-border bg-white shadow-[var(--shadow-control)] text-muted-foreground hover:w-5 active:scale-[0.96] transition-[transform,width] duration-150 focus-visible:outline-none"
         title={isOpen ? '收起推荐列表' : '展开推荐列表'}
       >
         <ChevronDown
@@ -281,7 +281,7 @@ function PrimaryDecisionSurface({
 }) {
   const summary = detail?.ui_summary;
   return (
-    <section className="workstation-panel-strong h-auto min-h-[172px] shrink-0 rounded-lg p-4 sm:p-5">
+    <section className="workstation-panel-strong h-auto min-h-[172px] shrink-0 rounded-2xl p-4 sm:p-5">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -323,7 +323,7 @@ function PrimaryDecisionSurface({
             </span>
           </div>
         </div>
-        <div className="decision-score-card flex w-full shrink-0 flex-col gap-3 rounded-lg border border-sky-100/80 p-3 text-left shadow-[var(--shadow-control)] sm:w-[250px]">
+        <div className="decision-score-card flex w-full shrink-0 flex-col gap-3 rounded-xl border border-sky-100/80 p-3 text-left shadow-[var(--shadow-control)] sm:w-[250px]">
           <div>
             <div className="flex items-center justify-between gap-3">
               <div className="text-[12px] font-semibold leading-5 text-muted-foreground">
@@ -470,7 +470,7 @@ function ReasonGrid({ detail }: { detail: DashboardStockDetailPayload | null }) 
           summary?.why_stock.risk_note || '',
         ]}
       />
-      <div className="workstation-control rounded-lg p-3">
+      <div className="workstation-control rounded-xl p-3">
         <div className="text-[14px] font-semibold leading-5">现在为什么</div>
         <div className="mt-2 space-y-1">
           {(summary?.why_now ?? []).slice(0, 3).map((item) => (
@@ -497,7 +497,7 @@ function MarketQuoteCard({ detail }: { detail: DashboardStockDetailPayload | nul
     ? changePct >= 0 ? 'text-red-500' : 'text-emerald-600'
     : 'text-muted-foreground';
   return (
-    <div className="workstation-control rounded-lg p-3">
+    <div className="workstation-control rounded-xl p-3">
       <div className="flex items-center justify-between gap-2">
         <div className="text-[14px] font-semibold leading-5">实时行情</div>
         <Badge variant="outline" className="h-5 shrink-0 px-1.5 text-[10px]">
@@ -532,10 +532,10 @@ function SecondaryExplainSurface({
   snapshot: DashboardSnapshotPayload | null;
 }) {
   return (
-    <section className="workstation-panel min-h-0 flex-1 rounded-lg">
+    <section className="workstation-panel min-h-0 flex-1 rounded-2xl">
       <Tabs defaultValue="evidence" className="flex h-full min-h-0 flex-col">
         <div className="flex h-11 shrink-0 items-center justify-between border-b border-border/70 px-4">
-          <TabsList className="h-8 rounded-md">
+          <TabsList className="h-8 rounded-lg">
             <TabsTrigger value="evidence" className="h-6 px-3 text-[12px]">
               核心证据
             </TabsTrigger>
@@ -736,8 +736,8 @@ function StockWorkspace({
 function SlaEmptyState({ snapshot }: { snapshot: DashboardSnapshotPayload | null }) {
   const sla = snapshot?.sla;
   return (
-    <main className="workstation-panel-strong flex min-h-0 flex-col gap-4 overflow-hidden rounded-lg p-5">
-      <div className="flex h-auto shrink-0 flex-col gap-5 rounded-lg bg-white/70 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] lg:flex-row lg:items-start lg:justify-between">
+    <main className="workstation-panel-strong flex min-h-0 flex-col gap-4 overflow-hidden rounded-3xl p-5">
+      <div className="flex h-auto shrink-0 flex-col gap-5 rounded-xl bg-white/70 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 flex-1">
           <Badge
             variant={sla?.status === 'failed' ? 'destructive' : 'outline'}
@@ -782,7 +782,7 @@ function SlaEmptyState({ snapshot }: { snapshot: DashboardSnapshotPayload | null
           ]}
         />
       </div>
-      <div className="workstation-sunken min-h-0 flex-1 rounded-lg p-3">
+      <div className="workstation-sunken min-h-0 flex-1 rounded-xl p-3">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
             <div className="text-[14px] font-semibold leading-5">最近执行记录</div>
@@ -799,7 +799,7 @@ function SlaEmptyState({ snapshot }: { snapshot: DashboardSnapshotPayload | null
             {(snapshot?.execution_history ?? []).slice(0, 6).map((row) => (
               <div
                 key={row.trace_id}
-                className="rounded-lg bg-white p-3 shadow-[var(--shadow-control)]"
+                className="rounded-md bg-white p-3 shadow-[var(--shadow-control)]"
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[12px] font-semibold">{row.status}</span>
@@ -870,7 +870,7 @@ function EvidenceChainPanel({
 
 function EvidenceSummaryCard({ item, index }: { item: DashboardEvidenceChainItem; index: number }) {
   return (
-    <div className="workstation-control rounded-lg p-3">
+    <div className="workstation-control rounded-xl p-3">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-[13px] font-semibold leading-5">
@@ -898,7 +898,7 @@ function EvidenceChainCard({
   defaultOpen?: boolean;
 }) {
   return (
-    <Collapsible.Root defaultOpen={defaultOpen} className="workstation-control rounded-lg">
+    <Collapsible.Root defaultOpen={defaultOpen} className="workstation-control rounded-2xl">
       <Collapsible.Trigger className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-muted/50">
         <div className="min-w-0">
           <div className="truncate text-[13px] font-semibold leading-5">
@@ -1002,14 +1002,14 @@ function NetworkPanel({ network }: { network: DashboardNetworkPayload | null }) 
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
-      <div className="workstation-control rounded-lg p-3">
+      <div className="workstation-control rounded-xl p-3">
         <div className="mb-3 flex items-center gap-2 text-[12px] text-muted-foreground">
           <Network className="h-4 w-4" />
           <span>{network.network_preview.explanation || '证据链路预览'}</span>
         </div>
         <div className="space-y-2">
           {chains.map((chain) => (
-            <div key={chain.id} className="rounded-md border border-border/70 p-3">
+            <div key={chain.id} className="rounded-lg border border-border/70 p-3">
               <div className="flex flex-wrap items-center gap-2">
                 <NodePill label={chain.theme} kind="theme" />
                 <ChainArrow label="因果链" />
@@ -1038,7 +1038,7 @@ function NetworkPanel({ network }: { network: DashboardNetworkPayload | null }) 
               <span
                 key={f.theme}
                 className={cn(
-                  'rounded-md border px-2 py-1 text-[11px]',
+                  'rounded border px-2 py-1 text-[11px]',
                   f.direction === 'bullish'
                     ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/20 dark:text-emerald-400'
                     : f.direction === 'bearish'
@@ -1129,7 +1129,7 @@ function NodePill({
   return (
     <span
       className={cn(
-        'inline-flex max-w-[160px] items-center rounded-md border px-2 py-1 text-[11px] font-semibold leading-4',
+        'inline-flex max-w-[160px] items-center rounded-sm border px-2 py-1 text-[11px] font-semibold leading-4',
         kindClasses[kind]
       )}
     >
@@ -1275,7 +1275,7 @@ function SystemRail({
 
 function ReasonCard({ title, lines }: { title: string; lines: string[] }) {
   return (
-    <div className="workstation-control rounded-lg p-3">
+    <div className="workstation-control rounded-xl p-3">
       <div className="text-[14px] font-semibold leading-5">{title}</div>
       <div className="mt-2 space-y-1">
         {lines
@@ -1301,7 +1301,7 @@ function ReasonCard({ title, lines }: { title: string; lines: string[] }) {
 
 function EvidenceStep({ title, text, sub }: { title: string; text: string; sub: string }) {
   return (
-    <div className="min-w-0 rounded-md border border-border/70 bg-white p-2 shadow-[var(--shadow-control)]">
+    <div className="min-w-0 rounded-lg border border-border/70 bg-white p-2 shadow-[var(--shadow-control)]">
       <div className="text-[11px] font-semibold leading-4">{title}</div>
       <p className="mt-1 line-clamp-3 text-[12px] leading-5 text-muted-foreground">
         {text || '--'}
@@ -1327,7 +1327,7 @@ function Metric({ label, value, icon }: { label: string; value: string; icon: Re
 
 function MiniMetric({ label, value, className }: { label: string; value: string; className?: string }) {
   return (
-    <div className="workstation-control rounded-md px-2 py-1">
+    <div className="workstation-control rounded-sm px-2 py-1">
       <div className="text-[10px] leading-4 text-muted-foreground">{label}</div>
       <div className={cn('number-figure text-[12px] font-semibold leading-4', className)}>{value}</div>
     </div>

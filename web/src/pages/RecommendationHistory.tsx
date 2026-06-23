@@ -107,7 +107,7 @@ export default function RecommendationHistoryPage() {
 
   return (
     <div className="page-workbench grid min-h-[calc(100vh-48px)] grid-cols-[minmax(0,1fr)] gap-3 overflow-auto p-3 xl:h-[calc(100vh-48px)] xl:overflow-hidden">
-      <section className="workstation-panel-strong flex min-h-0 flex-col rounded-lg">
+      <section className="workstation-panel-strong flex min-h-0 flex-col rounded-2xl">
         <div className="flex h-auto min-h-14 shrink-0 flex-col gap-3 border-b border-border/70 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h1 className="text-[18px] font-semibold leading-6">历史推荐</h1>
@@ -127,7 +127,7 @@ export default function RecommendationHistoryPage() {
           </Button>
         </div>
         <div className="border-b border-border/70 p-3">
-          <div className="workstation-sunken grid shrink-0 gap-2 rounded-lg p-2 sm:grid-cols-2 xl:grid-cols-[140px_160px_minmax(150px,1fr)_minmax(150px,1fr)_150px_150px_96px]">
+          <div className="workstation-sunken grid shrink-0 gap-2 rounded-xl p-2 sm:grid-cols-2 xl:grid-cols-[140px_160px_minmax(150px,1fr)_minmax(150px,1fr)_150px_150px_96px]">
             <Input
               type="date"
               value={tradeDate}
@@ -233,7 +233,7 @@ export default function RecommendationHistoryPage() {
         </CardContent>
         <ScrollArea className="min-h-0 flex-1 px-3 pb-3">
           {rows.length === 0 && (
-            <div className="workstation-sunken mx-auto mt-10 flex min-h-[180px] max-w-[520px] flex-col items-center justify-center rounded-lg p-6 text-center">
+            <div className="workstation-sunken mx-auto mt-10 flex min-h-[180px] max-w-[520px] flex-col items-center justify-center rounded-xl p-6 text-center">
               <div className="text-[14px] font-semibold text-foreground">暂无历史推荐</div>
               <div className="mt-1 text-[12px] leading-5 text-muted-foreground">
                 调整交易日、策略或收益状态后重新筛选。
@@ -263,7 +263,7 @@ export default function RecommendationHistoryPage() {
                     colSpan={8}
                     className="hidden py-10 text-center text-muted-foreground md:table-cell"
                   >
-                    <div className="workstation-sunken mx-auto flex min-h-[180px] max-w-[520px] flex-col items-center justify-center rounded-lg p-6">
+                    <div className="workstation-sunken mx-auto flex min-h-[180px] max-w-[520px] flex-col items-center justify-center rounded-xl p-6">
                       <div className="text-[14px] font-semibold text-foreground">暂无历史推荐</div>
                       <div className="mt-1 text-[12px] leading-5 text-muted-foreground">
                         调整交易日、策略或收益状态后重新筛选。
@@ -332,7 +332,7 @@ function RecommendationRow({ row }: { row: StrategyProfitRow }) {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="workstation-control rounded-lg p-3">
+    <div className="workstation-control rounded-xl p-3">
       <div className="text-[11px] font-semibold leading-4 text-muted-foreground">{label}</div>
       <div className="number-figure mt-1 text-[16px] font-bold leading-6">{value}</div>
     </div>

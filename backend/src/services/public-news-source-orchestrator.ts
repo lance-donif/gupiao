@@ -84,7 +84,7 @@ export interface ISinaFinanceRollAdapterOptions {
 const DEFAULT_PUBLIC_NEWS_TIMEOUT_MS = 12_000;
 const DEFAULT_PUBLIC_NEWS_SOURCE_LIMIT = 300;
 
-export const DEFAULT_SINA_RSS_FEEDS: readonly IRssFeedSpec[] = [
+const DEFAULT_SINA_RSS_FEEDS: readonly IRssFeedSpec[] = [
   { name: 'sina-finance-all', url: 'https://rss.sina.com.cn/news/allnews/finance.xml' },
   { name: 'sina-finance-hot', url: 'https://rss.sina.com.cn/roll/finance/hot_roll.xml' },
   { name: 'sina-stock-hot', url: 'https://rss.sina.com.cn/roll/stock/hot_roll.xml' },
@@ -93,7 +93,7 @@ export const DEFAULT_SINA_RSS_FEEDS: readonly IRssFeedSpec[] = [
 
 const DEFAULT_SINA_FINANCE_ROLL_URL = 'https://finance.sina.com.cn/roll/';
 
-export const DEFAULT_GOOGLE_NEWS_KEYWORDS: readonly string[] = [
+const DEFAULT_GOOGLE_NEWS_KEYWORDS: readonly string[] = [
   'A股 产业链',
   'A股 大宗商品',
   'A股 半导体',

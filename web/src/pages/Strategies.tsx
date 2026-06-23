@@ -209,7 +209,7 @@ export default function StrategiesPage() {
 
   return (
     <div className="page-workbench grid min-h-[calc(100vh-48px)] grid-cols-1 gap-3 overflow-auto p-3 xl:h-[calc(100vh-48px)] xl:grid-cols-[minmax(520px,1fr)_360px] xl:overflow-hidden">
-      <section className="workstation-panel-strong flex min-h-0 flex-col rounded-lg">
+      <section className="workstation-panel-strong flex min-h-0 flex-col rounded-2xl">
         <div className="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-4">
           <div>
             <h1 className="text-[18px] font-semibold leading-6">策略工作台</h1>
@@ -366,7 +366,7 @@ function StrategyListMobile(props: {
             role="button"
             tabIndex={0}
             className={cn(
-              'workstation-control w-full rounded-lg p-3 text-left transition-colors',
+              'workstation-control w-full rounded-xl p-3 text-left transition-colors',
               props.selectedId === strategy.id && 'bg-sky-50/80 shadow-[inset_3px_0_0_#2563eb]'
             )}
             onClick={() => props.onSelect(strategy.id)}
@@ -557,7 +557,7 @@ function StrategySheet(props: {
           <SheetDescription>配置筛选条件和四维评分权重。</SheetDescription>
         </SheetHeader>
         <div className="mt-4 space-y-5 pb-6 text-[12px]">
-          <div className="workstation-control space-y-3 rounded-lg p-3">
+          <div className="workstation-control space-y-3 rounded-xl p-3">
             <Field label="策略名称">
               <Input value={props.name} onChange={(event) => props.setName(event.target.value)} />
             </Field>
@@ -568,8 +568,8 @@ function StrategySheet(props: {
               />
             </Field>
           </div>
-          <div className="workstation-control space-y-3 rounded-lg p-3">
-            <label className="flex items-center gap-2 rounded-md bg-white px-2 py-2 shadow-[var(--shadow-control)]">
+          <div className="workstation-control space-y-3 rounded-xl p-3">
+            <label className="flex items-center gap-2 rounded-sm bg-white px-2 py-2 shadow-[var(--shadow-control)]">
               <input
                 type="checkbox"
                 checked={props.enabled}
@@ -620,7 +620,7 @@ function StrategySheet(props: {
               />
             </div>
           </div>
-          <div className="workstation-control rounded-lg p-3">
+          <div className="workstation-control rounded-xl p-3">
             <div className="mb-3 text-[12px] font-semibold">评分权重</div>
             <div className="grid grid-cols-4 gap-2">
               {(['evidence', 'graph', 'exposure', 'market'] as const).map((key) => (
@@ -651,7 +651,7 @@ function StrategySheet(props: {
               ))}
             </div>
           </div>
-          <div className="workstation-control rounded-lg p-3">
+          <div className="workstation-control rounded-xl p-3">
             <div className="mb-3 text-[12px] font-semibold">行情指标权重</div>
             <div className="grid grid-cols-4 gap-2">
               {([
@@ -679,7 +679,7 @@ function StrategySheet(props: {
               ))}
             </div>
           </div>
-          <div className="workstation-control rounded-lg p-3">
+          <div className="workstation-control rounded-xl p-3">
             <div className="mb-3 text-[12px] font-semibold">斐波那契 &amp; 支撑阻力参数</div>
             <div className="grid grid-cols-2 gap-2">
               <Field label="斐波那契回看天数">
@@ -753,7 +753,7 @@ function SummaryRow({
   mono?: boolean;
 }) {
   return (
-    <div className="workstation-control rounded-md p-2">
+    <div className="workstation-control rounded-sm p-2">
       <div className="text-[11px] text-muted-foreground">{label}</div>
       <div className={cn('mt-1 line-clamp-2 leading-5', mono && 'number-figure text-[11px]')}>
         {value}
@@ -764,7 +764,7 @@ function SummaryRow({
 
 function Mini({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded bg-white p-1 shadow-[var(--shadow-control)]">
+    <div className="rounded-sm bg-white p-1 shadow-[var(--shadow-control)]">
       <div className="number-figure font-semibold text-foreground">{value}</div>
       <div>{label}</div>
     </div>
@@ -775,7 +775,7 @@ function SettlementCard({ item }: { item: StrategyProfitSummary }) {
   const settled = pickSettledHorizon(item);
   const maxDrawdown = settled?.summary.max_drawdown_pct ?? null;
   return (
-    <div className="workstation-control rounded-lg p-3">
+    <div className="workstation-control rounded-xl p-3">
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold">{item.strategy_name}</span>
         <Badge variant="outline" className="number-figure h-5 px-1.5 text-[10px]">
@@ -857,7 +857,7 @@ function CheckBox({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex items-center gap-2 rounded-md bg-white px-2 py-2 shadow-[var(--shadow-control)]">
+    <label className="flex items-center gap-2 rounded-sm bg-white px-2 py-2 shadow-[var(--shadow-control)]">
       <input
         type="checkbox"
         checked={checked}

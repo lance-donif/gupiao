@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import type { IBackendArtifacts, IBackendConfigStore } from '../../../src/http/index.js';
 
-export const createHttpArtifacts = (): IBackendArtifacts => ({
+const createHttpArtifacts = (): IBackendArtifacts => ({
   graphSnapshot: {
     generatedAtBeijing: '2026-03-18 10:00:00',
     sourceNewsFilePath: 'tmp/raw-news-latest.json',
