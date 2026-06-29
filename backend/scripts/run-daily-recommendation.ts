@@ -100,7 +100,10 @@ const parseArgs = (): Record<string, string> => {
 };
 
 const getAsOf = (raw: string | undefined): Date => {
-  const asOf = new Date(raw ?? Date.now());
+  // 默认当日北京收盘边界 16:00 +08:00，调度器按此跑；回测/手动入口传 --as-of 覆盖
+  const asOf = raw === undefined
+    ? new Date(`${getBeijingDateKey(new Date())}T16:00:00.000+08:00`)
+    : new Date(raw);
   if (Number.isNaN(asOf.getTime())) {
     throw new Error(`Invalid --as-of: ${raw}`);
   }
@@ -562,6 +565,256 @@ const filterCausalExtractionCandidates = (
   );
 };
 
+/**
+ * --from-forecast 模式：盘中基于已存档 ThemeForecast + 最新 Candle 重排推荐。
+ *
+ * ponytail: 不重跑 news_fetch/normalize/dedup/LLM 抽取。从 asOf 之前最近一次成功的
+ * DAILY_RECOMMENDATION trace 复制 CausalSignalCandidate + GraphSnapshot 到本 trace，
+ * 让 BacktestEngine/ScoringContributionEngine 沿用既有证据链路，仅用最新 Candle 重新评分+对账。
+ * 升级路径：若需在新 trace 重新做因果抽取，可退回主流程；若 ScoringContributionEngine
+ * 支持显式 sourceTraceId 注入，可省去 SQL 复制。
+ */
+const runFromForecastMode = async (
+  prisma: PrismaClient,
+  pgClient: pg.Client,
+  input: {
+    readonly traceId: string;
+    readonly asOf: Date;
+    readonly clusterKey: string;
+    readonly limit: number;
+    readonly maxPerIndustry: number;
+    readonly forecastLookbackDays: number;
+  },
+): Promise<void> => {
+  const { traceId, asOf, clusterKey, limit, maxPerIndustry, forecastLookbackDays } = input;
+  const stepTimings: Record<string, number> = {};
+  const markStepStart = (): number => Date.now();
+  const markStepEnd = (stepName: string, startedAt: number): void => {
+    stepTimings[stepName] = Date.now() - startedAt;
+  };
+
+  let activeStep: string | null = null;
+  try {
+    await TraceManager.startRunTrace(prisma, traceId, clusterKey, 'DAILY_RECOMMENDATION', asOf);
+
+    // 1. 找到 asOf 之前最近一次成功的 DAILY_RECOMMENDATION trace（因果信号/图谱来源）
+    activeStep = 'forecast_source_resolve';
+    const sourceTrace = await prisma.runTrace.findFirst({
+      where: {
+        clusterKey,
+        status: 'SUCCESS',
+        kind: 'DAILY_RECOMMENDATION',
+        asOf: { lte: asOf },
+      },
+      orderBy: { asOf: 'desc' },
+    });
+    if (!sourceTrace) {
+      throw new PipelineStopError(
+        'forecast_source_resolve',
+        `未找到 asOf=${asOf.toISOString()} 之前成功的 DAILY_RECOMMENDATION trace，无法复用因果信号`,
+      );
+    }
+    const sourceTraceId = String(sourceTrace.traceId);
+    console.log(`[from-forecast] 复用源 trace=${sourceTraceId} asOf=${sourceTrace.asOf.toISOString()}`);
+    activeStep = null;
+
+    // 2. Candle 前置校验（复用 Task 2 逻辑，确保评分用最新 Candle）
+    activeStep = 'candle_preflight_check';
+    const candleCheckRows = await runQuery(pgClient, {
+      label: 'latest_candle',
+      sql: 'SELECT max("tradingDay") AS latest FROM "Candle"',
+      values: [],
+    });
+    const latestCandleRaw = candleCheckRows[0]?.latest;
+    const latestCandleDay = latestCandleRaw instanceof Date
+      ? getBeijingDateKey(latestCandleRaw)
+      : null;
+    const asOfBeijingDay = getBeijingDateKey(asOf);
+    if (latestCandleDay === null || latestCandleDay < asOfBeijingDay) {
+      const gapDays = latestCandleDay === null
+        ? 'unknown'
+        : Math.round((new Date(asOfBeijingDay).getTime() - new Date(latestCandleDay).getTime()) / ONE_DAY_MS);
+      throw new PipelineStopError(
+        'candle_stale',
+        `Candle 数据未同步到 asOf 北京日：最新=${latestCandleDay}, asOf=${asOfBeijingDay}, 差值=${gapDays} 天，停止推荐`,
+      );
+    }
+    console.log(`[candle_check] OK 最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}`);
+    activeStep = null;
+
+    // 3. 复制源 trace 的 CausalSignalCandidate 到本 trace（不重新跑 LLM 抽取）
+    activeStep = 'causal_signal_copy';
+    let stepStartedAt = markStepStart();
+    await TraceManager.startStepTrace(prisma, traceId, 'causal_signal_copy', {
+      clusterKey,
+      asOf: asOf.toISOString(),
+      sourceTraceId,
+      description: '从源 trace 复制因果信号，跳过 LLM 抽取',
+    });
+    const copiedSignals = typeof prisma.$executeRawUnsafe === 'function'
+      ? await prisma.$executeRawUnsafe(
+        [
+          'INSERT INTO "CausalSignalCandidate" (',
+          '  id, "traceId", "asOf", "clusterKey", "newsId", event, "businessVariable",',
+          '  "assetOrThemeKeyword", direction, confidence, "evidenceText",',
+          '  "evidenceOffsetStart", "evidenceOffsetEnd", "extractorType", "modelVersion",',
+          '  "promptVersion", status, "failureReason", "createdAt", "updatedAt"',
+          ')',
+          'SELECT',
+          '  gen_random_uuid(), $1, "asOf", "clusterKey", "newsId", event, "businessVariable",',
+          '  "assetOrThemeKeyword", direction, confidence, "evidenceText",',
+          '  "evidenceOffsetStart", "evidenceOffsetEnd", "extractorType", "modelVersion",',
+          '  "promptVersion", status, "failureReason", NOW(), NOW()',
+          'FROM "CausalSignalCandidate"',
+          'WHERE "traceId" = $2 AND status = \'candidate\'',
+        ].join(' '),
+        traceId,
+        sourceTraceId,
+      )
+      : 0;
+    if (copiedSignals === 0) {
+      throw new PipelineStopError(
+        'causal_signal_copy',
+        `源 trace=${sourceTraceId} 无可用 candidate 状态因果信号，停止`,
+      );
+    }
+    markStepEnd('causal_signal_copy', stepStartedAt);
+    await TraceManager.completeStepTrace(prisma, traceId, 'causal_signal_copy', {
+      sourceTraceId,
+      copiedCount: copiedSignals,
+      elapsedMs: stepTimings.causal_signal_copy,
+    });
+    activeStep = null;
+
+    // 4. 复制源 trace 的 GraphSnapshot 到本 trace（scoring.loadGraphSignal 按 traceId 读取）
+    activeStep = 'graph_snapshot_copy';
+    stepStartedAt = markStepStart();
+    await TraceManager.startStepTrace(prisma, traceId, 'graph_snapshot_copy', {
+      clusterKey,
+      asOf: asOf.toISOString(),
+      sourceTraceId,
+      description: '从源 trace 复制图谱快照',
+    });
+    const copiedGraph = typeof prisma.$executeRawUnsafe === 'function'
+      ? await prisma.$executeRawUnsafe(
+        [
+          'INSERT INTO "GraphSnapshot" ("id", "traceId", "asOf", "clusterKey", "nodesJson", "edgesJson", "createdAt")',
+          'SELECT gen_random_uuid(), $1, "asOf", "clusterKey", "nodesJson", "edgesJson", NOW()',
+          'FROM "GraphSnapshot" WHERE "traceId" = $2',
+        ].join(' '),
+        traceId,
+        sourceTraceId,
+      )
+      : 0;
+    markStepEnd('graph_snapshot_copy', stepStartedAt);
+    await TraceManager.completeStepTrace(prisma, traceId, 'graph_snapshot_copy', {
+      sourceTraceId,
+      copied: copiedGraph,
+      elapsedMs: stepTimings.graph_snapshot_copy,
+    });
+    activeStep = null;
+
+    // 5. 读取近 N 日 bullish ThemeForecast（reasons 标注 + 来源溯源，不强制注入评分）
+    activeStep = 'forecast_lookup';
+    stepStartedAt = markStepStart();
+    await TraceManager.startStepTrace(prisma, traceId, 'forecast_lookup', {
+      clusterKey,
+      asOf: asOf.toISOString(),
+      lookbackDays: forecastLookbackDays,
+    });
+    const forecastLookbackStart = new Date(asOf.getTime() - forecastLookbackDays * ONE_DAY_MS);
+    const recentForecasts = await prisma.themeForecast.findMany({
+      where: {
+        clusterKey,
+        asOf: { gte: forecastLookbackStart, lte: asOf },
+        direction: 'bullish',
+      },
+      orderBy: { probability: 'desc' },
+      take: 20,
+    });
+    console.log(`[from-forecast] 命中 bullish 预测 ${recentForecasts.length} 条（lookbackDays=${forecastLookbackDays}）`);
+    markStepEnd('forecast_lookup', stepStartedAt);
+    await TraceManager.completeStepTrace(prisma, traceId, 'forecast_lookup', {
+      forecastCount: recentForecasts.length,
+      topThemes: recentForecasts.slice(0, 10).map((f: any) => ({
+        theme: f.theme,
+        probability: Number(f.probability),
+        relatedSymbols: f.relatedSymbols,
+      })),
+      elapsedMs: stepTimings.forecast_lookup,
+    });
+    activeStep = null;
+
+    // 6. 刷新关键词表现惩罚（cluster 级，复用既有逻辑）
+    activeStep = 'keyword_performance_penalty_refresh';
+    stepStartedAt = markStepStart();
+    await TraceManager.startStepTrace(prisma, traceId, 'keyword_performance_penalty_refresh', {
+      clusterKey,
+      asOf: asOf.toISOString(),
+      source: 'reconciled_recommendation_snapshot',
+      cooldownDays: 7,
+    });
+    const keywordPerformancePenaltyResult = await new KeywordPerformancePenaltyService().refresh(prisma, {
+      asOf,
+      clusterKey,
+    });
+    markStepEnd('keyword_performance_penalty_refresh', stepStartedAt);
+    await TraceManager.completeStepTrace(prisma, traceId, 'keyword_performance_penalty_refresh', {
+      ...keywordPerformancePenaltyResult,
+      elapsedMs: stepTimings.keyword_performance_penalty_refresh,
+    });
+    activeStep = null;
+
+    // 7. 评分+推荐（复用 BacktestEngine；scoring 读取本 trace 复制来的因果信号/图谱 + 最新 Candle）
+    activeStep = 'scoring_recommendation';
+    stepStartedAt = markStepStart();
+    const backtestResult = await new BacktestEngine().runBacktest(prisma, {
+      traceId,
+      asOf,
+      clusterKey,
+      manageTrace: false,
+      recommendationLimit: limit,
+      maxPerIndustry,
+      scoringProfile: 'short_news',
+    });
+    if (backtestResult.recommendationsCreated === 0) {
+      throw new PipelineStopError('recommendation', '推荐结果为空，严格单向流程停止');
+    }
+    markStepEnd('scoring_recommendation', stepStartedAt);
+    activeStep = null;
+
+    await TraceManager.completeRunTrace(prisma, traceId, {
+      mode: 'from-forecast',
+      sourceTraceId,
+      forecastCount: recentForecasts.length,
+      recommendationsCreated: backtestResult.recommendationsCreated,
+      reconciledCount: backtestResult.reconciledCount,
+      stepTimings,
+    });
+
+    console.log(JSON.stringify({
+      mode: 'from-forecast',
+      traceId,
+      sourceTraceId,
+      asOf: asOf.toISOString(),
+      recommendationsCreated: backtestResult.recommendationsCreated,
+      reconciledCount: backtestResult.reconciledCount,
+      forecastCount: recentForecasts.length,
+    }, null, 2));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (activeStep) {
+      try {
+        await TraceManager.failStepTrace(prisma, traceId, activeStep, message);
+      } catch {}
+    }
+    try {
+      await TraceManager.failRunTrace(prisma, traceId, message);
+    } catch {}
+    throw error;
+  }
+};
+
 async function main(): Promise<void> {
   const args = parseArgs();
   const clusterKey = args.cluster ?? DEFAULT_CLUSTER_KEY;
@@ -592,6 +845,30 @@ async function main(): Promise<void> {
       }), null, 2));
     }
     finally {
+      await prisma.$disconnect();
+    }
+    return;
+  }
+
+  if (args['from-forecast'] === 'true') {
+    const forecastLookbackDays = Number(args['forecast-lookback-days'] ?? 7);
+    if (!Number.isFinite(forecastLookbackDays) || forecastLookbackDays <= 0) {
+      throw new Error(`Invalid --forecast-lookback-days: ${args['forecast-lookback-days']}`);
+    }
+    const pgClient = new pg.Client({ connectionString: DATABASE_URL });
+    await pgClient.connect();
+    try {
+      await runFromForecastMode(prisma, pgClient, {
+        traceId,
+        asOf,
+        clusterKey,
+        limit,
+        maxPerIndustry,
+        forecastLookbackDays,
+      });
+    }
+    finally {
+      await pgClient.end();
       await prisma.$disconnect();
     }
     return;
@@ -1015,6 +1292,31 @@ async function main(): Promise<void> {
       ...keywordPerformancePenaltyResult,
       elapsedMs: stepTimings.keyword_performance_penalty_refresh,
     });
+    activeStep = null;
+
+    // Candle 前置校验：评分前确认 Candle 已同步到 asOf 北京日，避免用旧数据评分
+    activeStep = 'candle_preflight_check';
+    const candleCheckRows = await runQuery(pgClient, {
+      label: 'latest_candle',
+      sql: 'SELECT max("tradingDay") AS latest FROM "Candle"',
+      values: [],
+    });
+    const latestCandleRaw = candleCheckRows[0]?.latest;
+    const latestCandleDay = latestCandleRaw instanceof Date
+      ? getBeijingDateKey(latestCandleRaw)
+      : null;
+    const asOfBeijingDay = getBeijingDateKey(asOf);
+    if (latestCandleDay === null || latestCandleDay < asOfBeijingDay) {
+      const gapDays = latestCandleDay === null
+        ? 'unknown'
+        : Math.round((new Date(asOfBeijingDay).getTime() - new Date(latestCandleDay).getTime()) / ONE_DAY_MS);
+      console.error(`[candle_check] FAIL 最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天`);
+      throw new PipelineStopError(
+        'candle_stale',
+        `Candle 数据未同步到 asOf 北京日：最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天，停止推荐`,
+      );
+    }
+    console.log(`[candle_check] OK 最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}, 校验通过`);
     activeStep = null;
 
     activeStep = 'scoring_recommendation';

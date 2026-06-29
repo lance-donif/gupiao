@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+
 export type MvpScheduleCadence = 'daily' | 'weekly' | 'monthly';
 
 export interface IMvpBeijingTime {
@@ -87,6 +89,15 @@ const MVP_SCHEDULE_TABLE: readonly IMvpScheduleTask[] = [
     dataFrequency: 'daily immutable recommendation snapshot',
     failureStrategy: 'fail fast and leave the last published snapshot untouched',
     commandHint: 'bun dist/scripts/run-daily-recommendation.js --publish-only',
+  },
+  {
+    id: 'forecast_replay',
+    description: '盘中基于已存档预测+最新Candle重排推荐（不重新抓新闻/LLM）',
+    cadence: 'daily',
+    beijingTime: { hour: 14, minute: 30 },
+    dataFrequency: 'intraday forecast replay',
+    failureStrategy: 'fail fast; leave morning snapshot untouched',
+    commandHint: 'bun dist/scripts/run-daily-recommendation.js --from-forecast true',
   },
   {
     id: 'tickflow_industry_exposure_refresh',
@@ -238,5 +249,76 @@ export const getNextScheduledRunBeijing = (
   }
 
   return nextRun;
+};
+
+const formatBeijingDayKey = (date: Date): string => {
+  const parts = getBeijingDateParts(date);
+  return `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}`;
+};
+
+const sleepWithSignal = (delayMs: number, signal: AbortSignal | undefined): Promise<void> => {
+  if (delayMs <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+};
+
+export const runSchedulerLoop = async (options?: {
+  readonly signal?: AbortSignal;
+  readonly now?: () => Date;
+}): Promise<void> => {
+  const signal = options?.signal;
+  const nowFn = options?.now ?? (() => new Date());
+  const completedToday = new Set<string>();
+  let lastDayKey = formatBeijingDayKey(nowFn());
+
+  // ponytail: 内存 Set 防当日重跑；进程重启会清空（可接受，最多重跑一次）。
+  // ponytail: 不处理"同一时刻多任务"——当前调度表无时间冲突，若未来出现需改用任务级游标。
+  while (!signal?.aborted) {
+    const next = getNextScheduledRunBeijing(nowFn());
+    await sleepWithSignal(next.delayMs, signal);
+    if (signal?.aborted) {
+      break;
+    }
+
+    const currentDayKey = formatBeijingDayKey(nowFn());
+    if (currentDayKey !== lastDayKey) {
+      completedToday.clear();
+      lastDayKey = currentDayKey;
+    }
+
+    const runKey = `${next.task.id}:${currentDayKey}`;
+    if (completedToday.has(runKey)) {
+      continue;
+    }
+
+    const startedAt = Date.now();
+    const result = spawnSync(next.task.commandHint, {
+      cwd: process.cwd(),
+      stdio: 'inherit',
+      shell: true,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    const exitCode = result.status ?? -1;
+    if (exitCode === 0) {
+      completedToday.add(runKey);
+    }
+    console.log(
+      `[scheduler] task=${next.task.id} beijing=${next.beijingDateTime} exit=${exitCode} elapsedMs=${elapsedMs}`,
+    );
+    if (result.error) {
+      console.error(`[scheduler] ${next.task.id} spawn error: ${result.error.message}`);
+    }
+  }
 };
 

@@ -73,6 +73,8 @@ interface IMarketSignalScore {
   readonly breakout20d: boolean;
   readonly volatilityCompression: boolean;
   readonly recentWeekGainExceeded: boolean;
+  // 当日涨跌（最新 close vs 前一日 close），不足 2 条 Candle 记 null
+  readonly todayChangePct?: number | null;
   readonly reasons: readonly string[];
 }
 
@@ -793,6 +795,9 @@ export const calculateMarketSignalScore = (
   const latest = candles[candles.length - 1];
   const latestClose = toNumber(latest.close);
   const latestVolume = toNumber(latest.volume);
+  // 当日涨跌：最新 close vs 前一日 close，不足 2 条 Candle 记 null
+  const prevClose = candles.length >= 2 ? toNumber(candles[candles.length - 2]?.close) : null;
+  const todayChangePct = prevClose && prevClose > 0 ? (latestClose - prevClose) / prevClose : null;
   const close5 = toNumber(candles[Math.max(0, candles.length - 6)]?.close);
   const close20 = candles.length >= 21 ? toNumber(candles[candles.length - 21]?.close) : null;
   const momentum5dPct = close5 > 0 ? (latestClose - close5) / close5 : null;
@@ -825,9 +830,51 @@ export const calculateMarketSignalScore = (
     && latestClose >= avgClose20,
   );
 
+  // 低位区判定：最新收盘价低于 20 日均价的 95% 视为庄家吸筹区
+  const isLowZone = avgClose20 !== null && latestClose < avgClose20 * 0.95;
+  // 低位放量吸筹：低位区 + 量比 > 1.2
+  const isAccumulation = isLowZone && volumeRatio20d !== null && volumeRatio20d > 1.2;
+
   // 映射基本组件原始得分 (0 到 1)
-  const S_m5 = momentum5dPct === null ? 0 : clamp((momentum5dPct + 0.02) / 0.1, 0, 1);
-  const S_m20 = momentum20dPct === null ? 0 : clamp((momentum20dPct + 0.03) / 0.18, 0, 1);
+  // S_m5：庄家吸筹验证（替代旧追涨逻辑：旧公式 (momentum5dPct+0.02)/0.1 涨越多分越高，与"发现弱信号"目标背离）
+  let S_m5: number;
+  let m5Reason: string;
+  if (momentum5dPct === null) {
+    S_m5 = 0;
+    m5Reason = '5日动量NA';
+  } else if (momentum5dPct > 0.1) {
+    // 5日已涨超10%，追涨风险高，降权避免追涨
+    S_m5 = 0.2;
+    m5Reason = `5日涨幅 ${(momentum5dPct * 100).toFixed(2)}% > 10%，触发追涨降权 S_m5=0.2`;
+  } else if (isAccumulation) {
+    // 低位区+放量，庄家吸筹，最高分
+    S_m5 = 1.0;
+    m5Reason = '低位放量，庄家吸筹验证 S_m5=1.0';
+  } else if (isLowZone) {
+    // 低位区但量能不足
+    S_m5 = 0.6;
+    m5Reason = '低位区量能不足 S_m5=0.6';
+  } else {
+    // 中性区间：横盘整理得中等分，大起大落降分
+    S_m5 = clamp((0.05 - Math.abs(momentum5dPct)) / 0.05, 0, 0.5);
+    m5Reason = `中性区间横盘整理 S_m5=${S_m5.toFixed(4)}`;
+  }
+
+  // S_m20：20日动量分量，保持类似的低位吸筹偏好但更宽松
+  let S_m20: number;
+  if (momentum20dPct === null) {
+    S_m20 = 0;
+  } else if (momentum20dPct > 0.15) {
+    // 20日已大涨，避免追高
+    S_m20 = 0.3;
+  } else if (momentum20dPct < -0.05 && isLowZone) {
+    // 20日下跌且处于低位区，可能超跌反弹机会
+    S_m20 = 0.9;
+  } else {
+    // 横盘整理得中等分
+    S_m20 = clamp((0.1 - Math.abs(momentum20dPct)) / 0.1, 0, 0.6);
+  }
+
   const S_vol = volumeRatio20d === null ? 0 : clamp((volumeRatio20d - 1) / 1.5, 0, 1);
   const S_br = breakout20d
     ? 1
@@ -916,8 +963,11 @@ export const calculateMarketSignalScore = (
     breakout20d,
     volatilityCompression,
     recentWeekGainExceeded: momentum5dPct !== null && momentum5dPct > 0.2,
+    todayChangePct: todayChangePct === null ? null : Number(todayChangePct.toFixed(6)),
     reasons: [
       `市场确认信号 ${score.toFixed(4)}/20：5日涨跌 ${momentum5dPct === null ? 'NA' : (momentum5dPct * 100).toFixed(2)}%，20日涨跌 ${momentum20dPct === null ? 'NA' : (momentum20dPct * 100).toFixed(2)}%，20日量比 ${volumeRatio20d === null ? 'NA' : volumeRatio20d.toFixed(2)}`,
+      `低位区: ${isLowZone ? '是' : '否'}, 量比 ${volumeRatio20d === null ? 'NA' : volumeRatio20d.toFixed(2)}, 吸筹信号: ${isAccumulation ? '是' : '否'}`,
+      `5日动量判定: ${m5Reason}`,
       `量化指标：${fibDesc}，${srDesc}`,
       `行情可见边界 tradingDay <= asOf，最新用于评分交易日 ${latest.tradingDay.toISOString().slice(0, 10)}`,
       `20日突破 ${breakout20d ? '是' : '否'}，波动压缩/突破组合 ${volatilityCompression ? '是' : '否'}`,
@@ -1903,6 +1953,7 @@ export class ScoringContributionEngine {
         breakout20d: false,
         volatilityCompression: false,
         recentWeekGainExceeded: false,
+        todayChangePct: null,
         reasons: ['市场确认信号：未找到 asOf 前可见 Candle，记 0 分'],
       } satisfies IMarketSignalScore;
       reasons.push(...marketSignal.reasons);

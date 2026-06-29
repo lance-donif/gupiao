@@ -65,6 +65,7 @@ export interface ITempRecommendationSelectionDiagnostics {
   readonly excludedByRecentWeekGain: number;
   readonly excludedByRecentWeekLoss: number;
   readonly excludedByPrice: number;
+  readonly excludedByTodayDrop: number;
   readonly excludedByPreviousDayStock: number;
   readonly excludedByPreviousDayKeyword: number;
   readonly skippedBySignalTypeCap: number;
@@ -231,6 +232,7 @@ const buildShortfallReasons = (input: {
   readonly excludedByRecentWeekGain: number;
   readonly excludedByRecentWeekLoss: number;
   readonly excludedByPrice: number;
+  readonly excludedByTodayDrop: number;
   readonly excludedByPreviousDayStock: number;
   readonly excludedByPreviousDayKeyword: number;
   readonly skippedBySignalTypeCap: number;
@@ -385,6 +387,19 @@ const isRecentWeekLossEligible = (recommendation: ITempStockRecommendation): boo
 const isPriceEligible = (recommendation: ITempStockRecommendation): boolean => {
   const close = recommendation.latestClose;
   return close == null || close <= 40;
+};
+
+const TODAY_DROP_THRESHOLD = -0.03; // 当日跌幅超过 3% 剔除
+
+export const getTodayChangePct = (recommendation: ITempStockRecommendation): number | null => {
+  const raw = recommendation.scoreBreakdown.marketSignal?.todayChangePct;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+export const isTodayDropEligible = (recommendation: ITempStockRecommendation): boolean => {
+  const todayChangePct = getTodayChangePct(recommendation);
+  return todayChangePct === null || todayChangePct >= TODAY_DROP_THRESHOLD;
 };
 
 const isSupplementalRecommendation = (recommendation: ITempStockRecommendation): boolean => {
@@ -1113,7 +1128,9 @@ export class TempRecommendationSelector {
     const excludedByRecentWeekLoss = gainEligibleRecommendations.length - lossEligibleRecommendations.length;
     const priceEligibleRecommendations = lossEligibleRecommendations.filter(isPriceEligible);
     const excludedByPrice = lossEligibleRecommendations.length - priceEligibleRecommendations.length;
-    const previousStockEligibleRecommendations = priceEligibleRecommendations;
+    const todayDropEligibleRecommendations = priceEligibleRecommendations.filter(isTodayDropEligible);
+    const excludedByTodayDrop = priceEligibleRecommendations.length - todayDropEligibleRecommendations.length;
+    const previousStockEligibleRecommendations = todayDropEligibleRecommendations;
     const excludedByPreviousDayStock = 0;
     const eligibleRecommendations = previousStockEligibleRecommendations;
     const excludedByPreviousDayKeyword = 0;
@@ -1154,6 +1171,7 @@ export class TempRecommendationSelector {
       excludedByRecentWeekGain,
       excludedByRecentWeekLoss,
       excludedByPrice,
+      excludedByTodayDrop,
       excludedByPreviousDayStock,
       excludedByPreviousDayKeyword,
       skippedBySignalTypeCap,
@@ -1169,6 +1187,7 @@ export class TempRecommendationSelector {
         excludedByRecentWeekGain,
         excludedByRecentWeekLoss,
         excludedByPrice,
+        excludedByTodayDrop,
         excludedByPreviousDayStock,
         excludedByPreviousDayKeyword,
         skippedBySignalTypeCap,

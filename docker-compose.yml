@@ -82,7 +82,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: gupiao-scheduler
-    command: ["node", "dist/scripts/run-daily-recommendation.js"]
+    command: ["node", "dist/scripts/run-scheduler.js"]
     env_file:
       - .env
     environment:

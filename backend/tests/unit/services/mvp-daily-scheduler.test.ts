@@ -9,7 +9,7 @@ describe('mvp daily scheduler', () => {
   it('returns the fixed MVP schedule table with execution metadata', () => {
     const schedule = getMvpScheduleTable();
 
-    expect(schedule).toHaveLength(9);
+    expect(schedule).toHaveLength(10);
     expect(schedule.map(task => task.id)).toEqual([
       'stock_list_check',
       'daily_candle_incremental',
@@ -17,6 +17,7 @@ describe('mvp daily scheduler', () => {
       'normalize_dedupe_llm',
       'graph_score_recommend',
       'publish_snapshot',
+      'forecast_replay',
       'tickflow_industry_exposure_refresh',
       'history_gap_repair',
       'reconcile_recommendations',
@@ -29,17 +30,23 @@ describe('mvp daily scheduler', () => {
       failureStrategy: expect.any(String),
       commandHint: 'bun dist/scripts/sync-stocks.js --mode check',
     });
-    expect(schedule[7]).toMatchObject({
+    expect(schedule[8]).toMatchObject({
       id: 'history_gap_repair',
       cadence: 'daily',
       beijingTime: { hour: 8, minute: 30 },
       commandHint: 'bun dist/scripts/sync-stock-history.js --mode repair-gaps',
     });
-    expect(schedule[6]).toMatchObject({
+    expect(schedule[7]).toMatchObject({
       id: 'tickflow_industry_exposure_refresh',
       cadence: 'monthly',
       monthDays: [1],
       beijingTime: { hour: 3, minute: 30 },
+    });
+    expect(schedule[6]).toMatchObject({
+      id: 'forecast_replay',
+      cadence: 'daily',
+      beijingTime: { hour: 14, minute: 30 },
+      commandHint: 'bun dist/scripts/run-daily-recommendation.js --from-forecast true',
     });
     expect(schedule.map(task => task.commandHint)).toEqual([
       'bun dist/scripts/sync-stocks.js --mode check',
@@ -48,6 +55,7 @@ describe('mvp daily scheduler', () => {
       'bun dist/scripts/run-daily-recommendation.js --stop-after dedup',
       'bun dist/scripts/run-daily-recommendation.js',
       'bun dist/scripts/run-daily-recommendation.js --publish-only',
+      'bun dist/scripts/run-daily-recommendation.js --from-forecast true',
       'bun dist/scripts/sync-tickflow-stock-exposure.js',
       'bun dist/scripts/sync-stock-history.js --mode repair-gaps',
       'bun dist/scripts/reconcile-historical-recommendations.js',
