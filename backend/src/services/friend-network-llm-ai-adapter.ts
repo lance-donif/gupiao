@@ -113,8 +113,8 @@ export class FriendNetworkLlmAiAdapter implements IFriendNetworkAiAdapter {
           },
           body: JSON.stringify({
             model: this.options.model,
-            temperature: 0.1,
             response_format: { type: 'json_object' },
+            ...(process.env.LLM_SMART_REASONING_EFFORT ? { reasoning_effort: process.env.LLM_SMART_REASONING_EFFORT } : { temperature: 0.1 }),
             messages: [
               {
                 role: 'system',
@@ -129,7 +129,7 @@ export class FriendNetworkLlmAiAdapter implements IFriendNetworkAiAdapter {
         },
         {
           maxRetries: 3,
-          requestTimeoutMs: 30000,
+          requestTimeoutMs: process.env.LLM_SMART_REASONING_EFFORT ? 600000 : 30000,
           fetchImpl: this.fetchImpl,
         }
       );

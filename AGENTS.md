@@ -1,5 +1,5 @@
 ## Project Context
-
+使用 codebase-memory-mcp
 股票预测系统：新闻聚合 + 因果关键词网络 + 行情确认，生成可解释推荐。
 
 当前主线：

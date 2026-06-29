@@ -382,10 +382,11 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
     }
 
     const userPrompt = buildLlmPrompt(input);
+    const reasoningEffort = process.env.LLM_SMART_REASONING_EFFORT;
     const requestBody = JSON.stringify({
       model: this.options.model,
-      temperature: 0,
       response_format: { type: 'json_object' },
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : { temperature: 0 }),
       messages: [
         {
           role: 'system',

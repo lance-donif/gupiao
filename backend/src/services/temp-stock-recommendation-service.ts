@@ -105,6 +105,45 @@ const MARKET_BREADTH_BEAR_LIMIT_FACTOR = 0.5;
 const MARKET_BREADTH_NEUTRAL_LIMIT_FACTOR = 0.7;
 const MARKET_REGIME_MIN_RECOMMENDATIONS = 10;
 
+/**
+ * 从数据库 Candle 表计算全市场宽度：
+ * 用 Raw SQL 在一次查询内找最近两个交易日，计算收盘价上涨股票数占比。
+ */
+const computeFullMarketBreadthFromDb = async (prisma: any, asOf: Date): Promise<number | null> => {
+  if (!prisma.$queryRawUnsafe) return null;
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      [
+        'WITH top_days AS (',
+        '  SELECT DISTINCT "tradingDay" FROM "Candle"',
+        '  WHERE "tradingDay" <= $1',
+        '  ORDER BY "tradingDay" DESC LIMIT 2',
+        '),',
+        'latest AS (SELECT MAX("tradingDay") AS d FROM top_days),',
+        'prev    AS (SELECT MIN("tradingDay") AS d FROM top_days)',
+        'SELECT',
+        '  COUNT(*) FILTER (WHERE c_lat.close > c_prev.close) AS rising,',
+        '  COUNT(*) AS total',
+        'FROM "Candle" c_lat',
+        'JOIN "Candle" c_prev ON c_prev."stockId" = c_lat."stockId"',
+        'JOIN latest ON c_lat."tradingDay" = latest.d',
+        'JOIN prev   ON c_prev."tradingDay" = prev.d',
+        'WHERE c_prev.close > 0',
+      ].join(' '),
+      asOf,
+    ) as { rising: bigint | number; total: bigint | number }[];
+
+    const row = rows[0];
+    if (!row) return null;
+    const total = Number(row.total);
+    if (total < 100) return null;
+    return Number(row.rising) / total;
+  } catch {
+    return null;
+  }
+};
+
+
 const createEmptyCooldownExclusions = (): IRecommendationCooldownExclusions => ({
   previousDayStockSymbols: new Set<string>(),
   previousDayKeywords: new Set<string>(),
@@ -586,21 +625,40 @@ export class TempStockRecommendationService {
       }
     }
 
-    // 3.6 市场宽度计算：根据全市场上涨比例动态调整推荐数量
+    // 3.6 市场宽度计算：优先使用全市场实时涨跌数据（stock_zh_a_spot_em），
+    // 仅当接口不可用时 fallback 到候选股历史 5 日动量代理。
     let marketRegime: 'bull' | 'neutral' | 'bear' = 'neutral';
     let effectiveLimit = limit;
-    const momentumCandidates = candidates.filter((c: any) => getMomentum5dPct(c) !== null);
-    if (momentumCandidates.length >= 10) {
-      const positiveCount = momentumCandidates.filter((c: any) => (getMomentum5dPct(c) ?? 0) > 0).length;
-      const marketBreadth = positiveCount / momentumCandidates.length;
+    let marketBreadthSource = 'candidate_momentum_fallback';
+
+    // 主要：查数据库最新两个交易日的全市场收盘价涵跌幅
+    let marketBreadth: number | null = await computeFullMarketBreadthFromDb(prisma, asOf);
+    marketBreadthSource = marketBreadth !== null ? 'candle_db' : 'candidate_20d_momentum_fallback';
+
+    // Fallback：用候选股历史 20 日动量作为代理（最近一个月走势）
+    if (marketBreadth === null) {
+      const momentumCandidates = candidates.filter((c: any) => getMomentum20dPct(c) !== null);
+      if (momentumCandidates.length >= 10) {
+        const positiveCount = momentumCandidates.filter((c: any) => (getMomentum20dPct(c) ?? 0) > 0).length;
+        marketBreadth = positiveCount / momentumCandidates.length;
+        marketBreadthSource = 'candidate_20d_momentum_fallback';
+      }
+    } else {
+      marketBreadthSource = 'full_market_spot';
+    }
+
+    if (marketBreadth !== null) {
       if (marketBreadth < MARKET_BREADTH_BEAR_THRESHOLD) {
         marketRegime = 'bear';
         effectiveLimit = Math.max(MARKET_REGIME_MIN_RECOMMENDATIONS, Math.round(limit * MARKET_BREADTH_BEAR_LIMIT_FACTOR));
       } else if (marketBreadth < MARKET_BREADTH_BULL_THRESHOLD) {
         marketRegime = 'neutral';
         effectiveLimit = Math.max(MARKET_REGIME_MIN_RECOMMENDATIONS, Math.round(limit * MARKET_BREADTH_NEUTRAL_LIMIT_FACTOR));
+      } else {
+        marketRegime = 'bull';
       }
     }
+    void marketBreadthSource;
 
     candidates.sort((a: any, b: any) => b.score - a.score || a.symbol.localeCompare(b.symbol));
 
@@ -634,9 +692,10 @@ export class TempStockRecommendationService {
     const selected = selection.recommendations;
 
     // 5. 组装 RecommendationSnapshot 快照数据
+    const breadthPct = marketBreadth !== null ? `${(marketBreadth * 100).toFixed(1)}%` : '未知';
     const marketRegimeReason = effectiveLimit !== limit
-      ? `市场状态 [${marketRegime}]：全市场上涨比例偏低，推荐数量从 ${limit} 调整为 ${effectiveLimit}`
-      : `市场状态 [${marketRegime}]：推荐数量保持 ${limit}`;
+      ? `市场状态 [${marketRegime}]：全市场上涨占比 ${breadthPct}（来源: ${marketBreadthSource}），推荐数量从 ${limit} 调整为 ${effectiveLimit}`
+      : `市场状态 [${marketRegime}]：全市场上涨占比 ${breadthPct}（来源: ${marketBreadthSource}），推荐数量保持 ${limit}`;
     const snapshotData = selected.map((item: any, index: number) => {
       return {
         traceId,
