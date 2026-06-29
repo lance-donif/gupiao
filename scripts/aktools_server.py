@@ -195,6 +195,7 @@ ENDPOINTS: dict[str, Callable[..., pd.DataFrame]] = {
     "stock_board_change_em": ak.stock_board_change_em,
     "stock_changes_em": fetch_stock_changes_em,
     "stock_individual_info_em": ak.stock_individual_info_em,
+    "stock_zh_a_hist": ak.stock_zh_a_hist,
 }
 
 
