@@ -172,7 +172,7 @@ describe('MVP recommendation risk guards', () => {
     addExposure(db, { traceId, asOf, clusterKey, symbol: '600001', stockName: '*ST高分', keyword: '半导体', score: 98 });
     addExposure(db, { traceId, asOf, clusterKey, symbol: '600002', stockName: '短期过热', keyword: '机器人', score: 97, momentum5dPct: 0.201 });
     addExposure(db, { traceId, asOf, clusterKey, symbol: '600003', stockName: '无证据高分', keyword: '算力', score: 96, hasEvidence: false });
-    addExposure(db, { traceId, asOf, clusterKey, symbol: '600004', stockName: '有效股份', keyword: '算力', score: 60, momentum5dPct: 0.2 });
+    addExposure(db, { traceId, asOf, clusterKey, symbol: '600004', stockName: '有效股份', keyword: '算力', score: 60, momentum5dPct: 0.14 });
 
     const result = await new TempStockRecommendationService().generatePhysicalRecommendationsWithDiagnostics(
       db,

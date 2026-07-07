@@ -66,9 +66,12 @@ export interface ITempRecommendationSelectionDiagnostics {
   readonly excludedByRecentWeekLoss: number;
   readonly excludedByPrice: number;
   readonly excludedByTodayDrop: number;
+  readonly excludedByQualityGate: number;
   readonly excludedByPreviousDayStock: number;
   readonly excludedByPreviousDayKeyword: number;
   readonly skippedBySignalTypeCap: number;
+  readonly skippedByTopDiversity: number;
+  readonly topDiversityCount: number;
   readonly supplementalCandidateCount: number;
   readonly supplementalSelectedCount: number;
   readonly shortfallReasons: readonly string[];
@@ -92,7 +95,10 @@ interface IStockInfo {
 interface IMarketSignalSummary {
   readonly latestClose: number | null;
   readonly latestTradingDay: string | null;
+  readonly latestMarketTradingDay: string | null;
+  readonly staleTradingDays: number;
   readonly momentum5dPct: number | null;
+  readonly longTermMomentumPct: number | null;
 }
 
 const SCORE_COMPONENT_PATTERN = /评分组件：证据\s+([\d.]+)\/\d+，图谱\s+([\d.]+)\/\d+，暴露\s+([\d.]+)\/\d+，市场\s+([\d.]+)\/\d+，总分\s+([\d.]+)\/100/u;
@@ -100,11 +106,15 @@ const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const INDUSTRY_MOMENTUM_PENALTY_THRESHOLD = -0.05;
 const INDUSTRY_MOMENTUM_PENALTY_MIN_FACTOR = 0.3;
+// ponytail: 前 N 名按 industry 强制去重，避免单一行业占满榜单顶部。升级路径：若需要按更细粒度（概念板块）去重，可改为接受 key resolver。
+const DEFAULT_TOP_DIVERSITY_COUNT = 5;
+const FALLBACK_INDUSTRY = '未归类';
 const MARKET_BREADTH_BEAR_THRESHOLD = 0.25;
 const MARKET_BREADTH_BULL_THRESHOLD = 0.40;
 const MARKET_BREADTH_BEAR_LIMIT_FACTOR = 0.5;
 const MARKET_BREADTH_NEUTRAL_LIMIT_FACTOR = 0.7;
 const MARKET_REGIME_MIN_RECOMMENDATIONS = 10;
+const LONG_TERM_DOWNTREND_THRESHOLD = -0.30;
 
 /**
  * 从数据库 Candle 表计算全市场宽度：
@@ -233,9 +243,12 @@ const buildShortfallReasons = (input: {
   readonly excludedByRecentWeekLoss: number;
   readonly excludedByPrice: number;
   readonly excludedByTodayDrop: number;
+  readonly excludedByQualityGate: number;
   readonly excludedByPreviousDayStock: number;
   readonly excludedByPreviousDayKeyword: number;
   readonly skippedBySignalTypeCap: number;
+  readonly skippedByTopDiversity: number;
+  readonly topDiversityCount: number;
   readonly supplementalCandidateCount: number;
   readonly supplementalSelectedCount: number;
 }): readonly string[] => {
@@ -263,6 +276,10 @@ const buildShortfallReasons = (input: {
     reasons.push(`推荐不足：主信号类型上限过滤 ${input.skippedBySignalTypeCap} 只，未用无证据股票硬凑`);
   }
 
+  if (input.skippedByTopDiversity > 0) {
+    reasons.push(`推荐不足：前 ${input.topDiversityCount} 名行业多样化规则跳过 ${input.skippedByTopDiversity} 只同行业候选，未用无证据股票硬凑`);
+  }
+
   if (input.excludedByStockFilter > 0) {
     reasons.push(`推荐不足：已按股票池规则排除 ${input.excludedByStockFilter} 只 688 开头或 ST 股票`);
   }
@@ -277,6 +294,10 @@ const buildShortfallReasons = (input: {
 
   if (input.excludedByPrice > 0) {
     reasons.push(`推荐不足：已排除 ${input.excludedByPrice} 只收盘价超过 40 元的股票`);
+  }
+
+  if (input.excludedByQualityGate > 0) {
+    reasons.push(`推荐不足：推荐质量门槛过滤 ${input.excludedByQualityGate} 只弱证据/行情过期/长期下跌/追涨或无量弱反弹股票`);
   }
 
   if (input.excludedByPreviousDayStock > 0) {
@@ -340,6 +361,18 @@ export const normalizeSelectionSignalType = (value: string): string => {
   return value;
 };
 
+/**
+ * 解析顶部多样化使用的行业 key。
+ * ponytail: 未归类/空行业返回 null，避免相互阻挡占满名额。升级路径：如需强制覆盖未归类，返回 FALLBACK_INDUSTRY 即可。
+ */
+const resolveTopDiversityIndustryKey = (recommendation: ITempStockRecommendation): string | null => {
+  const industry = String(recommendation.industry ?? '').trim();
+  if (!industry || industry === FALLBACK_INDUSTRY || industry === '未分类') {
+    return null;
+  }
+  return industry;
+};
+
 const isRecommendationStockEligible = (recommendation: ITempStockRecommendation): boolean => {
   const symbol = recommendation.symbol.trim();
   const normalizedName = recommendation.stockName.trim().toUpperCase();
@@ -400,6 +433,63 @@ export const getTodayChangePct = (recommendation: ITempStockRecommendation): num
 export const isTodayDropEligible = (recommendation: ITempStockRecommendation): boolean => {
   const todayChangePct = getTodayChangePct(recommendation);
   return todayChangePct === null || todayChangePct >= TODAY_DROP_THRESHOLD;
+};
+
+const getBreakdownNumber = (recommendation: ITempStockRecommendation, key: keyof ITempRecommendationScoreBreakdown): number | null => {
+  const parsed = Number(recommendation.scoreBreakdown[key]);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const getMarketSignalNumber = (recommendation: ITempStockRecommendation, key: string): number | null => {
+  const marketSignal = parseJsonRecord(recommendation.scoreBreakdown.marketSignal);
+  const parsed = Number(marketSignal[key]);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const getMarketSignalString = (recommendation: ITempStockRecommendation, key: string): string | null => {
+  const value = parseJsonRecord(recommendation.scoreBreakdown.marketSignal)[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+};
+
+const getMarketSignalBoolean = (recommendation: ITempStockRecommendation, key: string): boolean => {
+  const marketSignal = parseJsonRecord(recommendation.scoreBreakdown.marketSignal);
+  return marketSignal[key] === true;
+};
+
+const isRecommendationQualityEligible = (recommendation: ITempStockRecommendation): boolean => {
+  const evidenceScore = getBreakdownNumber(recommendation, 'evidenceScore') ?? 0;
+  const graphScore = getBreakdownNumber(recommendation, 'graphScore') ?? 0;
+  const exposurePrecisionScore = getBreakdownNumber(recommendation, 'exposurePrecisionScore') ?? 0;
+  const marketSignalScore = getBreakdownNumber(recommendation, 'marketSignalScore') ?? 0;
+  const staleTradingDays = getMarketSignalNumber(recommendation, 'staleTradingDays') ?? 0;
+  const latestTradingDay = getMarketSignalString(recommendation, 'latestTradingDay');
+  const latestMarketTradingDay = getMarketSignalString(recommendation, 'latestMarketTradingDay');
+  const longTermMomentumPct = getMarketSignalNumber(recommendation, 'longTermMomentumPct');
+  const m5d = getMomentum5dPct(recommendation);
+  const m20d = getMomentum20dPct(recommendation);
+  const volumeRatio20d = getMarketSignalNumber(recommendation, 'volumeRatio20d');
+  const breakout20d = getMarketSignalBoolean(recommendation, 'breakout20d');
+  const hasVolumeBreakoutConfirmation = (volumeRatio20d ?? 0) >= 1 && breakout20d;
+
+  if (staleTradingDays > 0 || (latestTradingDay !== null && latestMarketTradingDay !== null && latestTradingDay < latestMarketTradingDay)) {
+    return false;
+  }
+  if (longTermMomentumPct !== null && longTermMomentumPct <= LONG_TERM_DOWNTREND_THRESHOLD) {
+    return false;
+  }
+  if (evidenceScore < 10 && graphScore >= 12) {
+    return false;
+  }
+  if (exposurePrecisionScore < 4 && !(evidenceScore >= 18 && marketSignalScore >= 8)) {
+    return false;
+  }
+  if (((m5d ?? 0) >= 0.15 || (m20d ?? 0) >= 0.25) && !hasVolumeBreakoutConfirmation) {
+    return false;
+  }
+  if (m20d !== null && m20d <= -0.12 && (volumeRatio20d ?? 0) < 0.8) {
+    return false;
+  }
+  return true;
 };
 
 const isSupplementalRecommendation = (recommendation: ITempStockRecommendation): boolean => {
@@ -595,7 +685,10 @@ export class TempStockRecommendationService {
             ...parsedFeatureReasons.marketSignal,
             latestClose: marketSignal?.latestClose ?? parsedFeatureReasons.marketSignal.latestClose,
             latestTradingDay: marketSignal?.latestTradingDay ?? parsedFeatureReasons.marketSignal.latestTradingDay,
+            latestMarketTradingDay: marketSignal?.latestMarketTradingDay ?? parsedFeatureReasons.marketSignal.latestMarketTradingDay,
+            staleTradingDays: marketSignal?.staleTradingDays ?? parsedFeatureReasons.marketSignal.staleTradingDays,
             momentum5dPct: parsedFeatureReasons.marketSignal.momentum5dPct ?? marketSignal?.momentum5dPct,
+            longTermMomentumPct: marketSignal?.longTermMomentumPct ?? parsedFeatureReasons.marketSignal.longTermMomentumPct,
           },
           primarySignalType: signals[0]?.keyword,
           selectionSignalType: normalizeSelectionSignalType(signals[0]?.keyword ?? info.industry),
@@ -835,6 +928,19 @@ export class TempStockRecommendationService {
       return result;
     }
 
+    let latestMarketTradingDayDate: Date | null = null;
+    if (typeof prisma.candle.findFirst === 'function') {
+      const latestMarketCandle = await prisma.candle.findFirst({
+        where: {
+          tradingDay: { lte: asOf },
+          stock: { clusterKey },
+        },
+        orderBy: { tradingDay: 'desc' },
+        select: { tradingDay: true },
+      });
+      latestMarketTradingDayDate = latestMarketCandle?.tradingDay ? new Date(latestMarketCandle.tradingDay) : null;
+    }
+
     const candles = await prisma.candle.findMany({
       where: {
         tradingDay: { lte: asOf },
@@ -861,12 +967,17 @@ export class TempStockRecommendationService {
         continue;
       }
       const rows = rowsBySymbol.get(symbol) ?? [];
+      const tradingDay = new Date(candle.tradingDay);
       rows.push({
         close: Number(candle.close),
-        tradingDay: new Date(candle.tradingDay),
+        tradingDay,
       });
       rowsBySymbol.set(symbol, rows);
+      if (latestMarketTradingDayDate === null || tradingDay > latestMarketTradingDayDate) {
+        latestMarketTradingDayDate = tradingDay;
+      }
     }
+    const latestMarketTradingDay = latestMarketTradingDayDate?.toISOString().slice(0, 10) ?? null;
 
     for (const [symbol, rows] of rowsBySymbol.entries()) {
       rows.sort((left, right) => right.tradingDay.getTime() - left.tradingDay.getTime());
@@ -878,10 +989,20 @@ export class TempStockRecommendationService {
       const momentum5dPct = base && Number.isFinite(base.close) && base.close > 0 && base !== latest
         ? (latest.close - base.close) / base.close
         : null;
+      const longTermBase = rows.length >= 121 ? rows[120] : null;
+      const longTermMomentumPct = longTermBase && Number.isFinite(longTermBase.close) && longTermBase.close > 0
+        ? (latest.close - longTermBase.close) / longTermBase.close
+        : null;
+      const staleTradingDays = latestMarketTradingDayDate !== null && latest.tradingDay < latestMarketTradingDayDate
+        ? Math.max(1, Math.round((latestMarketTradingDayDate.getTime() - latest.tradingDay.getTime()) / ONE_DAY_MS))
+        : 0;
       result.set(symbol, {
         latestClose: latest.close,
         latestTradingDay: latest.tradingDay.toISOString().slice(0, 10),
+        latestMarketTradingDay,
+        staleTradingDays,
         momentum5dPct,
+        longTermMomentumPct,
       });
     }
 
@@ -1116,6 +1237,7 @@ export class TempRecommendationSelector {
     limit: number,
     maxPerIndustry: number,
     _cooldownExclusions: IRecommendationCooldownExclusions = createEmptyCooldownExclusions(),
+    topDiversityCount: number = DEFAULT_TOP_DIVERSITY_COUNT,
   ): {
     readonly recommendations: readonly ITempStockRecommendation[];
     readonly diagnostics: Omit<ITempRecommendationSelectionDiagnostics, 'featureSnapshotCount'>;
@@ -1130,13 +1252,19 @@ export class TempRecommendationSelector {
     const excludedByPrice = lossEligibleRecommendations.length - priceEligibleRecommendations.length;
     const todayDropEligibleRecommendations = priceEligibleRecommendations.filter(isTodayDropEligible);
     const excludedByTodayDrop = priceEligibleRecommendations.length - todayDropEligibleRecommendations.length;
-    const previousStockEligibleRecommendations = todayDropEligibleRecommendations;
+    const qualityEligibleRecommendations = todayDropEligibleRecommendations.filter(isRecommendationQualityEligible);
+    const excludedByQualityGate = todayDropEligibleRecommendations.length - qualityEligibleRecommendations.length;
+    const previousStockEligibleRecommendations = qualityEligibleRecommendations;
     const excludedByPreviousDayStock = 0;
     const eligibleRecommendations = previousStockEligibleRecommendations;
     const excludedByPreviousDayKeyword = 0;
     const signalTypeCounts = new Map<string, number>();
+    const topDiversityIndustries = new Set<string>();
+    const effectiveTopDiversity = Math.max(0, Math.min(topDiversityCount, limit));
     const selected: ITempStockRecommendation[] = [];
+    const postponed: ITempStockRecommendation[] = [];
     let skippedBySignalTypeCap = 0;
+    let skippedByTopDiversity = 0;
 
     for (const recommendation of eligibleRecommendations) {
       const signalType = resolveRecommendationSignalType(recommendation);
@@ -1146,6 +1274,18 @@ export class TempRecommendationSelector {
         continue;
       }
 
+      // 前 N 名强制行业多样化：同行业的低分候选暂存，让位给后续不同行业候选
+      if (selected.length < effectiveTopDiversity) {
+        const industryKey = resolveTopDiversityIndustryKey(recommendation);
+        if (industryKey !== null && topDiversityIndustries.has(industryKey)) {
+          postponed.push(recommendation);
+          continue;
+        }
+        if (industryKey !== null) {
+          topDiversityIndustries.add(industryKey);
+        }
+      }
+
       selected.push(recommendation);
       signalTypeCounts.set(signalType, currentCount + 1);
 
@@ -1153,6 +1293,28 @@ export class TempRecommendationSelector {
         break;
       }
     }
+
+    // 回填被前 N 名多样化延迟的候选（不同行业候选不足时允许同行业补位，不硬凑）
+    let postponedSelected = 0;
+    let postponedSkippedByCap = 0;
+    for (const recommendation of postponed) {
+      if (selected.length >= limit) {
+        break;
+      }
+      const signalType = resolveRecommendationSignalType(recommendation);
+      const currentCount = signalTypeCounts.get(signalType) ?? 0;
+      if (currentCount >= maxPerIndustry) {
+        postponedSkippedByCap += 1;
+        continue;
+      }
+      selected.push(recommendation);
+      signalTypeCounts.set(signalType, currentCount + 1);
+      postponedSelected += 1;
+    }
+
+    skippedBySignalTypeCap += postponedSkippedByCap;
+    // ponytail: 真正因多样化未入选 = 暂存量 - 回填入选 - 回填阶段被 cap 拦截；剩余即因 limit 提前打满未处理
+    skippedByTopDiversity = Math.max(0, postponed.length - postponedSelected - postponedSkippedByCap);
 
     const uniqueSignalTypes = new Set(
       eligibleRecommendations.map(resolveRecommendationSignalType),
@@ -1172,9 +1334,12 @@ export class TempRecommendationSelector {
       excludedByRecentWeekLoss,
       excludedByPrice,
       excludedByTodayDrop,
+      excludedByQualityGate,
       excludedByPreviousDayStock,
       excludedByPreviousDayKeyword,
       skippedBySignalTypeCap,
+      skippedByTopDiversity,
+      topDiversityCount: effectiveTopDiversity,
       supplementalCandidateCount,
       supplementalSelectedCount,
       shortfallReasons: buildShortfallReasons({
@@ -1188,9 +1353,12 @@ export class TempRecommendationSelector {
         excludedByRecentWeekLoss,
         excludedByPrice,
         excludedByTodayDrop,
+        excludedByQualityGate,
         excludedByPreviousDayStock,
         excludedByPreviousDayKeyword,
         skippedBySignalTypeCap,
+        skippedByTopDiversity,
+        topDiversityCount: effectiveTopDiversity,
         supplementalCandidateCount,
         supplementalSelectedCount,
       }),

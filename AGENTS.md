@@ -1,5 +1,4 @@
 ## Project Context
-使用 codebase-memory-mcp
 股票预测系统：新闻聚合 + 因果关键词网络 + 行情确认，生成可解释推荐。
 
 当前主线：
@@ -85,6 +84,7 @@ gupiao/
 - 今天推荐过的股票，明天不能再推荐。
 - 今天推荐用过的关键词，明天不能再推荐。
 - 推荐不足 30 时输出原因，不硬凑。
+- 推荐生成前会执行质量门槛：过滤行情快照过期、弱证据靠图谱补分、暴露过宽、过热追涨、无量弱反弹的候选。
 
 关键词表现惩罚：
 
@@ -106,6 +106,13 @@ gupiao/
 
 市场确认信号只能读取 `tradingDay <= asOf` 的 `Candle`，包括 5/20 日涨跌、成交量放大、波动压缩/突破。
 
+质量治理执行时机：
+
+- `ScoringContributionEngine.execute()` 执行评分时生效：统一 `45/20/15/20` 权重、限制单关键词证据刷分、计算市场信号。
+- 评分时会检查 `MarketSignalSnapshot` 是否落后于 asOf 前最新 Candle；过期则重算并更新当前 trace 的市场快照。
+- `TempStockRecommendationService.generatePhysicalRecommendations*()` 生成 `RecommendationSnapshot` 前生效：只从有 `EvidenceContribution` 且通过质量门槛的候选里选股。
+- 这些规则只影响之后新跑的推荐/回测评分；不会自动改历史 `RecommendationSnapshot`。
+
 `RecommendationSnapshot.scoreBreakdown` 需要能追溯到 `contributionId/newsId/exposureFactId/marketSignal`。
 
 ## Commands
@@ -119,6 +126,8 @@ cd backend && bun test
 cd backend && bun run typecheck
 cd backend && bun run lint
 cd backend && bun run check:fix
+cd backend && bun run scripts/audit-recommendation-quality.ts --date 2026-06-29
+cd backend && bun run scripts/audit-recommendation-quality.ts --trace-id <traceId>
 ```
 
 前端：

@@ -25,7 +25,9 @@
     "src/**/*.ts",
     "tests/**/*.ts",
     "scripts/fetch-newsnow.ts",
+    "scripts/audit-recommendation-quality.ts",
     "scripts/run-daily-recommendation.ts",
+    "scripts/sync-stock-history.ts",
     "scripts/sync-stocks.ts",
     "prisma.config.ts"
   ],

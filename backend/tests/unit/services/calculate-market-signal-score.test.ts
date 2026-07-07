@@ -251,4 +251,55 @@ describe('calculateMarketSignalScore - 斐波那契与支撑阻力', () => {
     expect(result.reasons.some(reason => reason.includes('tradingDay <= asOf'))).toBe(true);
     expect(result.latestTradingDay).not.toBeNull();
   });
+
+  it('低位但量比不足 0.8 时不会给高分', () => {
+    const candles = buildCandles(
+      Array.from({ length: 25 }, (_, index) => Number((20 - index * 0.35).toFixed(2))),
+      { volumeBase: 1_000_000 },
+    );
+    candles[candles.length - 1] = {
+      ...candles[candles.length - 1]!,
+      volume: 10_000,
+    };
+
+    const result = calculateMarketSignalScore(candles, defaultStrategyExperimentConfig());
+
+    expect(result.volumeRatio20d).toBeLessThan(0.8);
+    expect(result.score).toBeLessThan(5);
+    expect(result.reasons.some(reason => reason.includes('弱反弹降权'))).toBe(true);
+  });
+
+  it('短期过热且没有放量确认时只保留低市场分', () => {
+    const candles = buildCandles([
+      ...Array.from({ length: 19 }, () => 10),
+      11,
+      12,
+      13,
+      14,
+      16,
+    ]);
+    candles[candles.length - 1] = {
+      ...candles[candles.length - 1]!,
+      volume: 10_000,
+    };
+
+    const result = calculateMarketSignalScore(candles, defaultStrategyExperimentConfig());
+
+    expect(result.momentum5dPct).toBeGreaterThan(0.1);
+    expect(result.volumeRatio20d).toBeLessThan(0.8);
+    expect(result.score).toBeLessThan(6);
+    expect(result.reasons.some(reason => reason.includes('追涨降权'))).toBe(true);
+  });
+
+  it('records 120-day momentum so long downtrends can be filtered', () => {
+    const closes = Array.from(
+      { length: 121 },
+      (_, index) => Number((14.4 - index * ((14.4 - 7.76) / 120)).toFixed(2)),
+    );
+
+    const result = calculateMarketSignalScore(buildCandles(closes), defaultStrategyExperimentConfig());
+
+    expect(result.longTermMomentumPct).toBeLessThan(-0.3);
+    expect(result.reasons.join('\n')).toContain('120日涨跌');
+  });
 });

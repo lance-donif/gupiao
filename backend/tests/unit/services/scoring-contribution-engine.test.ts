@@ -229,6 +229,20 @@ class MockPrismaClient {
       }
       return rows;
     },
+    upsert: async (args: { where: { traceId_symbol: { traceId: string; symbol: string } }; create: any; update: any }) => {
+      const index = this.marketSignalSnapshotsCreated.findIndex(row =>
+        row.traceId === args.where.traceId_symbol.traceId && row.symbol === args.where.traceId_symbol.symbol,
+      );
+      if (index >= 0) {
+        this.marketSignalSnapshotsCreated[index] = {
+          ...this.marketSignalSnapshotsCreated[index],
+          ...args.update,
+        };
+        return this.marketSignalSnapshotsCreated[index];
+      }
+      this.marketSignalSnapshotsCreated.push(args.create);
+      return args.create;
+    },
     createMany: async (args: { data: any[] }) => {
       this.marketSignalSnapshotsCreated.push(...args.data);
       return { count: args.data.length };
@@ -1005,9 +1019,9 @@ describe('scoring contribution engine', () => {
     const aggregatedScore = Number(snapshot.aggregatedScore);
 
     expect(Number(snapshot.boardMatchScore)).toBeGreaterThan(0);
-    expect(relationConfidenceScore).toBe(9);
-    expect(weakSignalBonus).toBe(6);
-    expect(aggregatedScore).toBeCloseTo(newsFrequencyScore + Number(snapshot.boardMatchScore) + 15, 4);
+    expect(relationConfidenceScore).toBe(12);
+    expect(weakSignalBonus).toBe(8);
+    expect(aggregatedScore).toBeCloseTo(newsFrequencyScore + Number(snapshot.boardMatchScore) + 20, 4);
     expect(snapshot.reasons).toEqual(expect.arrayContaining([
       expect.stringContaining('图谱关系置信度封顶 2.00'),
       expect.stringContaining('图谱弱信号封顶 1.00'),
@@ -1319,10 +1333,10 @@ describe('scoring contribution engine', () => {
     }
 
     mockDb.stockFeatureSnapshotsCreated = [
-      { traceId, symbol: '600000', asOf, clusterKey, newsFrequencyScore: 8.0, relationConfidenceScore: 0.0, boardMatchScore: 0.0, weakSignalBonus: 0.0, aggregatedScore: 8.0, reasons: [] },
-      { traceId, symbol: '000001', asOf, clusterKey, newsFrequencyScore: 7.5, relationConfidenceScore: 0.0, boardMatchScore: 0.0, weakSignalBonus: 0.0, aggregatedScore: 7.5, reasons: [] },
-      { traceId, symbol: '601398', asOf, clusterKey, newsFrequencyScore: 7.0, relationConfidenceScore: 0.0, boardMatchScore: 0.0, weakSignalBonus: 0.0, aggregatedScore: 7.0, reasons: [] },
-      { traceId, symbol: '300024', asOf, clusterKey, newsFrequencyScore: 6.0, relationConfidenceScore: 0.0, boardMatchScore: 0.0, weakSignalBonus: 0.0, aggregatedScore: 6.0, reasons: [] },
+      { traceId, symbol: '600000', asOf, clusterKey, newsFrequencyScore: 8.0, relationConfidenceScore: 0.0, boardMatchScore: 8.0, weakSignalBonus: 0.0, aggregatedScore: 8.0, reasons: [] },
+      { traceId, symbol: '000001', asOf, clusterKey, newsFrequencyScore: 7.5, relationConfidenceScore: 0.0, boardMatchScore: 8.0, weakSignalBonus: 0.0, aggregatedScore: 7.5, reasons: [] },
+      { traceId, symbol: '601398', asOf, clusterKey, newsFrequencyScore: 7.0, relationConfidenceScore: 0.0, boardMatchScore: 8.0, weakSignalBonus: 0.0, aggregatedScore: 7.0, reasons: [] },
+      { traceId, symbol: '300024', asOf, clusterKey, newsFrequencyScore: 6.0, relationConfidenceScore: 0.0, boardMatchScore: 8.0, weakSignalBonus: 0.0, aggregatedScore: 6.0, reasons: [] },
     ];
     mockDb.evidenceContributionsCreated = [
       { traceId, asOf, clusterKey, newsId: 'news-bank-1', symbol: '600000', keyword: '订单增加', finalContribScore: 0.8 },
@@ -1342,10 +1356,10 @@ describe('scoring contribution engine', () => {
 
     expect(recommendations).toHaveLength(3);
     expect(recommendations[0]?.symbol).toBe('600000');
-    expect(recommendations[1]?.symbol).toBe('000001');
-    expect(recommendations[2]?.symbol).toBe('300024');
+    expect(recommendations[1]?.symbol).toBe('300024');
+    expect(recommendations[2]?.symbol).toBe('000001');
     expect(recommendations[0]?.matchedSignals).toEqual(['订单增加']);
-    expect(recommendations[2]?.matchedSignals).toEqual(['机器人']);
+    expect(recommendations[1]?.matchedSignals).toEqual(['机器人']);
     expect(mockDb.recommendationSnapshotsCreated).toHaveLength(3);
     expect(mockDb.recommendationSnapshotsCreated[0]).toEqual(expect.objectContaining({
       rank: 1,
@@ -1732,8 +1746,9 @@ describe('scoring contribution engine', () => {
       5,
     );
 
-    expect(result.recommendations.map(item => item.symbol)).toEqual(['600011', '600012']);
+    expect(result.recommendations.map(item => item.symbol)).toEqual(['600012']);
     expect(result.diagnostics.excludedByRecentWeekGain).toBe(1);
+    expect(result.diagnostics.excludedByQualityGate).toBe(1);
     expect(result.diagnostics.shortfallReasons).toEqual(expect.arrayContaining([
       expect.stringContaining('最近 5 个交易日涨幅超过 20%'),
     ]));
@@ -1892,5 +1907,211 @@ describe('scoring contribution engine', () => {
     expect(result.diagnostics.excludedByPreviousDayStock).toBe(0);
     expect(result.diagnostics.excludedByPreviousDayKeyword).toBe(0);
     expect(result.diagnostics.shortfallReasons).toEqual([]);
+  });
+
+  it('forces top 5 recommendations to come from different industries even with lower scores', async () => {
+    const mockDb = new MockPrismaClient();
+    const asOf = new Date('2026-05-24T12:00:00.000Z');
+    const clusterKey = 'global';
+    const traceId = 'test-trace-top-diversity';
+
+    // 5 只同行业高分候选 + 5 只不同行业低分候选
+    const rows = [
+      ['600001', '电子股1', '半导体', 90],
+      ['600002', '电子股2', '半导体', 89],
+      ['600003', '电子股3', '半导体', 88],
+      ['600004', '电子股4', '半导体', 87],
+      ['600005', '电子股5', '半导体', 86],
+      ['600006', '银行股1', '银行', 30],
+      ['600007', '航运股1', '航运', 29],
+      ['600008', '军工股1', '军工', 28],
+      ['600009', '食品股1', '食品', 27],
+      ['600010', '能源股1', '能源', 26],
+    ] as const;
+
+    for (const row of rows) {
+      addExposure(mockDb, {
+        clusterKey,
+        symbol: row[0],
+        stockName: row[1],
+        keyword: row[2],
+        sourceName: `${row[2]}暴露`,
+      });
+      addStockWithCandles(mockDb, {
+        clusterKey,
+        symbol: row[0],
+        stockId: `stock-${row[0]}`,
+        baseClose: 10,
+        latestClose: 11,
+        latestVolume: 2_000_000,
+      });
+      mockDb.stockFeatureSnapshotsCreated.push({
+        traceId,
+        symbol: row[0],
+        asOf,
+        clusterKey,
+        newsFrequencyScore: row[3],
+        relationConfidenceScore: 0,
+        boardMatchScore: 8,
+        weakSignalBonus: 0,
+        aggregatedScore: row[3],
+        reasons: [],
+      });
+      mockDb.evidenceContributionsCreated.push({
+        traceId,
+        asOf,
+        clusterKey,
+        newsId: `news-${row[0]}`,
+        symbol: row[0],
+        keyword: row[2],
+        finalContribScore: 0.5,
+      });
+    }
+
+    const result = await new TempStockRecommendationService().generatePhysicalRecommendationsWithDiagnostics(
+      mockDb,
+      traceId,
+      asOf,
+      clusterKey,
+      10,
+      5,
+    );
+
+    const topFiveIndustries = result.recommendations.slice(0, 5).map(item => item.industry);
+    expect(new Set(topFiveIndustries).size).toBe(5);
+    expect(result.diagnostics.topDiversityCount).toBe(5);
+  });
+
+  it('uses 45/20/15/20 score components in feature reasons', async () => {
+    const mockDb = new MockPrismaClient();
+    const asOf = new Date('2026-05-24T12:00:00.000Z');
+    const clusterKey = 'global';
+    const traceId = 'trace-component-weights';
+
+    addNews(mockDb, {
+      id: 'news-weight',
+      title: '机器人订单增加',
+      content: '机器人订单增加。',
+      publishedAt: new Date('2026-05-24T08:00:00.000Z'),
+      clusterKey,
+    });
+    addSignal(mockDb, { traceId, asOf, clusterKey, newsId: 'news-weight', keyword: '机器人' });
+    addExposure(mockDb, {
+      clusterKey,
+      symbol: '600301',
+      stockName: '机器人权重股',
+      keyword: '机器人',
+      sourceName: '机器人暴露',
+    });
+    addStockWithCandles(mockDb, {
+      clusterKey,
+      symbol: '600301',
+      stockId: 'stock-600301',
+      baseClose: 10,
+      latestClose: 10.5,
+      latestVolume: 2_000_000,
+    });
+
+    await new ScoringContributionEngine().execute(mockDb, { traceId, asOf, clusterKey });
+
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons[0]).toContain('证据 ');
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons[0]).toContain('/45');
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons[0]).toContain('图谱 ');
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons[0]).toContain('/20');
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons[0]).toContain('暴露 ');
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons[0]).toContain('/15');
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons[0]).toContain('市场 ');
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons[0]).toContain('/20');
+  });
+
+  it('recomputes stale market signal snapshots when newer visible candles exist', async () => {
+    const mockDb = new MockPrismaClient();
+    const asOf = new Date('2026-05-24T12:00:00.000Z');
+    const clusterKey = 'global';
+    const traceId = 'trace-stale-market-signal';
+
+    addNews(mockDb, {
+      id: 'news-stale',
+      title: '算力需求增加',
+      content: '算力需求增加。',
+      publishedAt: new Date('2026-05-24T08:00:00.000Z'),
+      clusterKey,
+    });
+    addSignal(mockDb, { traceId, asOf, clusterKey, newsId: 'news-stale', keyword: '算力' });
+    addExposure(mockDb, {
+      clusterKey,
+      symbol: '600302',
+      stockName: '算力行情股',
+      keyword: '算力',
+      sourceName: '算力暴露',
+    });
+    addStockWithCandles(mockDb, {
+      clusterKey,
+      symbol: '600302',
+      stockId: 'stock-600302',
+      baseClose: 10,
+      latestClose: 11,
+      latestVolume: 2_000_000,
+    });
+    mockDb.marketSignalSnapshotsCreated.push({
+      traceId,
+      asOf,
+      clusterKey,
+      symbol: '600302',
+      latestTradingDay: new Date('2026-05-01T00:00:00.000Z'),
+      momentum5dPct: 0,
+      momentum20dPct: 0,
+      volumeRatio20d: 1,
+      breakout20d: false,
+      volatilityCompression: false,
+      recentWeekGainExceeded: false,
+      score: 1,
+      reasons: ['旧行情快照'],
+    });
+
+    await new ScoringContributionEngine().execute(mockDb, { traceId, asOf, clusterKey });
+
+    expect(mockDb.marketSignalSnapshotsCreated).toHaveLength(1);
+    expect(mockDb.marketSignalSnapshotsCreated[0]?.latestTradingDay?.toISOString().slice(0, 10)).toBe('2026-05-15');
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons.join('\n')).toContain('"staleTradingDays":0');
+  });
+
+  it('caps a single keyword contribution before mapping evidence score', async () => {
+    const mockDb = new MockPrismaClient();
+    const asOf = new Date('2026-05-24T12:00:00.000Z');
+    const clusterKey = 'global';
+    const traceId = 'trace-keyword-cap';
+
+    for (let index = 0; index < 20; index += 1) {
+      const newsId = `news-chip-${index}`;
+      addNews(mockDb, {
+        id: newsId,
+        title: `半导体新闻 ${index}`,
+        content: '半导体需求增加。',
+        publishedAt: new Date('2026-05-24T08:00:00.000Z'),
+        clusterKey,
+      });
+      addSignal(mockDb, { traceId, asOf, clusterKey, newsId, keyword: '半导体' });
+    }
+    addExposure(mockDb, {
+      clusterKey,
+      symbol: '600303',
+      stockName: '半导体主题股',
+      keyword: '半导体',
+      sourceName: '半导体暴露',
+    });
+    addStockWithCandles(mockDb, {
+      clusterKey,
+      symbol: '600303',
+      stockId: 'stock-600303',
+      baseClose: 10,
+      latestClose: 10.5,
+      latestVolume: 2_000_000,
+    });
+
+    await new ScoringContributionEngine().execute(mockDb, { traceId, asOf, clusterKey });
+
+    expect(Number(mockDb.stockFeatureSnapshotsCreated[0]?.newsFrequencyScore)).toBeLessThan(45);
+    expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons.join('\n')).toContain('单关键词有效贡献按 1.5 封顶');
   });
 });

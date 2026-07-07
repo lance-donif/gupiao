@@ -67,8 +67,12 @@ interface IMarketSignalScore {
   readonly score: number;
   readonly latestTradingDay: string | null;
   readonly latestTradingDayDate?: Date | null;
+  readonly latestMarketTradingDay?: string | null;
+  readonly staleTradingDays?: number;
+  readonly isFresh?: boolean;
   readonly momentum5dPct: number | null;
   readonly momentum20dPct: number | null;
+  readonly longTermMomentumPct: number | null;
   readonly volumeRatio20d: number | null;
   readonly breakout20d: boolean;
   readonly volatilityCompression: boolean;
@@ -141,10 +145,14 @@ const GRAPH_WEAK_SIGNAL_CAP = 1.0;
 const GRAPH_WEAK_NODE_BONUS = 0.5;
 const GRAPH_WEAK_EDGE_BONUS = 0.25;
 const BROAD_EXPOSURE_MIN_WEIGHT = 0.08;
-const EVIDENCE_SCORE_MAX = 35;
-const GRAPH_SCORE_MAX = 15;
+const EVIDENCE_SCORE_MAX = 45;
+const GRAPH_SCORE_MAX = 20;
 const EXPOSURE_PRECISION_SCORE_MAX = 15;
-const MARKET_SIGNAL_SCORE_MAX = 35;
+const MARKET_SIGNAL_SCORE_MAX = 20;
+const GRAPH_RELATION_SCORE_MAX = 12;
+const GRAPH_WEAK_SIGNAL_SCORE_MAX = 8;
+const EVIDENCE_KEYWORD_CONTRIB_CAP = 1.5;
+const EVIDENCE_DIVERSITY_MIN_CONTRIB = 0.2;
 const MOVEMENT_CONFIRMATION_SCORE_CAP = 2;
 const MOVEMENT_CONFIRMATION_UNIT_SCORE = 0.8;
 const MAX_MOVEMENT_EVIDENCE_PER_SYMBOL = 3;
@@ -739,11 +747,14 @@ const readContributionKeyword = (contribution: any): string => {
 const calculateEvidenceComponentScore = (keywordContribSums: ReadonlyMap<string, number>): number => {
   let evidencePower = 0;
   for (const sumFinalContrib of keywordContribSums.values()) {
-    evidencePower += Math.min(3, Math.log1p(Math.max(0, sumFinalContrib)) * 1.8);
+    const effectiveContrib = Math.min(EVIDENCE_KEYWORD_CONTRIB_CAP, Math.max(0, sumFinalContrib));
+    evidencePower += Math.log1p(effectiveContrib) * 1.8;
   }
   const baseScore = EVIDENCE_SCORE_MAX * (1 - Math.exp(-evidencePower / 1.8));
-  // 证据多样性加分：多于1个不同关键词时，给予额外加分，避免单一关键词垄断评分
-  const diversityBonus = Math.min(5, (keywordContribSums.size - 1) * 1.5);
+  const diverseKeywordCount = [...keywordContribSums.values()]
+    .filter(value => Math.min(EVIDENCE_KEYWORD_CONTRIB_CAP, Math.max(0, value)) >= EVIDENCE_DIVERSITY_MIN_CONTRIB)
+    .length;
+  const diversityBonus = Math.min(5, Math.max(0, diverseKeywordCount - 1) * 1.5);
   return Number(clamp(baseScore + diversityBonus, 0, EVIDENCE_SCORE_MAX).toFixed(4));
 };
 
@@ -753,10 +764,10 @@ const calculateGraphComponentScores = (
 ): { relationScore: number; weakSignalScore: number; total: number } => {
   const relationScore = GRAPH_RELATION_CONFIDENCE_CAP <= 0
     ? 0
-    : (Math.min(rawRelationConfidenceScore, GRAPH_RELATION_CONFIDENCE_CAP) / GRAPH_RELATION_CONFIDENCE_CAP) * 9;
+    : (Math.min(rawRelationConfidenceScore, GRAPH_RELATION_CONFIDENCE_CAP) / GRAPH_RELATION_CONFIDENCE_CAP) * GRAPH_RELATION_SCORE_MAX;
   const weakSignalScore = GRAPH_WEAK_SIGNAL_CAP <= 0
     ? 0
-    : (Math.min(rawWeakSignalBonus, GRAPH_WEAK_SIGNAL_CAP) / GRAPH_WEAK_SIGNAL_CAP) * 6;
+    : (Math.min(rawWeakSignalBonus, GRAPH_WEAK_SIGNAL_CAP) / GRAPH_WEAK_SIGNAL_CAP) * GRAPH_WEAK_SIGNAL_SCORE_MAX;
   const total = Number(clamp(relationScore + weakSignalScore, 0, GRAPH_SCORE_MAX).toFixed(4));
   return {
     relationScore: Number(relationScore.toFixed(4)),
@@ -782,8 +793,12 @@ export const calculateMarketSignalScore = (
       score: 0,
       latestTradingDay: candles.at(-1)?.tradingDay?.toISOString?.().slice(0, 10) ?? null,
       latestTradingDayDate: candles.at(-1)?.tradingDay ?? null,
+      latestMarketTradingDay: candles.at(-1)?.tradingDay?.toISOString?.().slice(0, 10) ?? null,
+      staleTradingDays: 0,
+      isFresh: true,
       momentum5dPct: null,
       momentum20dPct: null,
+      longTermMomentumPct: null,
       volumeRatio20d: null,
       breakout20d: false,
       volatilityCompression: false,
@@ -800,8 +815,10 @@ export const calculateMarketSignalScore = (
   const todayChangePct = prevClose && prevClose > 0 ? (latestClose - prevClose) / prevClose : null;
   const close5 = toNumber(candles[Math.max(0, candles.length - 6)]?.close);
   const close20 = candles.length >= 21 ? toNumber(candles[candles.length - 21]?.close) : null;
+  const close120 = candles.length >= 121 ? toNumber(candles[candles.length - 121]?.close) : null;
   const momentum5dPct = close5 > 0 ? (latestClose - close5) / close5 : null;
   const momentum20dPct = close20 && close20 > 0 ? (latestClose - close20) / close20 : null;
+  const longTermMomentumPct = close120 && close120 > 0 ? (latestClose - close120) / close120 : null;
   const previous20 = candles.slice(Math.max(0, candles.length - 21), -1);
   const avgVolume20 = average(previous20.map(candle => toNumber(candle.volume)).filter(value => value > 0));
   const volumeRatio20d = avgVolume20 && avgVolume20 > 0 ? latestVolume / avgVolume20 : null;
@@ -834,6 +851,7 @@ export const calculateMarketSignalScore = (
   const isLowZone = avgClose20 !== null && latestClose < avgClose20 * 0.95;
   // 低位放量吸筹：低位区 + 量比 > 1.2
   const isAccumulation = isLowZone && volumeRatio20d !== null && volumeRatio20d > 1.2;
+  const isLowVolumeRebound = isLowZone && (volumeRatio20d ?? 0) < 0.8;
 
   // 映射基本组件原始得分 (0 到 1)
   // S_m5：庄家吸筹验证（替代旧追涨逻辑：旧公式 (momentum5dPct+0.02)/0.1 涨越多分越高，与"发现弱信号"目标背离）
@@ -850,6 +868,9 @@ export const calculateMarketSignalScore = (
     // 低位区+放量，庄家吸筹，最高分
     S_m5 = 1.0;
     m5Reason = '低位放量，庄家吸筹验证 S_m5=1.0';
+  } else if (isLowVolumeRebound) {
+    S_m5 = 0.1;
+    m5Reason = '低位区但量能不足，弱反弹降权 S_m5=0.1';
   } else if (isLowZone) {
     // 低位区但量能不足
     S_m5 = 0.6;
@@ -869,7 +890,7 @@ export const calculateMarketSignalScore = (
     S_m20 = 0.3;
   } else if (momentum20dPct < -0.05 && isLowZone) {
     // 20日下跌且处于低位区，可能超跌反弹机会
-    S_m20 = 0.9;
+    S_m20 = isLowVolumeRebound ? 0.2 : 0.9;
   } else {
     // 横盘整理得中等分
     S_m20 = clamp((0.1 - Math.abs(momentum20dPct)) / 0.1, 0, 0.6);
@@ -957,8 +978,12 @@ export const calculateMarketSignalScore = (
     score,
     latestTradingDay: latest.tradingDay.toISOString().slice(0, 10),
     latestTradingDayDate: latest.tradingDay,
+    latestMarketTradingDay: latest.tradingDay.toISOString().slice(0, 10),
+    staleTradingDays: 0,
+    isFresh: true,
     momentum5dPct: momentum5dPct === null ? null : Number(momentum5dPct.toFixed(6)),
     momentum20dPct: momentum20dPct === null ? null : Number(momentum20dPct.toFixed(6)),
+    longTermMomentumPct: longTermMomentumPct === null ? null : Number(longTermMomentumPct.toFixed(6)),
     volumeRatio20d: volumeRatio20d === null ? null : Number(volumeRatio20d.toFixed(4)),
     breakout20d,
     volatilityCompression,
@@ -966,6 +991,7 @@ export const calculateMarketSignalScore = (
     todayChangePct: todayChangePct === null ? null : Number(todayChangePct.toFixed(6)),
     reasons: [
       `市场确认信号 ${score.toFixed(4)}/20：5日涨跌 ${momentum5dPct === null ? 'NA' : (momentum5dPct * 100).toFixed(2)}%，20日涨跌 ${momentum20dPct === null ? 'NA' : (momentum20dPct * 100).toFixed(2)}%，20日量比 ${volumeRatio20d === null ? 'NA' : volumeRatio20d.toFixed(2)}`,
+      `长期趋势：120日涨跌 ${longTermMomentumPct === null ? 'NA' : (longTermMomentumPct * 100).toFixed(2)}%`,
       `低位区: ${isLowZone ? '是' : '否'}, 量比 ${volumeRatio20d === null ? 'NA' : volumeRatio20d.toFixed(2)}, 吸筹信号: ${isAccumulation ? '是' : '否'}`,
       `5日动量判定: ${m5Reason}`,
       `量化指标：${fibDesc}，${srDesc}`,
@@ -1091,8 +1117,12 @@ const emptyMarketSignal = (reason: string): IMarketSignalScore => ({
   score: 0,
   latestTradingDay: null,
   latestTradingDayDate: null,
+  latestMarketTradingDay: null,
+  staleTradingDays: 0,
+  isFresh: true,
   momentum5dPct: null,
   momentum20dPct: null,
+  longTermMomentumPct: null,
   volumeRatio20d: null,
   breakout20d: false,
   volatilityCompression: false,
@@ -1146,6 +1176,146 @@ const toDecimalOrNull = (value: number | null, scale: number): Prisma.Decimal | 
   return new Prisma.Decimal(value.toFixed(scale));
 };
 
+const parseLongTermMomentumFromReasons = (reasons: readonly string[]): number | null => {
+  const line = reasons.find(reason => reason.includes('120日涨跌'));
+  const matched = line?.match(/120日涨跌\s+(-?[\d.]+)%/u);
+  const parsed = matched ? Number(matched[1]) / 100 : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+interface IMarketSignalFreshness {
+  readonly latestMarketTradingDay: string | null;
+  readonly latestMarketTradingDayDate: Date | null;
+  readonly staleTradingDays: number;
+}
+
+const toDayKey = (value: Date | null | undefined): string | null => {
+  return value?.toISOString?.().slice(0, 10) ?? null;
+};
+
+const withMarketSignalFreshness = (
+  signal: IMarketSignalScore,
+  freshness: IMarketSignalFreshness,
+): IMarketSignalScore => {
+  const isFresh = freshness.staleTradingDays === 0;
+  return {
+    ...signal,
+    latestMarketTradingDay: freshness.latestMarketTradingDay,
+    staleTradingDays: freshness.staleTradingDays,
+    isFresh,
+    reasons: [
+      ...signal.reasons,
+      `行情快照新鲜度：${isFresh ? 'fresh' : 'stale'}，snapshot=${signal.latestTradingDay ?? 'NA'}，latest=${freshness.latestMarketTradingDay ?? 'NA'}，staleTradingDays=${freshness.staleTradingDays}`,
+    ],
+  };
+};
+
+const loadMarketSignalFreshnessBySymbol = async (
+  prisma: any,
+  input: {
+    readonly clusterKey: string;
+    readonly asOf: Date;
+    readonly snapshots: readonly { readonly symbol: string; readonly latestTradingDay: Date | null }[];
+  },
+): Promise<Map<string, IMarketSignalFreshness>> => {
+  const symbols = [...new Set(input.snapshots.map(row => row.symbol))];
+  const snapshotBySymbol = new Map(input.snapshots.map(row => [row.symbol, row.latestTradingDay]));
+  const results = new Map<string, IMarketSignalFreshness>();
+  if (symbols.length === 0 || !hasDelegate(prisma, 'candle', 'findMany')) {
+    return results;
+  }
+
+  if (typeof prisma?.$queryRawUnsafe === 'function') {
+    const rows = await prisma.$queryRawUnsafe(
+      [
+        'WITH input_rows AS (',
+        '  SELECT * FROM jsonb_to_recordset($1::jsonb) AS row(symbol text, "latestTradingDay" timestamp)',
+        ')',
+        'SELECT input_rows.symbol,',
+        '       max(c."tradingDay") AS "latestMarketTradingDay",',
+        '       count(c."tradingDay") FILTER (',
+        '         WHERE input_rows."latestTradingDay" IS NOT NULL AND c."tradingDay" > input_rows."latestTradingDay"',
+        '       )::int AS "staleTradingDays"',
+        'FROM input_rows',
+        'LEFT JOIN "Stock" s ON s.symbol = input_rows.symbol AND s."clusterKey" = $2',
+        'LEFT JOIN "Candle" c ON c."stockId" = s.id AND c."tradingDay" <= $3',
+        'GROUP BY input_rows.symbol',
+      ].join(' '),
+      JSON.stringify(input.snapshots.map(row => ({
+        symbol: row.symbol,
+        latestTradingDay: row.latestTradingDay?.toISOString?.() ?? null,
+      }))),
+      input.clusterKey,
+      input.asOf,
+    ) as readonly any[];
+
+    for (const row of rows) {
+      const latest = row.latestMarketTradingDay instanceof Date
+        ? row.latestMarketTradingDay
+        : (row.latestMarketTradingDay ? new Date(row.latestMarketTradingDay) : null);
+      results.set(String(row.symbol), {
+        latestMarketTradingDay: toDayKey(latest),
+        latestMarketTradingDayDate: latest,
+        staleTradingDays: Number(row.staleTradingDays ?? 0),
+      });
+    }
+    return results;
+  }
+
+  const candles = await prisma.candle.findMany({
+    where: {
+      stock: {
+        clusterKey: input.clusterKey,
+        symbol: { in: symbols },
+      },
+      tradingDay: { lte: input.asOf },
+    },
+    select: {
+      tradingDay: true,
+      stock: { select: { symbol: true } },
+    },
+    orderBy: [
+      { stockId: 'asc' },
+      { tradingDay: 'desc' },
+    ],
+  });
+
+  for (const symbol of symbols) {
+    results.set(symbol, {
+      latestMarketTradingDay: null,
+      latestMarketTradingDayDate: null,
+      staleTradingDays: 0,
+    });
+  }
+
+  for (const candle of candles) {
+    const symbol = String(candle.stock?.symbol ?? '');
+    if (!symbol) {
+      continue;
+    }
+    const current = results.get(symbol);
+    const tradingDay = candle.tradingDay instanceof Date ? candle.tradingDay : new Date(candle.tradingDay);
+    if (!current?.latestMarketTradingDayDate || tradingDay > current.latestMarketTradingDayDate) {
+      results.set(symbol, {
+        latestMarketTradingDay: toDayKey(tradingDay),
+        latestMarketTradingDayDate: tradingDay,
+        staleTradingDays: current?.staleTradingDays ?? 0,
+      });
+    }
+    const snapshotTradingDay = snapshotBySymbol.get(symbol);
+    if (snapshotTradingDay && tradingDay > snapshotTradingDay) {
+      const latest = results.get(symbol);
+      results.set(symbol, {
+        latestMarketTradingDay: latest?.latestMarketTradingDay ?? toDayKey(tradingDay),
+        latestMarketTradingDayDate: latest?.latestMarketTradingDayDate ?? tradingDay,
+        staleTradingDays: (latest?.staleTradingDays ?? 0) + 1,
+      });
+    }
+  }
+
+  return results;
+};
+
 const loadExistingMarketSignals = async (
   prisma: any,
   input: { readonly traceId: string; readonly clusterKey: string; readonly asOf: Date; readonly symbols: readonly string[] },
@@ -1183,19 +1353,43 @@ const loadExistingMarketSignals = async (
       seenReusable.add(symbol);
     }
   }
+  const freshnessBySymbol = await loadMarketSignalFreshnessBySymbol(prisma, {
+    clusterKey: input.clusterKey,
+    asOf: input.asOf,
+    snapshots: rows.map((row: any) => ({
+      symbol: String(row.symbol),
+      latestTradingDay: row.latestTradingDay ?? null,
+    })),
+  });
   for (const row of rows) {
-    results.set(String(row.symbol), {
+    const symbol = String(row.symbol);
+    const latestTradingDay = row.latestTradingDay ?? null;
+    const rowReasons = Array.isArray(row.reasons) ? row.reasons.map(String) : ['市场确认信号：复用 MarketSignalSnapshot'];
+    const longTermMomentumPct = parseLongTermMomentumFromReasons(rowReasons);
+    if (longTermMomentumPct === null) {
+      continue;
+    }
+    const freshness = freshnessBySymbol.get(symbol) ?? {
+      latestMarketTradingDay: toDayKey(latestTradingDay),
+      latestMarketTradingDayDate: latestTradingDay,
+      staleTradingDays: 0,
+    };
+    if (freshness.staleTradingDays > 0) {
+      continue;
+    }
+    results.set(symbol, withMarketSignalFreshness({
       score: normalizeDecimalNumber(row.score, 0),
       latestTradingDay: row.latestTradingDay?.toISOString?.().slice(0, 10) ?? null,
       latestTradingDayDate: row.latestTradingDay ?? null,
       momentum5dPct: row.momentum5dPct === null || row.momentum5dPct === undefined ? null : normalizeDecimalNumber(row.momentum5dPct, 0),
       momentum20dPct: row.momentum20dPct === null || row.momentum20dPct === undefined ? null : normalizeDecimalNumber(row.momentum20dPct, 0),
+      longTermMomentumPct,
       volumeRatio20d: row.volumeRatio20d === null || row.volumeRatio20d === undefined ? null : normalizeDecimalNumber(row.volumeRatio20d, 0),
       breakout20d: row.breakout20d === true,
       volatilityCompression: row.volatilityCompression === true,
       recentWeekGainExceeded: row.recentWeekGainExceeded === true,
-      reasons: Array.isArray(row.reasons) ? row.reasons.map(String) : ['市场确认信号：复用 MarketSignalSnapshot'],
-    });
+      reasons: rowReasons,
+    }, freshness));
   }
   return results;
 };
@@ -1290,7 +1484,7 @@ const loadRecentCandlesByStockId = async (
   }
 
   const lookbackDays = Math.max(
-    40,
+    121,
     input.strategyConfig?.fibonacciLookbackDays ?? 60,
     input.strategyConfig?.supportResistanceLookbackDays ?? 60
   );
@@ -1311,25 +1505,56 @@ const persistMarketSignals = async (
     readonly marketSignals: ReadonlyMap<string, IMarketSignalScore>;
   },
 ): Promise<void> => {
-  if (!hasDelegate(prisma, 'marketSignalSnapshot', 'createMany') || input.marketSignals.size === 0) {
+  if (input.marketSignals.size === 0) {
+    return;
+  }
+  const rows = [...input.marketSignals.entries()].map(([symbol, signal]) => ({
+    traceId: input.traceId,
+    asOf: input.asOf,
+    clusterKey: input.clusterKey,
+    symbol,
+    latestTradingDay: signal.latestTradingDayDate ?? null,
+    momentum5dPct: toDecimalOrNull(signal.momentum5dPct, 6),
+    momentum20dPct: toDecimalOrNull(signal.momentum20dPct, 6),
+    volumeRatio20d: toDecimalOrNull(signal.volumeRatio20d, 4),
+    breakout20d: signal.breakout20d,
+    volatilityCompression: signal.volatilityCompression,
+    recentWeekGainExceeded: signal.recentWeekGainExceeded,
+    score: new Prisma.Decimal(signal.score.toFixed(4)),
+    reasons: [...signal.reasons],
+  }));
+
+  if (hasDelegate(prisma, 'marketSignalSnapshot', 'upsert')) {
+    await Promise.all(rows.map(row => prisma.marketSignalSnapshot.upsert({
+      where: {
+        traceId_symbol: {
+          traceId: row.traceId,
+          symbol: row.symbol,
+        },
+      },
+      create: row,
+      update: {
+        asOf: row.asOf,
+        clusterKey: row.clusterKey,
+        latestTradingDay: row.latestTradingDay,
+        momentum5dPct: row.momentum5dPct,
+        momentum20dPct: row.momentum20dPct,
+        volumeRatio20d: row.volumeRatio20d,
+        breakout20d: row.breakout20d,
+        volatilityCompression: row.volatilityCompression,
+        recentWeekGainExceeded: row.recentWeekGainExceeded,
+        score: row.score,
+        reasons: row.reasons,
+      },
+    })));
+    return;
+  }
+
+  if (!hasDelegate(prisma, 'marketSignalSnapshot', 'createMany')) {
     return;
   }
   await prisma.marketSignalSnapshot.createMany({
-    data: [...input.marketSignals.entries()].map(([symbol, signal]) => ({
-      traceId: input.traceId,
-      asOf: input.asOf,
-      clusterKey: input.clusterKey,
-      symbol,
-      latestTradingDay: signal.latestTradingDayDate ?? null,
-      momentum5dPct: toDecimalOrNull(signal.momentum5dPct, 6),
-      momentum20dPct: toDecimalOrNull(signal.momentum20dPct, 6),
-      volumeRatio20d: toDecimalOrNull(signal.volumeRatio20d, 4),
-      breakout20d: signal.breakout20d,
-      volatilityCompression: signal.volatilityCompression,
-      recentWeekGainExceeded: signal.recentWeekGainExceeded,
-      score: new Prisma.Decimal(signal.score.toFixed(4)),
-      reasons: [...signal.reasons],
-    })),
+    data: rows,
     skipDuplicates: true,
   });
 };
@@ -1882,8 +2107,11 @@ export class ScoringContributionEngine {
 
       const newsFrequencyScore = calculateEvidenceComponentScore(contribsByKeyword);
       for (const [keyword, sumFinalContrib] of contribsByKeyword.entries()) {
+        const capReason = sumFinalContrib > EVIDENCE_KEYWORD_CONTRIB_CAP
+          ? `，单关键词有效贡献按 ${EVIDENCE_KEYWORD_CONTRIB_CAP.toFixed(1)} 封顶`
+          : '';
         reasons.push(
-          `关键词 [${keyword}] 累计净贡献值 ${sumFinalContrib.toFixed(4)}，证据贡献组件累计后映射为 ${newsFrequencyScore.toFixed(4)}/${EVIDENCE_SCORE_MAX} (基于 ${profile} 衰减)`,
+          `关键词 [${keyword}] 累计净贡献值 ${sumFinalContrib.toFixed(4)}${capReason}，证据贡献组件累计后映射为 ${newsFrequencyScore.toFixed(4)}/${EVIDENCE_SCORE_MAX} (基于 ${profile} 衰减)`,
         );
       }
 
@@ -1949,6 +2177,7 @@ export class ScoringContributionEngine {
         latestTradingDay: null,
         momentum5dPct: null,
         momentum20dPct: null,
+        longTermMomentumPct: null,
         volumeRatio20d: null,
         breakout20d: false,
         volatilityCompression: false,
@@ -1981,8 +2210,12 @@ export class ScoringContributionEngine {
           `marketSignal=${JSON.stringify({
             score: marketSignal.score,
             latestTradingDay: marketSignal.latestTradingDay,
+            latestMarketTradingDay: marketSignal.latestMarketTradingDay ?? marketSignal.latestTradingDay,
+            staleTradingDays: marketSignal.staleTradingDays ?? 0,
+            isFresh: marketSignal.isFresh ?? true,
             momentum5dPct: marketSignal.momentum5dPct,
             momentum20dPct: marketSignal.momentum20dPct,
+            longTermMomentumPct: marketSignal.longTermMomentumPct,
             volumeRatio20d: marketSignal.volumeRatio20d,
             breakout20d: marketSignal.breakout20d,
             volatilityCompression: marketSignal.volatilityCompression,
