@@ -376,7 +376,10 @@ const resolveTopDiversityIndustryKey = (recommendation: ITempStockRecommendation
 const isRecommendationStockEligible = (recommendation: ITempStockRecommendation): boolean => {
   const symbol = recommendation.symbol.trim();
   const normalizedName = recommendation.stockName.trim().toUpperCase();
-  return !symbol.startsWith('688') && !normalizedName.includes('ST') && !normalizedName.includes('ＳＴ');
+  const normalizedSymbol = symbol.toUpperCase();
+  return !symbol.startsWith('688')
+    && !normalizedName.includes('ST') && !normalizedName.includes('ＳＴ')
+    && !normalizedSymbol.startsWith('ST') && !normalizedSymbol.startsWith('*ST');
 };
 
 const getRecentWeekGain = (recommendation: ITempStockRecommendation): number | null => {
@@ -471,7 +474,7 @@ const isRecommendationQualityEligible = (recommendation: ITempStockRecommendatio
   const breakout20d = getMarketSignalBoolean(recommendation, 'breakout20d');
   const hasVolumeBreakoutConfirmation = (volumeRatio20d ?? 0) >= 1 && breakout20d;
 
-  if (staleTradingDays > 0 || (latestTradingDay !== null && latestMarketTradingDay !== null && latestTradingDay < latestMarketTradingDay)) {
+  if (staleTradingDays > 0 || latestTradingDay === null || latestMarketTradingDay === null || latestTradingDay < latestMarketTradingDay) {
     return false;
   }
   if (longTermMomentumPct !== null && longTermMomentumPct <= LONG_TERM_DOWNTREND_THRESHOLD) {
@@ -483,6 +486,7 @@ const isRecommendationQualityEligible = (recommendation: ITempStockRecommendatio
   if (exposurePrecisionScore < 4 && !(evidenceScore >= 18 && marketSignalScore >= 8)) {
     return false;
   }
+  // 过热追涨过滤：5 日涨幅 >= 15% 或 20 日涨幅 >= 25% 且无量突破确认时拒绝
   if (((m5d ?? 0) >= 0.15 || (m20d ?? 0) >= 0.25) && !hasVolumeBreakoutConfirmation) {
     return false;
   }
@@ -490,10 +494,6 @@ const isRecommendationQualityEligible = (recommendation: ITempStockRecommendatio
     return false;
   }
   return true;
-};
-
-const isSupplementalRecommendation = (recommendation: ITempStockRecommendation): boolean => {
-  return recommendation.scoreBreakdown.supplementalSource === 'movement_evidence';
 };
 
 const resolveRecommendationSignalType = (recommendation: ITempStockRecommendation): string => {
@@ -522,25 +522,6 @@ const parseJsonRecord = (value: unknown): Record<string, unknown> => {
   return {};
 };
 
-const getMovementRawFields = (fact: any): Record<string, unknown> => {
-  const evidenceJson = parseJsonRecord(fact.evidenceJson);
-  return parseJsonRecord(evidenceJson.rawFields);
-};
-
-const getMovementRawText = (fact: any): string => {
-  return [
-    fact.keyword,
-    fact.sourceName,
-    getMovementRawFields(fact)['板块异动最频繁个股及所属类型-买卖方向'],
-  ].map(value => String(value ?? '')).join(' ');
-};
-
-const isPositiveMovementFact = (fact: any): boolean => {
-  const text = getMovementRawText(fact);
-  return /大笔买入|有大买盘|拉升|净流入|向上缺口|60日新高/u.test(text)
-    && !/大笔卖出|大卖盘|净流出/u.test(text);
-};
-
 const isFactActiveAt = (fact: any, asOf: Date): boolean => {
   const validFrom = fact.validFrom ? new Date(fact.validFrom).getTime() : Number.NEGATIVE_INFINITY;
   const validTo = fact.validTo ? new Date(fact.validTo).getTime() : Number.POSITIVE_INFINITY;
@@ -550,23 +531,20 @@ const isFactActiveAt = (fact: any, asOf: Date): boolean => {
     && validTo >= current;
 };
 
-const resolveMovementStockName = (fact: any): string => {
-  const rawName = getMovementRawFields(fact)['板块异动最频繁个股及所属类型-股票名称'];
-  const name = String(rawName ?? fact.stockName ?? '').trim();
-  return name || `股票-${String(fact.symbol ?? '').trim()}`;
-};
-
-const resolveMovementBoardName = (fact: any): string => {
-  const rawBoard = getMovementRawFields(fact)['板块名称'];
-  const board = String(rawBoard ?? '').trim();
-  if (board) {
-    return board;
-  }
-  return String(fact.sourceName ?? fact.keyword ?? '异动确认').trim() || '异动确认';
-};
-
 const normalizeCooldownKeyword = (value: unknown): string => {
   return String(value ?? '').replace(/\s+/gu, '').toLocaleLowerCase('zh-CN');
+};
+
+const hasCooldownKeyword = (
+  recommendation: ITempStockRecommendation,
+  previousDayKeywords: ReadonlySet<string>,
+): boolean => {
+  const keywords = [
+    recommendation.scoreBreakdown.primarySignalType,
+    recommendation.scoreBreakdown.selectionSignalType,
+    ...recommendation.matchedSignals,
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  return keywords.some(keyword => previousDayKeywords.has(normalizeCooldownKeyword(keyword)));
 };
 
 
@@ -779,24 +757,8 @@ export class TempStockRecommendationService {
       cooldownExclusions,
     );
 
-    const supplementalCandidates = initialSelection.recommendations.length < effectiveLimit && candidates.length > 0
-      ? await this.buildSupplementalMovementRecommendations(
-          prisma,
-          asOf,
-          clusterKey,
-          candidates as unknown as readonly ITempStockRecommendation[],
-        )
-      : [];
-    const combinedCandidates = [...candidates, ...supplementalCandidates]
-      .sort((a: any, b: any) => b.score - a.score || a.symbol.localeCompare(b.symbol));
-    const selection = supplementalCandidates.length > 0
-      ? selector.selectTopRecommendationsWithDiagnostics(
-          combinedCandidates as unknown as readonly ITempStockRecommendation[],
-          effectiveLimit,
-          maxPerIndustry,
-          cooldownExclusions,
-        )
-      : initialSelection;
+    // AGENTS.md: 推荐不得用无 EvidenceContribution 的股票补位，因此不再引入 movement_evidence 补充候选。
+    const selection = initialSelection;
     const selected = selection.recommendations;
 
     // 5. 组装 RecommendationSnapshot 快照数据
@@ -1009,116 +971,6 @@ export class TempStockRecommendationService {
     return result;
   }
 
-  private async buildSupplementalMovementRecommendations(
-    prisma: any,
-    asOf: Date,
-    clusterKey: string,
-    existingCandidates: readonly ITempStockRecommendation[],
-  ): Promise<readonly ITempStockRecommendation[]> {
-    if (!prisma.stockExposureFact?.findMany || existingCandidates.length === 0) {
-      return [];
-    }
-
-    const existingSymbols = new Set(existingCandidates.map(candidate => candidate.symbol.trim()));
-    const movementFacts = await prisma.stockExposureFact.findMany({
-      where: {
-        clusterKey,
-        status: 'active',
-        exposureType: 'movement_evidence',
-        validFrom: { lte: asOf },
-        OR: [
-          { validTo: null },
-          { validTo: { gte: asOf } },
-        ],
-      },
-      orderBy: [
-        { confidence: 'desc' },
-        { updatedAt: 'desc' },
-      ],
-    });
-
-    const bestFactBySymbol = new Map<string, any>();
-    for (const fact of movementFacts) {
-      const symbol = String(fact.symbol ?? '').trim();
-      if (!symbol || existingSymbols.has(symbol)) {
-        continue;
-      }
-      if (String(fact.exposureType ?? '') !== 'movement_evidence' || !isFactActiveAt(fact, asOf) || !isPositiveMovementFact(fact)) {
-        continue;
-      }
-      const current = bestFactBySymbol.get(symbol);
-      if (!current || Number(fact.confidence ?? 0) > Number(current.confidence ?? 0)) {
-        bestFactBySymbol.set(symbol, fact);
-      }
-    }
-
-    const facts = [...bestFactBySymbol.values()].sort((left, right) => {
-      return Number(right.confidence ?? 0) - Number(left.confidence ?? 0)
-        || String(left.symbol ?? '').localeCompare(String(right.symbol ?? ''));
-    });
-    const symbols = facts.map(fact => String(fact.symbol).trim());
-    const stockInfoMap = await this.loadStockInfoMap(prisma, clusterKey, asOf, symbols);
-    const marketSignalMap = await this.loadLatestMarketSignals(prisma, clusterKey, asOf, symbols);
-    const lowestEvidenceScore = Math.min(...existingCandidates.map(candidate => candidate.score));
-    const supplementalScoreCeiling = Number.isFinite(lowestEvidenceScore)
-      ? Math.max(1, lowestEvidenceScore - 0.1)
-      : 10;
-
-    return facts.map((fact, index) => {
-      const symbol = String(fact.symbol).trim();
-      const marketSignal = marketSignalMap.get(symbol);
-      const boardName = resolveMovementBoardName(fact);
-      const info = stockInfoMap.get(symbol);
-      const industry = info?.industry && info.industry !== '未归类'
-        ? info.industry
-        : boardName;
-      const stockName = resolveMovementStockName(fact);
-      const rawFields = getMovementRawFields(fact);
-      const rawChangePct = Number(rawFields['涨跌幅']);
-      const score = Math.max(1, supplementalScoreCeiling - index * 0.001);
-      return {
-        symbol,
-        stockName: stockName || info?.name || `股票-${symbol}`,
-        industry,
-        score,
-        matchedSignals: [String(fact.keyword ?? '大笔买入'), boardName, industry].filter(Boolean),
-        matchedBoards: [boardName],
-        reasons: [
-          `真实异动证据补充：${String(fact.keyword ?? '大笔买入')}`,
-          `板块异动：${boardName}`,
-          marketSignal?.latestClose != null ? `最新收盘价 ${marketSignal.latestClose.toFixed(2)}` : '缺少最新收盘价，保留为低优先级候选',
-        ],
-        latestClose: marketSignal?.latestClose ?? null,
-        scoreBreakdown: {
-          keywordFrequencyScore: 0,
-          temperatureScore: 0,
-          relationshipConfidenceScore: 0,
-          boardMatchScore: 0,
-          weakSignalBonus: 0,
-          coverageBonus: 0,
-          evidenceScore: 0,
-          graphScore: 0,
-          exposurePrecisionScore: Number(fact.confidence ?? 0) * 15,
-          marketSignalScore: Number.isFinite(rawChangePct) ? Math.max(0, Math.min(20, Math.abs(rawChangePct))) : 0,
-          totalScoreScale: '0-100',
-          marketSignal: {
-            source: 'movement_evidence',
-            keyword: String(fact.keyword ?? ''),
-            boardName,
-            latestClose: marketSignal?.latestClose ?? null,
-            latestTradingDay: marketSignal?.latestTradingDay ?? null,
-            momentum5dPct: marketSignal?.momentum5dPct ?? null,
-            rawChangePct: Number.isFinite(rawChangePct) ? rawChangePct : null,
-          },
-          primarySignalType: String(fact.keyword ?? '大笔买入'),
-          selectionSignalType: boardName,
-          exposureFactId: String(fact.id ?? ''),
-          supplementalSource: 'movement_evidence',
-        },
-      };
-    });
-  }
-
   private async loadContributionSignals(
     prisma: any,
     traceId: string,
@@ -1254,10 +1106,17 @@ export class TempRecommendationSelector {
     const excludedByTodayDrop = priceEligibleRecommendations.length - todayDropEligibleRecommendations.length;
     const qualityEligibleRecommendations = todayDropEligibleRecommendations.filter(isRecommendationQualityEligible);
     const excludedByQualityGate = todayDropEligibleRecommendations.length - qualityEligibleRecommendations.length;
-    const previousStockEligibleRecommendations = qualityEligibleRecommendations;
-    const excludedByPreviousDayStock = 0;
-    const eligibleRecommendations = previousStockEligibleRecommendations;
-    const excludedByPreviousDayKeyword = 0;
+    const previousDayStockSymbols = _cooldownExclusions.previousDayStockSymbols;
+    const previousDayKeywords = _cooldownExclusions.previousDayKeywords;
+    const previousStockEligibleRecommendations = qualityEligibleRecommendations.filter(
+      recommendation => !previousDayStockSymbols.has(recommendation.symbol.trim()),
+    );
+    const excludedByPreviousDayStock = qualityEligibleRecommendations.length - previousStockEligibleRecommendations.length;
+    const keywordEligibleRecommendations = previousStockEligibleRecommendations.filter(
+      recommendation => !hasCooldownKeyword(recommendation, previousDayKeywords),
+    );
+    const excludedByPreviousDayKeyword = previousStockEligibleRecommendations.length - keywordEligibleRecommendations.length;
+    const eligibleRecommendations = keywordEligibleRecommendations;
     const signalTypeCounts = new Map<string, number>();
     const topDiversityIndustries = new Set<string>();
     const effectiveTopDiversity = Math.max(0, Math.min(topDiversityCount, limit));
@@ -1319,9 +1178,9 @@ export class TempRecommendationSelector {
     const uniqueSignalTypes = new Set(
       eligibleRecommendations.map(resolveRecommendationSignalType),
     ).size;
-    const supplementalCandidateCount = eligibleRecommendations.filter(isSupplementalRecommendation).length;
-    const supplementalSelectedCount = selected.filter(isSupplementalRecommendation).length;
-    const evidenceCandidateCount = eligibleRecommendations.length - supplementalCandidateCount;
+    const supplementalCandidateCount = 0;
+    const supplementalSelectedCount = 0;
+    const evidenceCandidateCount = eligibleRecommendations.length;
     const diagnostics = {
       evidenceCandidateCount,
       selectedCount: selected.length,

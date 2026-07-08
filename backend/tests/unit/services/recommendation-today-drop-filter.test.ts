@@ -72,7 +72,15 @@ const buildQualityRec = (
     graphScore: input.graphScore ?? 5,
     exposurePrecisionScore: input.exposurePrecisionScore ?? 8,
     marketSignalScore: input.marketSignalScore ?? 10,
-    marketSignal: input.marketSignal ?? { staleTradingDays: 0, volumeRatio20d: 1, breakout20d: false },
+    marketSignal: input.marketSignal ?? {
+      staleTradingDays: 0,
+      volumeRatio20d: 1,
+      breakout20d: false,
+      momentum5dPct: 0,
+      momentum20dPct: 0,
+      latestTradingDay: '2026-07-07',
+      latestMarketTradingDay: '2026-07-07',
+    },
   },
 });
 

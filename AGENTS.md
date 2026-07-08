@@ -166,3 +166,33 @@ docker compose down
 - 严禁对包含动态内容的容器卡片硬编码固定高度（如 `h-[150px]`、`h-[174px]`）。这类卡片必须使用弹性高度或自适应高度（如 `h-auto`、`min-h-[xxxpx]`）。
 - 工作台堆叠布局规范：若侧边栏或主栏底部组件为带滚动条的弹性区域（如带有 `ScrollArea` 且设为 `flex-1 min-h-0`），则其上方所有普通卡片组件必须设为 `h-auto shrink-0` 弹性高度，使其根据内容自动撑开，严禁设死固定高度。
 - 动态文本应具备折行容错性。如果对行数有限制，请显式采用 `line-clamp-x` 或 `truncate` 进行防御性限高截断，避免超出父容器边界。
+
+<!-- ASTRYX:START -->
+Astryx v0.1.3 · 90+ components
+CLI: run every command as `pnpm exec astryx <cmd>` (shown below as `astryx ...`).
+
+SETUP (once, in your app entry e.g. main.tsx) — without these, components render unstyled:
+  import "@astryxdesign/core/reset.css";
+  import "@astryxdesign/core/astryx.css";
+
+WORKFLOW — discover, don't guess. Before writing UI:
+1. `astryx build "<idea>"` — START HERE: returns a kit (closest [page] + [block]s + [component]s). No args = full playbook.
+2. `astryx template <name> [--skeleton]` — scaffold the [page]/[block]s it named, or study their layout. Templates are reference code.
+3. `astryx component <Name>` — props + examples for every component you use.
+
+RULES:
+- No <div> — components do all layout/spacing. Full page → AppShell; sidebar nav → SideNav.
+- Frame first: pick the shell (AppShell / Layout+LayoutPanel) and budget regions in px BEFORE writing content (`astryx docs layout`).
+- Dense data = rows (Table, List/Item) edge-to-edge — never Card-wrapped list items. Card = dashboard widgets, galleries, settings groups only.
+- Status → StatusDot/Token; Badge only for counts and enumerated states, never decoration.
+- Custom styling: component props first; else style/className with tokens — var(--color-*|--spacing-*|--radius-*). No raw hex/px. (No StyleX/Tailwind compiler here — don't use xstyle/utility classes.)
+- Tokens for every value (`astryx docs tokens`). Brand/accent via `astryx theme` — never override --color-* in :root.
+
+MORE CLI:
+  search "<query>"   find any component / hook / doc / template / block
+  component --list   90+ components by category
+  template --list    page + block recipes
+  docs <topic>       color, elevation, icons, illustrations, layout, migration, motion, principles, shape, spacing, styling, theme, tokens, typography
+  swizzle <Name>     eject component source for deep customization
+  upgrade --apply    run after any @astryxdesign/core bump
+<!-- ASTRYX:END -->

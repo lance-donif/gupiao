@@ -622,8 +622,8 @@ const runFromForecastMode = async (
     activeStep = 'candle_preflight_check';
     const candleCheckRows = await runQuery(pgClient, {
       label: 'latest_candle',
-      sql: 'SELECT max("tradingDay") AS latest FROM "Candle"',
-      values: [],
+      sql: 'SELECT max(c."tradingDay") AS latest FROM "Candle" c JOIN "Stock" s ON c."stockId" = s.id WHERE s."clusterKey" = $1',
+      values: [clusterKey],
     });
     const latestCandleRaw = candleCheckRows[0]?.latest;
     const latestCandleDay = latestCandleRaw instanceof Date
@@ -1298,8 +1298,8 @@ async function main(): Promise<void> {
     activeStep = 'candle_preflight_check';
     const candleCheckRows = await runQuery(pgClient, {
       label: 'latest_candle',
-      sql: 'SELECT max("tradingDay") AS latest FROM "Candle"',
-      values: [],
+      sql: 'SELECT max(c."tradingDay") AS latest FROM "Candle" c JOIN "Stock" s ON c."stockId" = s.id WHERE s."clusterKey" = $1',
+      values: [clusterKey],
     });
     const latestCandleRaw = candleCheckRows[0]?.latest;
     const latestCandleDay = latestCandleRaw instanceof Date

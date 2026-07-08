@@ -104,15 +104,15 @@ const addExposure = (
     boardMatchScore: 8,
     weakSignalBonus: 2,
     aggregatedScore: input.score,
-    reasons: input.momentum5dPct === undefined
-      ? []
-      : [
-          `marketSignal=${JSON.stringify({
-            score: 10,
-            latestTradingDay: '2026-05-22',
-            momentum5dPct: input.momentum5dPct,
-          })}`,
-        ],
+    reasons: [
+      `marketSignal=${JSON.stringify({
+        score: 10,
+        latestTradingDay: '2026-05-22',
+        latestMarketTradingDay: '2026-05-22',
+        momentum5dPct: input.momentum5dPct ?? 0,
+        momentum20dPct: 0,
+      })}`,
+    ],
   });
 
   if (input.hasEvidence ?? true) {

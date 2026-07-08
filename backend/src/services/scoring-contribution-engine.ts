@@ -827,7 +827,7 @@ export const calculateMarketSignalScore = (
     : 0;
   const breakout20d = previous20High > 0 && latestClose >= previous20High;
 
-  const recent5Ranges = candles.slice(Math.max(0, candles.length - 5)).map((candle) => {
+  const recent5Ranges = candles.slice(Math.max(0, candles.length - 6)).map((candle) => {
     const close = toNumber(candle.close);
     return close > 0 ? (toNumber(candle.high) - toNumber(candle.low)) / close : 0;
   }).filter(value => value > 0);

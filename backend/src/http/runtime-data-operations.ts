@@ -1125,6 +1125,10 @@ interface IDailyRecommendationSpawnArgsInput {
   readonly env?: NodeJS.ProcessEnv | Readonly<Record<string, string | undefined>>;
 }
 
+const VALID_CLUSTER_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/u;
+const VALID_TRACE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/u;
+const VALID_AS_OF_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?([+-]\d{2}:\d{2}|Z)$/u;
+
 const parseRequiredPositiveIntegerEnv = (
   env: NodeJS.ProcessEnv | Readonly<Record<string, string | undefined>>,
   name: 'AKTOOLS_BOARD_LIMIT' | 'AKTOOLS_SYMBOL_LIMIT',
@@ -1137,7 +1141,23 @@ const parseRequiredPositiveIntegerEnv = (
   return raw;
 };
 
+const validateSpawnInput = (input: IDailyRecommendationSpawnArgsInput): void => {
+  if (!input.scriptPath || input.scriptPath.includes('\u0000') || /[|;&$`\\]/u.test(input.scriptPath)) {
+    throw new Error('Invalid scriptPath for daily recommendation spawn');
+  }
+  if (!VALID_CLUSTER_KEY_PATTERN.test(input.clusterKey)) {
+    throw new Error(`Invalid clusterKey for daily recommendation spawn: ${input.clusterKey}`);
+  }
+  if (!VALID_AS_OF_PATTERN.test(input.asOf) || Number.isNaN(new Date(input.asOf).getTime())) {
+    throw new Error(`Invalid asOf for daily recommendation spawn: ${input.asOf}`);
+  }
+  if (!VALID_TRACE_ID_PATTERN.test(input.traceId)) {
+    throw new Error(`Invalid traceId for daily recommendation spawn: ${input.traceId}`);
+  }
+};
+
 export const buildDailyRecommendationSpawnArgs = (input: IDailyRecommendationSpawnArgsInput): readonly string[] => {
+  validateSpawnInput(input);
   const env = input.env ?? process.env;
   const boardLimit = parseRequiredPositiveIntegerEnv(env, 'AKTOOLS_BOARD_LIMIT');
   const symbolLimit = parseRequiredPositiveIntegerEnv(env, 'AKTOOLS_SYMBOL_LIMIT');
