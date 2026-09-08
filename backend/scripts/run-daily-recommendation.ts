@@ -1,3 +1,5 @@
+import { PipelineRunLease } from '../src/services/pipeline-run-lease.js';
+import { checkpointWork } from '../src/services/pipeline-checkpoint.js';
 import { pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -7,8 +9,10 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import pg from 'pg';
 
 import { BacktestEngine } from '../src/services/backtest-engine.js';
+import { AiWorkflowSession, DurableCausalExtractionService, readAiCheckpoint, type AiPipelineCheckpoint } from '../src/services/ai-causal-workflow.js';
+import { AiPausedError, AiNeedsAttentionError } from '../src/services/ai-scheduling-errors.js';
+import { loadAiProviderConfig } from '../src/services/ai-provider-config.js';
 import {
-  CausalSignalExtractionService,
   createCausalSignalExtractorFromEnv,
 } from '../src/services/causal-signal-extraction-service.js';
 import { AkToolsStockExposureService } from '../src/services/aktools-stock-exposure-service.js';
@@ -26,7 +30,6 @@ import {
 import { loadBackendEnv } from '../src/services/load-backend-env.js';
 import { createTickFlowStockExposureServiceFromEnv } from '../src/services/tickflow-stock-exposure-service.js';
 import { TraceManager } from '../src/services/trace-manager.js';
-import { StrategyExperimentRunner } from '../src/services/strategy-runner.js';
 import {
   PipelineStopError,
   getBeijingDateKey,
@@ -51,7 +54,6 @@ const DEFAULT_MAX_PER_INDUSTRY = 5;
 const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
 const DEFAULT_MIN_EXPOSURE_FACTS = process.env.TICKFLOW_API_KEY ? 500 : 100;
 const DEFAULT_TICKFLOW_REFRESH_INTERVAL_DAYS = 30;
-const DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE = 10;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const TICKFLOW_SW_UNIVERSE_SOURCE = 'tickflow_sw_universe';
 
@@ -416,9 +418,16 @@ const persistGraphSnapshot = async (
     causalSignals,
   });
 
-  await prisma.graphSnapshot.create({
-    data: {
+  await prisma.graphSnapshot.upsert({
+    where: { traceId },
+    create: {
       traceId,
+      asOf,
+      clusterKey,
+      nodesJson: result.graph.nodes as unknown as Prisma.InputJsonValue,
+      edgesJson: result.graph.relationships as unknown as Prisma.InputJsonValue,
+    },
+    update: {
       asOf,
       clusterKey,
       nodesJson: result.graph.nodes as unknown as Prisma.InputJsonValue,
@@ -431,6 +440,26 @@ const persistGraphSnapshot = async (
     edgeCount: result.graph.relationships.length,
     causalSignalCount: causalSignals.length,
   };
+};
+
+const readGraphSnapshotSummary = async (
+  prisma: any,
+  traceId: string,
+  clusterKey: string,
+): Promise<{ nodeCount: number; edgeCount: number; causalSignalCount: number } | null> => {
+  if (!prisma.graphSnapshot?.findUnique || !prisma.causalSignalCandidate?.count) {
+    return null;
+  }
+  const graph = await prisma.graphSnapshot.findUnique({ where: { traceId } });
+  if (!graph || graph.clusterKey !== clusterKey) {
+    return null;
+  }
+  const nodeCount = Array.isArray(graph.nodesJson) ? graph.nodesJson.length : 0;
+  const edgeCount = Array.isArray(graph.edgesJson) ? graph.edgesJson.length : 0;
+  const causalSignalCount = await prisma.causalSignalCandidate.count({
+    where: { traceId, clusterKey, status: 'candidate' },
+  });
+  return { nodeCount, edgeCount, causalSignalCount };
 };
 
 const runQuery = async (client: pg.Client, query: IDiagnosticQuery): Promise<readonly Record<string, unknown>[]> => {
@@ -658,13 +687,13 @@ const runFromForecastMode = async (
           '  id, "traceId", "asOf", "clusterKey", "newsId", event, "businessVariable",',
           '  "assetOrThemeKeyword", direction, confidence, "evidenceText",',
           '  "evidenceOffsetStart", "evidenceOffsetEnd", "extractorType", "modelVersion",',
-          '  "promptVersion", status, "failureReason", "createdAt", "updatedAt"',
+          '  "promptVersion", "inputFingerprint", status, "failureReason", "createdAt", "updatedAt"',
           ')',
           'SELECT',
           '  gen_random_uuid(), $1, "asOf", "clusterKey", "newsId", event, "businessVariable",',
           '  "assetOrThemeKeyword", direction, confidence, "evidenceText",',
           '  "evidenceOffsetStart", "evidenceOffsetEnd", "extractorType", "modelVersion",',
-          '  "promptVersion", status, "failureReason", NOW(), NOW()',
+          '  "promptVersion", "inputFingerprint", status, "failureReason", NOW(), NOW()',
           'FROM "CausalSignalCandidate"',
           'WHERE "traceId" = $2 AND status = \'candidate\'',
         ].join(' '),
@@ -815,13 +844,13 @@ const runFromForecastMode = async (
   }
 };
 
-async function main(): Promise<void> {
-  const args = parseArgs();
-  const clusterKey = args.cluster ?? DEFAULT_CLUSTER_KEY;
-  const asOf = getAsOf(args['as-of']);
-  const traceId = args['trace-id'] ?? createTraceId(asOf, clusterKey);
-  const limit = Number(args.limit ?? DEFAULT_LIMIT);
-  const maxPerIndustry = Number(args['max-per-industry'] ?? DEFAULT_MAX_PER_INDUSTRY);
+async function executeMain(args: Record<string, string>, runLease: PipelineRunLease): Promise<void> {
+  const runStartedAt = Date.now();
+  let clusterKey = args.cluster ?? DEFAULT_CLUSTER_KEY;
+  let asOf = getAsOf(args['as-of']);
+  const traceId = args['resume-trace-id'] ?? args['trace-id'] ?? createTraceId(asOf, clusterKey);
+  let limit = Number(args.limit ?? DEFAULT_LIMIT);
+  let maxPerIndustry = Number(args['max-per-industry'] ?? DEFAULT_MAX_PER_INDUSTRY);
   const minExposureFacts = Number(args['min-exposure-facts'] ?? DEFAULT_MIN_EXPOSURE_FACTS);
   const tickFlowRefreshIntervalDays = getOptionalPositiveInteger(
     args,
@@ -829,13 +858,25 @@ async function main(): Promise<void> {
     'TICKFLOW_REFRESH_DAYS',
     DEFAULT_TICKFLOW_REFRESH_INTERVAL_DAYS,
   );
-  const causalSignalBatchSize = Number(args['causal-signal-batch-size'] ?? process.env.CAUSAL_SIGNAL_BATCH_SIZE ?? DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE);
-  const causalSignalConcurrency = Number(args['causal-signal-concurrency'] ?? process.env.CAUSAL_SIGNAL_CONCURRENCY ?? 20);
   const stopAfter = getStopAfter(args['stop-after']);
-  const prisma = new PrismaClient({
-    adapter: new PrismaPg({ connectionString: DATABASE_URL }),
-  });
+  const database = new PrismaClient({ adapter: new PrismaPg({ connectionString: DATABASE_URL }) });
+  const prisma = database.$extends({ query: { $allOperations: async ({ args: queryArgs, query }) => {
+    runLease.assertActive();
+    const result = await query(queryArgs);
+    runLease.assertActive();
+    return result;
+  } } }) as unknown as PrismaClient;
 
+  const resumed = args['resume-trace-id'] ? await readAiCheckpoint(prisma, traceId) : undefined;
+  const successfulStepOutputs = resumed
+    ? await TraceManager.getSuccessfulStepOutputs(prisma, traceId)
+    : new Map<string, Record<string, unknown>>();
+  if (resumed) {
+    if ((args['as-of'] && getAsOf(args['as-of']).getTime() !== new Date(resumed.asOf).getTime()) || (args.cluster && args.cluster !== resumed.clusterKey)) throw new Error('Resume must retain the checkpoint asOf and cluster');
+    asOf = new Date(resumed.asOf); clusterKey = resumed.clusterKey; limit = resumed.limit; maxPerIndustry = resumed.maxPerIndustry;
+  }
+  await checkpointWork(prisma,traceId,'identity',{asOf,clusterKey,limit,maxPerIndustry},async()=>({asOf:asOf.toISOString(),clusterKey,limit,maxPerIndustry}));
+  let aiSession: AiWorkflowSession | undefined;
   if (args['publish-only'] === 'true') {
     try {
       console.log(JSON.stringify(await publishLatestSnapshot(prisma, {
@@ -886,11 +927,27 @@ async function main(): Promise<void> {
   };
 
   try {
-    await TraceManager.startRunTrace(prisma, traceId, clusterKey, stopAfter === 'none' ? 'DAILY_RECOMMENDATION' : 'NEWS_INGEST', asOf);
-    runTraceStarted = true;
+    if (!resumed) {
+      await TraceManager.startRunTrace(prisma, traceId, clusterKey, stopAfter === 'none' ? 'DAILY_RECOMMENDATION' : 'NEWS_INGEST', asOf);
+      runTraceStarted = true;
+    }
+    else {
+      const existingTrace = await prisma.runTrace.findUnique({ where: { traceId } });
+      if (existingTrace?.status === 'SUCCESS') {
+        console.log(JSON.stringify({ traceId, status: 'SUCCESS', resumed: false, message: '推荐已完成；未重复执行。' }, null, 2));
+        return;
+      }
+      await prisma.runTrace.update({
+        where: { traceId },
+        data: { status: 'PENDING', errorMessage: null, completedAt: null },
+      });
+      runTraceStarted = true;
+    }
 
-    activeStep = 'news_fetch';
     let stepStartedAt = markStepStart();
+    const prepare = async (): Promise<AiPipelineCheckpoint | undefined> => {
+    activeStep = 'news_fetch';
+    stepStartedAt = markStepStart();
     await TraceManager.startStepTrace(prisma, traceId, 'news_fetch', {
       clusterKey,
       asOf: asOf.toISOString(),
@@ -898,7 +955,8 @@ async function main(): Promise<void> {
       optionalSources: ['sina-finance-roll', 'sina-rss', 'google-news-rss'],
       newsSourceMode: getNewsSourceMode(args),
     });
-    const newsInput = await resolveNewsInput(prisma, args, traceId, clusterKey, asOf);
+    const savedNewsInput = await checkpointWork(prisma, traceId, 'news_input', {asOf,clusterKey,version:1}, () => resolveNewsInput(prisma, args, traceId, clusterKey, asOf));
+    const newsInput = {...savedNewsInput, articles:savedNewsInput.articles.map(article=>({...article,publishedAt:new Date(article.publishedAt)}))};
     markStepEnd('news_fetch', stepStartedAt);
     const articles = newsInput.articles;
     if (articles.length === 0) {
@@ -1061,7 +1119,7 @@ async function main(): Promise<void> {
         ...metrics,
         diagnostics: diagnosticResults,
       }, null, 2));
-      return;
+      return undefined;
     }
 
 
@@ -1078,7 +1136,7 @@ async function main(): Promise<void> {
       symbolLimit: aktoolsSymbolLimit,
     });
     const stockNameBySymbol = await createStockNameMap(prisma, clusterKey);
-    const aktoolsExposureResult = await new AkToolsStockExposureService({
+    const aktoolsExposureResult = await checkpointWork(prisma,traceId,'aktools_exposure',{asOf,clusterKey,aktoolsBoardLimit,aktoolsSymbolLimit},()=>new AkToolsStockExposureService({
       baseUrl: DEFAULT_AKTOOLS_BASE_URL,
     }).sync(prisma, {
       traceId,
@@ -1087,7 +1145,7 @@ async function main(): Promise<void> {
       stockNameBySymbol,
       boardLimit: aktoolsBoardLimit,
       symbolLimit: aktoolsSymbolLimit,
-    });
+    }));
     markStepEnd('stock_exposure_aktools', stepStartedAt);
     await TraceManager.completeStepTrace(prisma, traceId, 'stock_exposure_aktools', {
       ...aktoolsExposureResult,
@@ -1110,7 +1168,7 @@ async function main(): Promise<void> {
     const {
       syncResult: tickflowExposureResult,
       exposureResult,
-    } = await syncAndVerifyStockExposureFacts({
+    } = await checkpointWork(prisma,traceId,'tickflow_exposure',{asOf,clusterKey,minExposureFacts,tickFlowRefreshIntervalDays},()=>syncAndVerifyStockExposureFacts({
       prisma,
       traceId,
       clusterKey,
@@ -1119,7 +1177,7 @@ async function main(): Promise<void> {
       tickFlowRefreshIntervalDays,
       stockNameBySymbol,
       syncService: createTickFlowStockExposureServiceFromEnv(),
-    });
+    }));
     markStepEnd('stock_exposure_tickflow', stepStartedAt);
     if (exposureResult.factCount < minExposureFacts) {
       throw new PipelineStopError(
@@ -1136,163 +1194,162 @@ async function main(): Promise<void> {
     });
     activeStep = null;
 
-    activeStep = 'causal_signal_extraction';
-    let causalSignalResult: any = null;
-    const maxStepRetries = 3;
-    const stepRetryDelayMs = 5 * 60 * 1000; // 5 minutes
-
-    for (let attempt = 1; attempt <= maxStepRetries; attempt++) {
-      if (attempt > 1) {
-        // Clean up previous attempt's step trace row to avoid compound primary key constraint violation
-        try {
-          await prisma.pipelineStepTrace.delete({
-            where: {
-              traceId_stepName: {
-                traceId,
-                stepName: 'causal_signal_extraction',
-              },
-            },
-          });
-        } catch {}
-      }
-
-      stepStartedAt = markStepStart();
-      const causalExtractionCandidates = filterCausalExtractionCandidates(visibleCandidates);
-      if (causalExtractionCandidates.length === 0) {
-        throw new PipelineStopError('causal_signal_extraction', '没有命中经营变量/资产主题关键词的新闻，严格单向流程停止');
-      }
+      return {asOf:asOf.toISOString(),clusterKey,limit,maxPerIndustry,newsInput:{sourceMode:newsInput.sourceMode,sourceSummary:newsInput.sourceSummary},articleCount:articles.length,normalizedCount:normalizationReport.processed.length,visibleCandidates:[...visibleCandidates],newsQualityResult,aktoolsExposureResult,tickflowExposureResult,exposureResult:{...exposureResult},stepTimings};
+    };
+    const checkpoint = resumed?.exposureResult ? resumed : await checkpointWork(prisma,traceId,'prepared',{asOf,clusterKey,limit,maxPerIndustry},prepare);
+    if (!checkpoint) return;
+    Object.assign(stepTimings, checkpoint.stepTimings);
+    const {newsInput,newsQualityResult,aktoolsExposureResult,tickflowExposureResult,exposureResult}=checkpoint;
+    const visibleCandidates = checkpoint.visibleCandidates.map(candidate=>({...candidate,publishedAt:new Date(candidate.publishedAt)})) as INormalizedNewsCandidate[];
+    const causalExtractionCandidates=filterCausalExtractionCandidates(visibleCandidates);
+    if (!causalExtractionCandidates.length) throw new PipelineStopError('causal_signal_extraction','没有命中经营变量/资产主题关键词的新闻');
+    let causalSignalResult: Record<string, any>;
+    {
+      activeStep = 'causal_signal_extraction';
+      stepStartedAt=markStepStart();
+      const aiConfig = loadAiProviderConfig();
+      aiSession=new AiWorkflowSession(prisma,traceId,runStartedAt+(aiConfig.scheduling?.runTimeoutMs ?? 3600000));
+      await aiSession.start(checkpoint);
       await TraceManager.startStepTrace(prisma, traceId, 'causal_signal_extraction', {
+        llmInputCandidates: causalExtractionCandidates.length,
+        durable: true,
+      });
+      causalSignalResult=await new DurableCausalExtractionService(createCausalSignalExtractorFromEnv(),aiSession,aiConfig).execute(prisma,{
+        traceId,asOf,clusterKey,news:causalExtractionCandidates.map(candidate=>({id:candidate.id,title:candidate.title,content:candidate.content,source:candidate.source,publishedAt:candidate.publishedAt,reprintWeight:candidate.reprintWeight})),
+      });
+      if (!causalSignalResult.candidateCount) throw new PipelineStopError('causal_signal_extraction','AI/结构化因果候选为空，严格单向流程停止');
+      markStepEnd('causal_signal_extraction',stepStartedAt);
+      await TraceManager.completeStepTrace(prisma,traceId,'causal_signal_extraction',causalSignalResult);
+      aiSession.controller.signal.throwIfAborted();
+      // No downstream stage requires the AI lease.  Release it immediately so
+      // a later scoring failure can resume without holding an AI workflow lock.
+      await aiSession.close('AI_COMPLETE');
+      aiSession=undefined;
+      activeStep=null;
+    }
+
+    let graph = successfulStepOutputs.has('graph_snapshot')
+      ? await readGraphSnapshotSummary(prisma, traceId, clusterKey)
+      : null;
+    if (graph) {
+      console.log(`[pipeline] reusing graph_snapshot trace=${traceId}`);
+    }
+    else {
+      activeStep = 'graph_snapshot';
+      stepStartedAt = markStepStart();
+      await TraceManager.startStepTrace(prisma, traceId, 'graph_snapshot', {
         clusterKey,
         asOf: asOf.toISOString(),
-        extractor: process.env.CAUSAL_SIGNAL_EXTRACTOR ?? null,
-        noImplicitFallback: true,
-        visibleCandidates: visibleCandidates.length,
-        llmInputCandidates: causalExtractionCandidates.length,
-        batchSize: causalSignalBatchSize,
-        concurrency: causalSignalConcurrency,
-        retryAttempt: attempt,
+        causalSignalCandidates: causalSignalResult.candidateCount,
       });
-
-      try {
-        causalSignalResult = await new CausalSignalExtractionService(createCausalSignalExtractorFromEnv()).execute(prisma, {
-          traceId,
-          asOf,
-          clusterKey,
-          news: causalExtractionCandidates.map(candidate => ({
-            id: candidate.id,
-            title: candidate.title,
-            content: candidate.content,
-            source: candidate.source,
-            publishedAt: candidate.publishedAt,
-            reprintWeight: candidate.reprintWeight,
-          })),
-          batchSize: Number.isFinite(causalSignalBatchSize) ? causalSignalBatchSize : DEFAULT_CAUSAL_SIGNAL_BATCH_SIZE,
-          concurrency: Number.isFinite(causalSignalConcurrency) ? causalSignalConcurrency : 20,
-          onBatchComplete: event => console.log(
-            `[causal_signal_extraction] batch ${event.batchIndex}/${event.batchCount} size=${event.batchSize} elapsedMs=${event.elapsedMs} signalCount=${event.signalCount}`,
-          ),
-        });
-        if (causalSignalResult.candidateCount === 0) {
-          throw new PipelineStopError('causal_signal_extraction', 'AI/结构化因果候选为空，严格单向流程停止');
-        }
-        markStepEnd('causal_signal_extraction', stepStartedAt);
-        await TraceManager.completeStepTrace(prisma, traceId, 'causal_signal_extraction', causalSignalResult);
-        break;
-      } catch (error) {
-        if (error instanceof PipelineStopError) {
-          throw error;
-        }
-        console.error(`[causal_signal_extraction] Attempt ${attempt} failed: ${error instanceof Error ? error.message : String(error)}`);
-
-        try {
-          await TraceManager.failStepTrace(prisma, traceId, 'causal_signal_extraction', error instanceof Error ? error.message : String(error));
-        } catch {}
-
-        if (attempt === maxStepRetries) {
-          throw error;
-        }
-        console.log(`[causal_signal_extraction] Waiting ${stepRetryDelayMs / 1000}s before retrying...`);
-        await new Promise(resolve => setTimeout(resolve, stepRetryDelayMs));
-      }
+      graph = await persistGraphSnapshot(prisma, traceId, asOf, clusterKey, visibleCandidates);
+      markStepEnd('graph_snapshot', stepStartedAt);
+      await TraceManager.completeStepTrace(prisma, traceId, 'graph_snapshot', {
+        ...graph,
+        elapsedMs: stepTimings.graph_snapshot,
+      });
+      activeStep = null;
     }
-    activeStep = null;
+    if (!graph) {
+      throw new Error('graph_snapshot completed without a durable graph artifact');
+    }
 
-    activeStep = 'graph_snapshot';
-    stepStartedAt = markStepStart();
-    const graph = await persistGraphSnapshot(prisma, traceId, asOf, clusterKey, visibleCandidates);
-    markStepEnd('graph_snapshot', stepStartedAt);
-    activeStep = null;
+    const completedExpectationGap = successfulStepOutputs.get('expectation_gap');
+    let expectationGapResult: any;
+    if (completedExpectationGap) {
+      expectationGapResult = completedExpectationGap;
+      console.log(`[pipeline] reusing expectation_gap trace=${traceId}`);
+    }
+    else {
+      activeStep = 'expectation_gap';
+      stepStartedAt = markStepStart();
+      await TraceManager.startStepTrace(prisma, traceId, 'expectation_gap', {
+        clusterKey,
+        asOf: asOf.toISOString(),
+        description: '弱信号/预期差：图谱强度 vs 股价5日反应',
+      });
+      expectationGapResult = await new ExpectationGapService().calculate(prisma, {
+        traceId,
+        asOf,
+        clusterKey,
+      });
+      markStepEnd('expectation_gap', stepStartedAt);
+      await TraceManager.completeStepTrace(prisma, traceId, 'expectation_gap', {
+        ...expectationGapResult,
+        weakSignalKeywords: expectationGapResult.topGaps
+          .filter((item: any) => item.isWeakSignal)
+          .map((item: any) => ({ keyword: item.keyword, expectationGap: item.expectationGap, relatedSymbols: item.relatedSymbols.slice(0, 5) })),
+        elapsedMs: stepTimings.expectation_gap,
+      });
+      activeStep = null;
+    }
 
-    activeStep = 'expectation_gap';
-    stepStartedAt = markStepStart();
-    await TraceManager.startStepTrace(prisma, traceId, 'expectation_gap', {
-      clusterKey,
-      asOf: asOf.toISOString(),
-      description: '弱信号/预期差：图谱强度 vs 股价5日反应',
-    });
-    const expectationGapResult = await new ExpectationGapService().calculate(prisma, {
-      traceId,
-      asOf,
-      clusterKey,
-    });
-    markStepEnd('expectation_gap', stepStartedAt);
-    await TraceManager.completeStepTrace(prisma, traceId, 'expectation_gap', {
-      ...expectationGapResult,
-      weakSignalKeywords: expectationGapResult.topGaps
-        .filter(item => item.isWeakSignal)
-        .map(item => ({ keyword: item.keyword, expectationGap: item.expectationGap, relatedSymbols: item.relatedSymbols.slice(0, 5) })),
-      elapsedMs: stepTimings.expectation_gap,
-    });
-    activeStep = null;
+    const completedThemeForecast = successfulStepOutputs.get('theme_forecast');
+    let themeForecastResult: any;
+    let themeReconciliationResult: any;
+    if (completedThemeForecast?.forecast) {
+      themeForecastResult = completedThemeForecast.forecast;
+      themeReconciliationResult = completedThemeForecast.reconciliation ?? {};
+      console.log(`[pipeline] reusing theme_forecast trace=${traceId}`);
+    }
+    else {
+      activeStep = 'theme_forecast';
+      stepStartedAt = markStepStart();
+      await TraceManager.startStepTrace(prisma, traceId, 'theme_forecast', {
+        clusterKey,
+        asOf: asOf.toISOString(),
+        horizon: 5,
+        description: '主题/资产级预测：因果信号 + 预期差 → 未来5日上涨概率',
+      });
+      themeForecastResult = await new ThemeForecastService().generate(prisma, {
+        traceId,
+        asOf,
+        clusterKey,
+      });
+      // 对账历史预测（独立于今日预测，评估过往准确率）
+      themeReconciliationResult = await new ThemeForecastReconciliationService().reconcile(prisma, {
+        asOf,
+        clusterKey,
+      });
+      markStepEnd('theme_forecast', stepStartedAt);
+      await TraceManager.completeStepTrace(prisma, traceId, 'theme_forecast', {
+        forecast: themeForecastResult,
+        reconciliation: themeReconciliationResult,
+        topBullish: themeForecastResult.topForecasts
+          .filter((item: any) => item.direction === 'bullish')
+          .slice(0, 10)
+          .map((item: any) => ({ theme: item.theme, probability: item.probability, relatedSymbols: item.relatedSymbols.slice(0, 5), weakSignal: item.evidenceChain.weakSignal })),
+        elapsedMs: stepTimings.theme_forecast,
+      });
+      activeStep = null;
+    }
 
-    activeStep = 'theme_forecast';
-    stepStartedAt = markStepStart();
-    await TraceManager.startStepTrace(prisma, traceId, 'theme_forecast', {
-      clusterKey,
-      asOf: asOf.toISOString(),
-      horizon: 5,
-      description: '主题/资产级预测：因果信号 + 预期差 → 未来5日上涨概率',
-    });
-    const themeForecastResult = await new ThemeForecastService().generate(prisma, {
-      traceId,
-      asOf,
-      clusterKey,
-    });
-    // 对账历史预测（独立于今日预测，评估过往准确率）
-    const themeReconciliationResult = await new ThemeForecastReconciliationService().reconcile(prisma, {
-      asOf,
-      clusterKey,
-    });
-    markStepEnd('theme_forecast', stepStartedAt);
-    await TraceManager.completeStepTrace(prisma, traceId, 'theme_forecast', {
-      forecast: themeForecastResult,
-      reconciliation: themeReconciliationResult,
-      topBullish: themeForecastResult.topForecasts
-        .filter(item => item.direction === 'bullish')
-        .slice(0, 10)
-        .map(item => ({ theme: item.theme, probability: item.probability, relatedSymbols: item.relatedSymbols.slice(0, 5), weakSignal: item.evidenceChain.weakSignal })),
-      elapsedMs: stepTimings.theme_forecast,
-    });
-    activeStep = null;
-
-    activeStep = 'keyword_performance_penalty_refresh';
-    stepStartedAt = markStepStart();
-    await TraceManager.startStepTrace(prisma, traceId, 'keyword_performance_penalty_refresh', {
-      clusterKey,
-      asOf: asOf.toISOString(),
-      source: 'reconciled_recommendation_snapshot',
-      cooldownDays: 7,
-    });
-    const keywordPerformancePenaltyResult = await new KeywordPerformancePenaltyService().refresh(prisma, {
-      asOf,
-      clusterKey,
-    });
-    markStepEnd('keyword_performance_penalty_refresh', stepStartedAt);
-    await TraceManager.completeStepTrace(prisma, traceId, 'keyword_performance_penalty_refresh', {
-      ...keywordPerformancePenaltyResult,
-      elapsedMs: stepTimings.keyword_performance_penalty_refresh,
-    });
-    activeStep = null;
+    const completedPenalty = successfulStepOutputs.get('keyword_performance_penalty_refresh');
+    let keywordPerformancePenaltyResult: any;
+    if (completedPenalty) {
+      keywordPerformancePenaltyResult = completedPenalty;
+      console.log(`[pipeline] reusing keyword_performance_penalty_refresh trace=${traceId}`);
+    }
+    else {
+      activeStep = 'keyword_performance_penalty_refresh';
+      stepStartedAt = markStepStart();
+      await TraceManager.startStepTrace(prisma, traceId, 'keyword_performance_penalty_refresh', {
+        clusterKey,
+        asOf: asOf.toISOString(),
+        source: 'reconciled_recommendation_snapshot',
+        cooldownDays: 7,
+      });
+      keywordPerformancePenaltyResult = await new KeywordPerformancePenaltyService().refresh(prisma, {
+        asOf,
+        clusterKey,
+      });
+      markStepEnd('keyword_performance_penalty_refresh', stepStartedAt);
+      await TraceManager.completeStepTrace(prisma, traceId, 'keyword_performance_penalty_refresh', {
+        ...keywordPerformancePenaltyResult,
+        elapsedMs: stepTimings.keyword_performance_penalty_refresh,
+      });
+      activeStep = null;
+    }
 
     // Candle 前置校验：评分前确认 Candle 已同步到 asOf 北京日，避免用旧数据评分
     activeStep = 'candle_preflight_check';
@@ -1336,22 +1393,8 @@ async function main(): Promise<void> {
     markStepEnd('scoring_recommendation', stepStartedAt);
     activeStep = null;
 
-    activeStep = 'strategy_experiment';
-    stepStartedAt = markStepStart();
-    await TraceManager.startStepTrace(prisma, traceId, 'strategy_experiment', {
-      traceId,
-      asOf: asOf.toISOString(),
-      clusterKey,
-      enabledMode: 'multi-strategy',
-    });
-    const strategyResult = await new StrategyExperimentRunner().runEnabledStrategies(prisma, {
-      traceId,
-      asOf,
-      clusterKey,
-    });
-    markStepEnd('strategy_experiment', stepStartedAt);
-    await TraceManager.completeStepTrace(prisma, traceId, 'strategy_experiment', strategyResult);
-    activeStep = null;
+    const strategyResult = backtestResult.strategyResult;
+
 
     activeStep = 'autopilot_evaluation';
     stepStartedAt = markStepStart();
@@ -1516,8 +1559,8 @@ async function main(): Promise<void> {
     await TraceManager.completeRunTrace(prisma, traceId, {
       sourceMode: newsInput.sourceMode,
       sourceSummary: newsInput.sourceSummary,
-      rawArticles: articles.length,
-      normalizedCandidates: normalizationReport.processed.length,
+      rawArticles: checkpoint.articleCount,
+      normalizedCandidates: checkpoint.normalizedCount,
       visibleCandidates: visibleCandidates.length,
       reprintGroups: countReprintGroups(visibleCandidates),
       reprintPenalized: countReprintPenalized(visibleCandidates),
@@ -1555,8 +1598,8 @@ async function main(): Promise<void> {
       sourceMode: newsInput.sourceMode,
       sourceSummary: newsInput.sourceSummary,
       stages: {
-        rawArticles: articles.length,
-        normalizedCandidates: normalizationReport.processed.length,
+        rawArticles: checkpoint.articleCount,
+        normalizedCandidates: checkpoint.normalizedCount,
         visibleCandidates: visibleCandidates.length,
         graphNodes: graph.nodeCount,
         graphEdges: graph.edgeCount,
@@ -1577,6 +1620,14 @@ async function main(): Promise<void> {
   }
   catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const resumable=error instanceof AiPausedError || error instanceof AiNeedsAttentionError;
+    const status=error instanceof AiPausedError?'PAUSED':error instanceof AiNeedsAttentionError?'NEEDS_ATTENTION':'FAILED';
+    if(aiSession) await aiSession.close(status).catch(()=>undefined);
+    if(resumable && runTraceStarted) {
+      await prisma.runTrace.update({where:{traceId},data:{status,errorMessage:message,completedAt:null}});
+      if(activeStep) await prisma.pipelineStepTrace.updateMany({where:{traceId,stepName:activeStep},data:{status,errorMessage:message,endedAt:null}});
+      throw error;
+    }
     if (runTraceStarted) {
       if (activeStep) {
         try {
@@ -1595,6 +1646,15 @@ async function main(): Promise<void> {
     await pgClient.end();
     await prisma.$disconnect();
   }
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs();
+  args['trace-id'] = args['resume-trace-id'] ?? args['trace-id'] ?? createTraceId(getAsOf(args['as-of']), args.cluster ?? DEFAULT_CLUSTER_KEY);
+  const lease = new PipelineRunLease(DATABASE_URL, args['trace-id']);
+  await lease.start(3600000);
+  try { await executeMain(args, lease); }
+  finally { await lease.close(); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

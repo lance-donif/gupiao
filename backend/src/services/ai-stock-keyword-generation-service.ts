@@ -1,6 +1,5 @@
-import { fetchWithRetry } from './ai-client-utils.js';
-import { extractJsonObject } from '../lib/openai-utils.js';
-import { normalizeBaseUrl } from '../lib/url-utils.js';
+import { AiChatClient, AiInputError, AiCandidatesExhaustedError, createAiOptionsFromEnv, type IAiSource } from './ai-chat-client.js';
+import { isAiRecord } from './ai-provider-config.js';
 
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_MAX_REQUEST_CHARS = 240000;
@@ -40,22 +39,8 @@ interface IAiStockKeywordDraft {
 }
 
 interface IAiStockKeywordPayload {
+  readonly aiSource?: IAiSource;
   readonly stocks?: readonly IAiStockKeywordDraft[];
-}
-
-interface IOpenAiCompatibleMessage {
-  readonly role: 'system' | 'user';
-  readonly content: string;
-}
-
-interface IOpenAiCompatibleChoice {
-  readonly message?: {
-    readonly content?: unknown;
-  };
-}
-
-interface IOpenAiCompatibleResponse {
-  readonly choices?: readonly IOpenAiCompatibleChoice[];
 }
 
 interface IAiStockKeywordRequestInput {
@@ -71,6 +56,8 @@ interface IAiStockKeywordRequester {
 }
 
 interface IOpenAiCompatibleStockKeywordRequesterOptions {
+  readonly client?: AiChatClient;
+  readonly fetchImpl?: typeof fetch;
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly model: string;
@@ -165,66 +152,39 @@ const countByExposureType = (rows: readonly IValidatedKeywordRow[]): Record<stri
 export class OpenAiCompatibleStockKeywordRequester implements IAiStockKeywordRequester {
   public readonly model: string;
 
-  private readonly baseUrl: string;
+  private readonly client: AiChatClient;
 
   public constructor(private readonly options: IOpenAiCompatibleStockKeywordRequesterOptions) {
-    this.model = options.model;
-    this.baseUrl = normalizeBaseUrl(options.baseUrl);
+    this.client = AiChatClient.fromOptions(options);
+    this.model = options.client ? `ai-chain:${this.client.fingerprint}` : options.model;
   }
 
   public async requestKeywords(input: IAiStockKeywordRequestInput): Promise<IAiStockKeywordPayload> {
-    const messages: IOpenAiCompatibleMessage[] = [
-      {
-        role: 'system',
-        content: '你只输出严格JSON。任何不确定的内容要用较低confidence表达，但不能伪造新闻证据。',
-      },
-      {
-        role: 'user',
-        content: input.prompt,
-      },
-    ];
-    const body = JSON.stringify({
-      model: this.options.model,
-      messages,
+    const result = await this.client.request({
+      label: 'AI stock keyword',
+      messages: [
+        { role: 'system', content: '你只输出严格JSON。任何不确定的内容要用较低confidence表达，但不能伪造新闻证据。' },
+        { role: 'user', content: input.prompt },
+      ],
       temperature: 0.2,
-      response_format: { type: 'json_object' },
-    });
-
-    let response: Response;
-    try {
-      response = await fetchWithRetry(
-        `${this.baseUrl}/chat/completions`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${this.options.apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body,
-        },
-        {
-          maxRetries: 3,
-          requestTimeoutMs: this.options.timeoutMs ?? 60000,
+      timeoutMs: this.options.timeoutMs ?? 60000,
+      validate: (value): IAiStockKeywordPayload => {
+        if (!isAiRecord(value) || !Array.isArray(value.stocks)) throw new Error('Missing stocks');
+        for (const stock of value.stocks) {
+          if (!isAiRecord(stock) || typeof stock.symbol !== 'string' || !Array.isArray(stock.keywords) || stock.keywords.length === 0) throw new Error('Invalid stock');
+          for (const keyword of stock.keywords) {
+            if (!isAiRecord(keyword) || typeof keyword.keyword !== 'string' || !keyword.keyword.trim() || !isExposureType(keyword.exposureType)
+              || typeof keyword.confidence !== 'number' || !Number.isFinite(keyword.confidence) || keyword.confidence < 0 || keyword.confidence > 1
+              || (keyword.reason !== undefined && typeof keyword.reason !== 'string')) throw new Error('Invalid keyword');
+          }
         }
-      );
-    } catch (error) {
-      const match = error instanceof Error ? error.message.match(/Retryable HTTP status:\s*(\d+)/) : null;
-      if (match) {
-        throw new Error(`AI stock keyword request failed with HTTP ${match[1]}`);
-      }
-      throw error;
-    }
-
-    if (!response.ok) {
-      throw new Error(`AI stock keyword request failed with HTTP ${response.status}`);
-    }
-
-    const payload = await response.json() as IOpenAiCompatibleResponse;
-    const content = payload.choices?.[0]?.message?.content;
-    if (typeof content !== 'string' || content.trim().length === 0) {
-      throw new Error('AI stock keyword response missing content');
-    }
-    return JSON.parse(extractJsonObject(content)) as IAiStockKeywordPayload;
+        // Missing requested stocks is an incomplete model output, not a local input failure.
+        const stocks = value.stocks;
+        if (input.stocks.some(stock => !stocks.some((draft: IAiStockKeywordDraft) => draft.symbol === stock.symbol))) throw new Error('Missing requested stock');
+        return { stocks: value.stocks };
+      },
+    });
+    return { ...result.value, aiSource: result.source };
   }
 }
 
@@ -234,7 +194,8 @@ export class AiStockKeywordGenerationService {
   public async generate(prisma: any, options: IAiStockKeywordGenerationOptions): Promise<IAiStockKeywordGenerationResult> {
     const stocks = await this.loadStocks(prisma, options);
     const batchSize = Math.max(1, Math.trunc(options.batchSize ?? DEFAULT_BATCH_SIZE));
-    const maxRequestChars = options.maxRequestChars ?? DEFAULT_MAX_REQUEST_CHARS;
+    const maxRequestChars = Math.min(options.maxRequestChars ?? DEFAULT_MAX_REQUEST_CHARS, DEFAULT_MAX_REQUEST_CHARS);
+    const usedModels = new Set<string>();
     const rows: IValidatedKeywordRow[] = [];
     let skippedInvalidKeywordCount = 0;
 
@@ -271,9 +232,11 @@ export class AiStockKeywordGenerationService {
           promptVersion: PROMPT_VERSION,
           model: this.requester.model,
         });
+        usedModels.add(payload.aiSource?.modelVersion ?? this.requester.model);
         const validation = this.validatePayload(payload, toRequest, options);
         return validation;
       } catch (error) {
+        if (error instanceof AiCandidatesExhaustedError || error instanceof AiInputError) throw error;
         if (toRequest.length > 1) {
           const mid = Math.floor(toRequest.length / 2);
           const left = toRequest.slice(0, mid);
@@ -316,7 +279,7 @@ export class AiStockKeywordGenerationService {
       skippedInvalidKeywordCount,
       dryRun: options.dryRun === true,
       source: SOURCE,
-      modelVersion: this.requester.model,
+      modelVersion: [...usedModels].join(', ') || this.requester.model,
       promptVersion: PROMPT_VERSION,
       exposureTypeCounts: countByExposureType(rows),
       sample: rows.slice(0, 20).map(row => ({ ...row })),
@@ -408,7 +371,8 @@ export class AiStockKeywordGenerationService {
             generatedBy: 'ai',
             basis: 'public_company_common_knowledge',
             isNewsEvidence: false,
-            modelVersion: this.requester.model,
+            modelVersion: payload.aiSource?.modelVersion ?? this.requester.model,
+            ...(payload.aiSource ? { providerId: payload.aiSource.providerId, model: payload.aiSource.model } : {}),
             promptVersion: PROMPT_VERSION,
             generatedAt: options.asOf.toISOString(),
             reason,
@@ -457,16 +421,8 @@ export class AiStockKeywordGenerationService {
 export const createAiStockKeywordRequesterFromEnv = (
   environment: NodeJS.ProcessEnv = process.env,
 ): OpenAiCompatibleStockKeywordRequester => {
-  const baseUrl = environment.OPENAI_BASE_URL ?? environment.AI_BASE_URL ?? environment.LLM_SMART_BASE_URL;
-  const apiKey = environment.OPENAI_API_KEY ?? environment.AI_API_KEY ?? environment.LLM_SMART_API_KEY;
-  const model = environment.AI_STOCK_KEYWORD_MODEL ?? environment.OPENAI_MODEL ?? environment.LLM_SMART_MODEL;
-  if (!baseUrl || !apiKey || !model) {
-    throw new Error('Missing AI stock keyword env: OPENAI_BASE_URL/OPENAI_API_KEY/AI_STOCK_KEYWORD_MODEL or LLM_SMART_BASE_URL/LLM_SMART_API_KEY/LLM_SMART_MODEL');
-  }
   return new OpenAiCompatibleStockKeywordRequester({
-    baseUrl,
-    apiKey,
-    model,
+    ...createAiOptionsFromEnv(environment),
     timeoutMs: Number(environment.AI_STOCK_KEYWORD_TIMEOUT_MS ?? 60000),
   });
 };

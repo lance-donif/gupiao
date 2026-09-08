@@ -360,7 +360,7 @@ describe('strategy runtime data operations', () => {
   it('deduplicates dashboard recommendations by symbol using the newest execution', async () => {
     const pool = {
       query: async (sql: string) => {
-        if (sql.includes('FROM public."RecommendationSnapshot" r')) {
+        if (sql.includes('FROM (SELECT * FROM public."RecommendationSnapshot" WHERE "isPublished" = true) r')) {
           return {
             rows: [
               {
@@ -470,7 +470,7 @@ describe('strategy runtime data operations', () => {
     const pool = {
       query: async (sql: string) => {
         queries.push(sql);
-        if (sql.includes('FROM public."RecommendationSnapshot" r')) {
+        if (sql.includes('FROM (SELECT * FROM public."RecommendationSnapshot" WHERE "isPublished" = true) r')) {
           return {
             rows: [{
               traceId: 'trace-detail-1',

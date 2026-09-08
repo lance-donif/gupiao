@@ -1,0 +1,95 @@
+name: gupiao
+
+x-defaults: &defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    <<: *defaults
+    image: apache/age:release_PG15_1.6.0
+    environment:
+      POSTGRES_USER: gupiao
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: gupiaodb
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gupiao -d gupiaodb"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    <<: *defaults
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  aktools:
+    <<: *defaults
+    build:
+      context: .
+      dockerfile: Dockerfile.aktools
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/openapi.json', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+
+  migrate:
+    image: gupiao-backend:local
+    build: ./backend
+    restart: "no"
+    env_file: .env
+    command: ["bunx", "prisma", "migrate", "deploy"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *defaults
+    image: gupiao-backend:local
+    build: ./backend
+    env_file: .env
+    environment:
+      PORT: "8000"
+      HOST: "0.0.0.0"
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379/0
+      AKTOOLS_BASE_URL: http://aktools:8010
+    volumes:
+      - ./backend/tmp:/app/tmp
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      aktools:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:8000/health'); process.exit(r.ok ? 0 : 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+
+  web:
+    <<: *defaults
+    build: ./web
+    ports:
+      - "10000:80"
+    depends_on:
+      api:
+        condition: service_healthy

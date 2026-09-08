@@ -1,8 +1,10 @@
+import { dailyCloseVisibleAt } from './yield-visibility.js';
+import { inputFingerprint, artifactFingerprint } from './pipeline-checkpoint.js';
 import { Prisma } from '@prisma/client';
 import { ScoringContributionEngine } from './scoring-contribution-engine.js';
 import { TempStockRecommendationService } from './temp-stock-recommendation-service.js';
 import { TraceManager } from './trace-manager.js';
-import { StrategyExperimentRunner } from './strategy-runner.js';
+import { StrategyExperimentRunner, type IStrategyExperimentExecutionResult } from './strategy-runner.js';
 
 export interface IBacktestRunInput {
   readonly traceId: string;
@@ -38,7 +40,17 @@ export interface IBacktestRunResult {
   readonly profileUsed: string;
   readonly halfLifeDaysUsed: number;
   readonly maxWindowDaysUsed: number;
+  readonly strategyResult: IStrategyExperimentExecutionResult;
 }
+
+const EMPTY_STRATEGY_RESULT: IStrategyExperimentExecutionResult = {
+  strategyCount: 0,
+  enabledStrategyCount: 0,
+  successCount: 0,
+  failureCount: 0,
+  recommendationCount: 0,
+  runs: [],
+};
 
 const resolveBacktestReplayTraceSummary = (input: IBacktestRunInput): IBacktestReplayTraceSummary => {
   const newsWindowDays = input.newsWindowDays ?? 7;
@@ -96,16 +108,41 @@ export class BacktestEngine {
     if (manageTrace) {
       await TraceManager.startRunTrace(prisma, traceId, clusterKey, 'BACKTEST', asOf);
     }
+    const completedSteps = new Map(await TraceManager.getSuccessfulStepOutputs(prisma, traceId));
+    const fingerprint = inputFingerprint({version:'backtest-v3',...replaySummary,
+      upstream:await artifactFingerprint(prisma,{traceId,clusterKey},['causalSignalCandidate','graphSnapshot','expectationGapSnapshot','themeForecast'])});
+    const scoreArtifact = (db: any) => artifactFingerprint(db,{traceId,clusterKey},['stockFeatureSnapshot','evidenceContribution','marketSignalSnapshot']);
+    const recommendationArtifact = (db: any) => artifactFingerprint(db,{traceId,clusterKey},['recommendationSnapshot'],['symbol','rank','finalScore','reasons']);
+
 
     let scoreResult: any;
-    try {
+    const completedScoring = completedSteps.get('scoring');
+    if (completedScoring?.inputFingerprint === fingerprint && prisma.stockFeatureSnapshot?.count) {
+      const persistedCount = await prisma.stockFeatureSnapshot.count({ where: { traceId, clusterKey } });
+      const expectedCount = Number(completedScoring.snapshotCount ?? -1);
+      if (expectedCount >= 0 && persistedCount === expectedCount && completedScoring.artifactFingerprint === await scoreArtifact(prisma)) {
+        scoreResult = {
+          ...completedScoring,
+          profileUsed: String(completedScoring.profileUsed ?? replaySummary.profile),
+          halfLifeDaysUsed: Number(completedScoring.halfLifeDaysUsed ?? replaySummary.halfLifeDays),
+          maxWindowDaysUsed: Number(completedScoring.maxWindowDaysUsed ?? replaySummary.maxWindowDays),
+          resumedFromCheckpoint: true,
+        };
+      }
+    }
+    if (!scoreResult) try {
+      for (const stage of ['recommendation','reconciliation','strategy_experiment']) completedSteps.delete(stage);
+      await prisma.$transaction(async (tx: any) => {
+      for (const table of ['stockFeatureSnapshot','evidenceContribution','marketSignalSnapshot','recommendationSnapshot']) {
+        await tx[table]?.deleteMany?.({where:{traceId,clusterKey}});
+      }
       // 步骤 1：scoring
       await TraceManager.startStepTrace(prisma, traceId, 'scoring', {
         ...replaySummary,
         newsWindowDays,
       });
 
-      scoreResult = await this.scoringEngine.execute(prisma, {
+      scoreResult = await this.scoringEngine.execute(tx, {
         traceId,
         asOf,
         clusterKey,
@@ -115,7 +152,9 @@ export class BacktestEngine {
         maxWindowDays: input.maxWindowDays,
       });
 
-      await TraceManager.completeStepTrace(prisma, traceId, 'scoring', {
+      await TraceManager.completeStepTrace(tx, traceId, 'scoring', {
+        inputFingerprint: fingerprint,
+        artifactFingerprint: await scoreArtifact(tx),
         contributionCount: scoreResult.contributionCount,
         snapshotCount: scoreResult.snapshotCount,
         profileUsed: scoreResult.profileUsed,
@@ -123,6 +162,7 @@ export class BacktestEngine {
         maxWindowDaysUsed: scoreResult.maxWindowDaysUsed,
         metrics: scoreResult.metrics ?? {},
       });
+      }, {timeout:300000});
     }
     catch (err: any) {
       await TraceManager.failStepTrace(prisma, traceId, 'scoring', err.message);
@@ -133,7 +173,25 @@ export class BacktestEngine {
     }
 
     let recommendations: any;
-    try {
+    const completedRecommendation = completedSteps.get('recommendation');
+    if (completedRecommendation?.inputFingerprint === fingerprint && prisma.recommendationSnapshot?.findMany) {
+      const rows = await prisma.recommendationSnapshot.findMany({
+        where: { traceId, clusterKey },
+        orderBy: { rank: 'asc' },
+      });
+      const expectedCount = Number(completedRecommendation.recommendationsCreated ?? -1);
+      if (expectedCount >= 0 && rows.length === expectedCount && completedRecommendation.artifactFingerprint === await recommendationArtifact(prisma)) {
+        recommendations = rows.map((row: any) => ({
+          symbol: String(row.symbol),
+          score: Number(row.finalScore),
+          scoreBreakdown: row.scoreBreakdown,
+        }));
+      }
+    }
+    if (!recommendations) try {
+      for (const stage of ['reconciliation','strategy_experiment']) completedSteps.delete(stage);
+      await prisma.$transaction(async (tx: any) => {
+      await tx.recommendationSnapshot.deleteMany?.({where:{traceId,clusterKey}});
       // 步骤 2：recommendation
       await TraceManager.startStepTrace(prisma, traceId, 'recommendation', {
         ...replaySummary,
@@ -142,7 +200,7 @@ export class BacktestEngine {
       });
 
       const recommendationResult = await this.recommendationService.generatePhysicalRecommendationsWithDiagnostics(
-        prisma,
+        tx,
         traceId,
         asOf,
         clusterKey,
@@ -151,7 +209,9 @@ export class BacktestEngine {
       );
       recommendations = recommendationResult.recommendations;
 
-      await TraceManager.completeStepTrace(prisma, traceId, 'recommendation', {
+      await TraceManager.completeStepTrace(tx, traceId, 'recommendation', {
+        inputFingerprint: fingerprint,
+        artifactFingerprint: await recommendationArtifact(tx),
         recommendationsCreated: recommendations.length,
         selectionDiagnostics: recommendationResult.diagnostics,
         recommendations: recommendations.map((rec: any, index: number) => ({
@@ -161,6 +221,7 @@ export class BacktestEngine {
           scoreBreakdown: rec.scoreBreakdown,
         })),
       });
+      }, {timeout:300000});
     }
     catch (err: any) {
       await TraceManager.failStepTrace(prisma, traceId, 'recommendation', err.message);
@@ -186,11 +247,25 @@ export class BacktestEngine {
         profileUsed: scoreResult.profileUsed,
         halfLifeDaysUsed: scoreResult.halfLifeDaysUsed,
         maxWindowDaysUsed: scoreResult.maxWindowDaysUsed,
+        strategyResult: EMPTY_STRATEGY_RESULT,
       };
     }
 
     let reconciledCount = 0;
-    try {
+    let strategyResult: IStrategyExperimentExecutionResult = EMPTY_STRATEGY_RESULT;
+    const completedReconciliation = completedSteps.get('reconciliation');
+    if (completedReconciliation?.inputFingerprint === fingerprint && completedReconciliation.strategyResult) {
+      reconciledCount = Number(completedReconciliation.reconciledCount ?? 0);
+      const persistedStrategyResult = completedReconciliation.strategyResult;
+      if (persistedStrategyResult && typeof persistedStrategyResult === 'object' && !Array.isArray(persistedStrategyResult)) {
+        strategyResult = {
+          ...EMPTY_STRATEGY_RESULT,
+          ...persistedStrategyResult,
+          runs: Array.isArray((persistedStrategyResult as any).runs) ? (persistedStrategyResult as any).runs : [],
+        };
+      }
+    }
+    else try {
       // 步骤 3：reconciliation
       await TraceManager.startStepTrace(prisma, traceId, 'reconciliation', {
         ...replaySummary,
@@ -272,6 +347,9 @@ export class BacktestEngine {
                 yield3Day: item.yield3Day !== null ? new Prisma.Decimal(item.yield3Day) : null,
                 yield5Day: item.yield5Day !== null ? new Prisma.Decimal(item.yield5Day) : null,
                 scoreBreakdown: item.updatedBreakdown,
+                yield1DayVisibleAt: item.futureCandles[0] ? dailyCloseVisibleAt(item.futureCandles[0].tradingDay) : null,
+                yield3DayVisibleAt: item.futureCandles[2] ? dailyCloseVisibleAt(item.futureCandles[2].tradingDay) : null,
+                yield5DayVisibleAt: item.futureCandles[4] ? dailyCloseVisibleAt(item.futureCandles[4].tradingDay) : null,
                 isReconciled: true,
               },
             })
@@ -285,11 +363,16 @@ export class BacktestEngine {
 
         // 4. 运行所有启用的策略，生成对应的 StrategyRecommendationEvent 事件记录
         const strategyRunner = new StrategyExperimentRunner();
-        await strategyRunner.runEnabledStrategies(prisma, {
-          traceId,
-          asOf,
-          clusterKey,
-        });
+        const savedStrategy = completedSteps.get('strategy_experiment');
+        if (savedStrategy?.inputFingerprint === fingerprint) {
+          strategyResult = savedStrategy.result as unknown as IStrategyExperimentExecutionResult;
+        } else {
+          await prisma.$transaction(async (tx: any) => {
+            strategyResult = await strategyRunner.runEnabledStrategies(tx, {traceId,asOf,clusterKey});
+            await TraceManager.startStepTrace(tx,traceId,'strategy_experiment',{inputFingerprint:fingerprint});
+            await TraceManager.completeStepTrace(tx,traceId,'strategy_experiment',{inputFingerprint:fingerprint,result:strategyResult});
+          },{timeout:300000});
+        }
 
         // 5. 生成绩效评估报告 (StrategyPerformanceReport) 并持久化
         await generatePerformanceReports(prisma, {
@@ -303,7 +386,9 @@ export class BacktestEngine {
       }
 
       await TraceManager.completeStepTrace(prisma, traceId, 'reconciliation', {
+        inputFingerprint: fingerprint,
         reconciledCount,
+        strategyResult,
       });
     }
     catch (err: any) {
@@ -331,6 +416,7 @@ export class BacktestEngine {
       profileUsed: scoreResult.profileUsed,
       halfLifeDaysUsed: scoreResult.halfLifeDaysUsed,
       maxWindowDaysUsed: scoreResult.maxWindowDaysUsed,
+      strategyResult,
     };
   }
 }

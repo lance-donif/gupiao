@@ -57,7 +57,7 @@ describe('backend http server', () => {
     expect(resolveRootDir({
       env: {},
       cwd: '/app',
-    })).toBe('/app');
+    })).toBe(path.resolve('/app'));
   });
 
   it('serves the web-compatible dashboard and trace endpoints', async () => {

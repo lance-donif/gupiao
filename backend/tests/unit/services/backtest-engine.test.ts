@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BacktestEngine } from '../../../src/services/backtest-engine.js';
 import { ScoringContributionEngine } from '../../../src/services/scoring-contribution-engine.js';
+import { TempStockRecommendationService } from '../../../src/services/temp-stock-recommendation-service.js';
 
 class MockBacktestPrismaClient {
   public normalizedNewsRecordList: any[] = [];
@@ -132,6 +133,10 @@ class MockBacktestPrismaClient {
       }
       return this.stockFeatureSnapshotsCreated;
     },
+    count: async (args?: any) => {
+      const rows = await this.stockFeatureSnapshot.findMany(args);
+      return rows.length;
+    },
   };
 
   public readonly recommendationSnapshot = {
@@ -240,6 +245,16 @@ class MockBacktestPrismaClient {
       this.runTracesCreated.push({ ...args.data });
       return args.data;
     },
+    upsert: async (args: { where: { traceId: string }; create: any; update: any }) => {
+      const index = this.runTracesCreated.findIndex(trace => trace.traceId === args.where.traceId);
+      if (index === -1) {
+        const created = { ...args.create };
+        this.runTracesCreated.push(created);
+        return created;
+      }
+      this.runTracesCreated[index] = { ...this.runTracesCreated[index], ...args.update };
+      return this.runTracesCreated[index];
+    },
     update: async (args: { where: { traceId: string }; data: any }) => {
       const index = this.runTracesCreated.findIndex(trace => trace.traceId === args.where.traceId);
       if (index !== -1) {
@@ -257,6 +272,22 @@ class MockBacktestPrismaClient {
       this.pipelineStepTracesCreated.push({ ...args.data });
       return args.data;
     },
+    upsert: async (args: { where: { traceId_stepName: { traceId: string; stepName: string } }; create: any; update: any }) => {
+      const { traceId, stepName } = args.where.traceId_stepName;
+      const index = this.pipelineStepTracesCreated.findIndex(
+        step => step.traceId === traceId && step.stepName === stepName,
+      );
+      if (index === -1) {
+        const created = { ...args.create };
+        this.pipelineStepTracesCreated.push(created);
+        return created;
+      }
+      this.pipelineStepTracesCreated[index] = {
+        ...this.pipelineStepTracesCreated[index],
+        ...args.update,
+      };
+      return this.pipelineStepTracesCreated[index];
+    },
     update: async (args: { where: { traceId_stepName: { traceId: string; stepName: string } }; data: any }) => {
       const { traceId, stepName } = args.where.traceId_stepName;
       const index = this.pipelineStepTracesCreated.findIndex(
@@ -269,6 +300,21 @@ class MockBacktestPrismaClient {
         };
       }
       return this.pipelineStepTracesCreated[index];
+    },
+    findMany: async (args?: any) => {
+      let rows = this.pipelineStepTracesCreated;
+      if (args?.where?.traceId) {
+        rows = rows.filter(step => step.traceId === args.where.traceId);
+      }
+      if (args?.where?.status) {
+        rows = rows.filter(step => step.status === args.where.status);
+      }
+      return rows.map(step => {
+        if (!args?.select) return { ...step };
+        return Object.fromEntries(Object.keys(args.select)
+          .filter(key => args.select[key])
+          .map(key => [key, step[key]]));
+      });
     },
   };
 
@@ -982,6 +1028,59 @@ describe('backtest engine', () => {
         }),
       }),
     ]);
+  });
+
+  it('resumes committed scoring, recommendations, and reconciliation without rerunning them', async () => {
+    const mockDb = new MockBacktestPrismaClient();
+    const asOf = new Date('2026-05-24T12:00:00.000Z');
+    const clusterKey = 'friend-network-cluster';
+    const traceId = 'trace-resume-completed-stages';
+    seedRecommendationPath(mockDb, {
+      traceId,
+      asOf,
+      clusterKey,
+      newsId: 'news-1',
+      symbol: '600000',
+      stockName: '浦发银行',
+      keyword: '信贷',
+    });
+
+    const scoreSpy = vi.spyOn(ScoringContributionEngine.prototype, 'execute');
+    const recommendationSpy = vi.spyOn(
+      TempStockRecommendationService.prototype,
+      'generatePhysicalRecommendationsWithDiagnostics',
+    );
+    try {
+      const engine = new BacktestEngine();
+      await engine.runBacktest(mockDb, { traceId, asOf, clusterKey });
+      const committed = {
+        evidence: mockDb.evidenceContributionsCreated.length,
+        features: mockDb.stockFeatureSnapshotsCreated.length,
+        recommendations: mockDb.recommendationSnapshotsCreated.length,
+        strategyRuns: mockDb.strategyRuns.length,
+        strategyEvents: mockDb.strategyEvents.length,
+      };
+
+      const resumed = await engine.runBacktest(mockDb, {
+        traceId,
+        asOf,
+        clusterKey,
+      });
+
+      expect(resumed).toMatchObject({ recommendationsCreated: 1, reconciledCount: 1 });
+      expect(scoreSpy).toHaveBeenCalledTimes(1);
+      expect(recommendationSpy).toHaveBeenCalledTimes(1);
+      expect({
+        evidence: mockDb.evidenceContributionsCreated.length,
+        features: mockDb.stockFeatureSnapshotsCreated.length,
+        recommendations: mockDb.recommendationSnapshotsCreated.length,
+        strategyRuns: mockDb.strategyRuns.length,
+        strategyEvents: mockDb.strategyEvents.length,
+      }).toEqual(committed);
+    }
+    finally {
+      vi.restoreAllMocks();
+    }
   });
 
 });

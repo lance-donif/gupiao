@@ -63,6 +63,7 @@ describe('keyword performance penalty service', () => {
         symbol: '600100',
         isReconciled: true,
         yield1Day: '-0.0410',
+        yield1DayVisibleAt: new Date('2026-05-26T07:00:00Z'),
         yield3Day: '-0.0100',
         yield5Day: '0.0200',
       },

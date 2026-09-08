@@ -6,10 +6,10 @@ import type {
 
 import { Prisma } from '@prisma/client';
 import { CoverageInitializationRepository } from '../repositories/coverage-initialization-repository.js';
-import { fetchWithRetry } from './ai-client-utils.js';
+import { AiChatClient, createAiOptionsFromEnv, withAiSource, type AiSourcedArray } from './ai-chat-client.js';
+import { isAiRecord } from './ai-provider-config.js';
 import { toNumber } from '../lib/number-utils.js';
 import { stableHash } from '../lib/hash-utils.js';
-import { extractJsonObject } from '../lib/openai-utils.js';
 
 export type LimitUpCaseMode = 'touch' | 'sealed';
 export type CoverageGapMissReason = 'no_evidence_chain' | 'score_too_low' | 'filtered_out' | 'not_in_stock_pool';
@@ -102,7 +102,7 @@ export interface IExposureCandidateExtractionInput {
 export interface IExposureCandidateExtractor {
   readonly modelVersion: string;
   readonly promptVersion: string;
-  extract: (input: IExposureCandidateExtractionInput) => Promise<readonly IExposureCandidateDraft[]>;
+  extract: (input: IExposureCandidateExtractionInput) => Promise<AiSourcedArray<IExposureCandidateDraft>>;
 }
 
 export interface IGenerateExposureCandidatesInput {
@@ -736,6 +736,7 @@ const buildExposureCandidatePrompt = (input: IExposureCandidateExtractionInput):
 };
 
 interface IOpenAiCompatibleExposureCandidateExtractorOptions {
+  readonly client?: AiChatClient;
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly model: string;
@@ -746,75 +747,53 @@ interface IOpenAiCompatibleExposureCandidateExtractorOptions {
 
 export class OpenAiCompatibleExposureCandidateExtractor implements IExposureCandidateExtractor {
   public readonly modelVersion: string;
-  public readonly promptVersion = 'historical-limitup-exposure-candidate-v1';
-  private readonly fetchImpl: typeof fetch;
+  public readonly promptVersion: string;
+  private readonly client: AiChatClient;
   private readonly maxRequestChars: number;
   private readonly requestTimeoutMs: number;
 
-  public constructor(private readonly options: IOpenAiCompatibleExposureCandidateExtractorOptions) {
-    this.modelVersion = options.model;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+  public constructor(options: IOpenAiCompatibleExposureCandidateExtractorOptions) {
+    this.client = AiChatClient.fromOptions(options);
+    this.modelVersion = options.client ? `ai-chain:${this.client.fingerprint}` : options.model;
+    this.promptVersion = `historical-limitup-exposure-candidate-v1${options.client ? `:${this.client.fingerprint}` : ''}`;
     this.maxRequestChars = options.maxRequestChars ?? DEFAULT_MAX_REQUEST_CHARS;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 30000;
   }
 
-  public async extract(input: IExposureCandidateExtractionInput): Promise<readonly IExposureCandidateDraft[]> {
-    const prompt = buildExposureCandidatePrompt(input);
-    const body = JSON.stringify({
-      model: this.options.model,
-      temperature: 0,
-      response_format: { type: 'json_object' },
+  public async extract(input: IExposureCandidateExtractionInput): Promise<AiSourcedArray<IExposureCandidateDraft>> {
+    const result = await this.client.request({
+      label: 'Exposure candidate AI',
       messages: [
-        {
-          role: 'system',
-          content: '你只返回合法 JSON，不编造原文不存在的证据。',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
+        { role: 'system', content: '你只返回合法 JSON，不编造原文不存在的证据。' },
+        { role: 'user', content: buildExposureCandidatePrompt(input) },
       ],
-    });
-    if (prompt.length > this.maxRequestChars || body.length > this.maxRequestChars) {
-      throw new Error(`Exposure candidate AI request too large: promptChars=${prompt.length}, bodyChars=${body.length}, max=${this.maxRequestChars}`);
-    }
-
-    let response: Response;
-    try {
-      response = await fetchWithRetry(
-        `${this.options.baseUrl.replace(/\/$/u, '')}/chat/completions`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.options.apiKey}`,
-          },
-          body,
-        },
-        {
-          maxRetries: 3,
-          requestTimeoutMs: this.requestTimeoutMs,
-          fetchImpl: this.fetchImpl,
+      temperature: 0,
+      timeoutMs: this.requestTimeoutMs,
+      maxRequestChars: this.maxRequestChars,
+      validate: (value): readonly Partial<IExposureCandidateDraft>[] => {
+        if (!isAiRecord(value) || !Array.isArray(value.candidates)) throw new Error('Missing candidates');
+        for (const candidate of value.candidates) {
+          if (!isAiRecord(candidate) || typeof candidate.keyword !== 'string'
+            || !['industry_exposure', 'concept_exposure', 'business_exposure'].includes(String(candidate.exposureType))
+            || typeof candidate.sourceId !== 'string' || typeof candidate.evidenceText !== 'string'
+            || typeof candidate.confidence !== 'number' || !Number.isFinite(candidate.confidence)
+            || (candidate.aliasSuggestions !== undefined && !Array.isArray(candidate.aliasSuggestions))) throw new Error('Invalid exposure candidate');
+          if ((candidate.sourceName !== undefined && typeof candidate.sourceName !== 'string')
+            || (candidate.taxonomyLevel != null && typeof candidate.taxonomyLevel !== 'string')
+            || (candidate.memberCount != null && (typeof candidate.memberCount !== 'number' || !Number.isFinite(candidate.memberCount)))) throw new Error('Invalid exposure metadata');
+          if (Array.isArray(candidate.aliasSuggestions)) {
+            for (const alias of candidate.aliasSuggestions) {
+              if (!isAiRecord(alias) || typeof alias.sourceKeyword !== 'string' || typeof alias.canonicalKeyword !== 'string'
+                || (alias.relationType !== undefined && typeof alias.relationType !== 'string')
+                || (alias.confidence !== undefined && (typeof alias.confidence !== 'number' || !Number.isFinite(alias.confidence)))
+                || (alias.evidenceText !== undefined && typeof alias.evidenceText !== 'string')) throw new Error('Invalid exposure alias');
+            }
+          }
         }
-      );
-    } catch (error) {
-      const match = error instanceof Error ? error.message.match(/Retryable HTTP status:\s*(\d+)/) : null;
-      if (match) {
-        throw new Error(`Exposure candidate AI request failed with HTTP ${match[1]}`);
-      }
-      throw error;
-    }
-
-    if (!response.ok) {
-      throw new Error(`Exposure candidate AI request failed with HTTP ${response.status}`);
-    }
-    const payload = await response.json() as { readonly choices?: readonly { readonly message?: { readonly content?: string } }[] };
-    const content = payload.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error('Exposure candidate AI response missing content');
-    }
-    const parsed = JSON.parse(extractJsonObject(content)) as { readonly candidates?: readonly Partial<IExposureCandidateDraft>[] };
-    return (parsed.candidates ?? []).flatMap((candidate) => {
+        return value.candidates;
+      },
+    });
+    return withAiSource(result.value.flatMap((candidate) => {
       if (
         typeof candidate.keyword !== 'string'
         || (candidate.exposureType !== 'industry_exposure' && candidate.exposureType !== 'concept_exposure' && candidate.exposureType !== 'business_exposure')
@@ -848,23 +827,15 @@ export class OpenAiCompatibleExposureCandidateExtractor implements IExposureCand
             })
           : [],
       } satisfies IExposureCandidateDraft];
-    });
+    }), result.source);
   }
 }
 
 export const createExposureCandidateExtractorFromEnv = (
   environment: NodeJS.ProcessEnv = process.env,
 ): OpenAiCompatibleExposureCandidateExtractor => {
-  const baseUrl = environment.OPENAI_BASE_URL ?? environment.AI_BASE_URL ?? environment.LLM_SMART_BASE_URL;
-  const apiKey = environment.OPENAI_API_KEY ?? environment.AI_API_KEY ?? environment.LLM_SMART_API_KEY;
-  const model = environment.EXPOSURE_CANDIDATE_MODEL ?? environment.OPENAI_MODEL ?? environment.LLM_SMART_MODEL;
-  if (!baseUrl || !apiKey || !model) {
-    throw new Error('Missing exposure candidate AI env: OPENAI_BASE_URL/OPENAI_API_KEY/EXPOSURE_CANDIDATE_MODEL or LLM_SMART_BASE_URL/LLM_SMART_API_KEY/LLM_SMART_MODEL');
-  }
   return new OpenAiCompatibleExposureCandidateExtractor({
-    baseUrl,
-    apiKey,
-    model,
+    ...createAiOptionsFromEnv(environment),
     maxRequestChars: environment.EXPOSURE_CANDIDATE_MAX_REQUEST_CHARS
       ? Number(environment.EXPOSURE_CANDIDATE_MAX_REQUEST_CHARS)
       : undefined,
@@ -951,7 +922,8 @@ export class HistoricalExposureCandidateGenerator {
           newsTitle: news.title,
           tradeDate: toDate(gapCase.tradeDate).toISOString(),
           aliasSuggestions: draft.aliasSuggestions ?? [],
-          modelVersion: this.extractor.modelVersion,
+          modelVersion: drafts.aiSource?.modelVersion ?? this.extractor.modelVersion,
+          ...(drafts.aiSource ? { providerId: drafts.aiSource.providerId, model: drafts.aiSource.model } : {}),
           promptVersion: this.extractor.promptVersion,
         },
         memberCount: draft.memberCount ?? null,

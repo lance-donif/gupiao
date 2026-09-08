@@ -3,27 +3,11 @@ import type {
   IAiRelationshipCandidate,
   IAiRelationshipDecision,
 } from './friend-network-types.js';
-import { requireEnvironmentValue } from './integration-config.js';
-import { fetchWithRetry } from './ai-client-utils.js';
-import { extractJsonObject } from '../lib/openai-utils.js';
-import { normalizeBaseUrl } from '../lib/url-utils.js';
-
-interface IOpenAiCompatibleMessage {
-  readonly role: 'system' | 'user';
-  readonly content: string;
-}
-
-interface IOpenAiCompatibleChoice {
-  readonly message?: {
-    readonly content?: string;
-  };
-}
-
-interface IOpenAiCompatibleResponse {
-  readonly choices?: readonly IOpenAiCompatibleChoice[];
-}
+import { AiChatClient, createAiOptionsFromEnv, withAiSource } from './ai-chat-client.js';
+import { isAiRecord } from './ai-provider-config.js';
 
 interface ILlmAdapterOptions {
+  readonly client?: AiChatClient;
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly model: string;
@@ -32,10 +16,6 @@ interface ILlmAdapterOptions {
 
 interface IRefinedAiDecision extends Partial<IAiRelationshipDecision> {
   readonly shouldKeep?: boolean;
-}
-
-interface IRefinedAiDecisionEnvelope {
-  readonly decisions?: readonly IRefinedAiDecision[];
 }
 
 const buildPrompt = (candidates: readonly IAiRelationshipCandidate[]): string => {
@@ -90,10 +70,10 @@ const toDecision = (
 };
 
 export class FriendNetworkLlmAiAdapter implements IFriendNetworkAiAdapter {
-  private readonly fetchImpl: typeof fetch;
+  private readonly client: AiChatClient;
 
-  public constructor(private readonly options: ILlmAdapterOptions) {
-    this.fetchImpl = options.fetchImpl ?? fetch;
+  public constructor(options: ILlmAdapterOptions) {
+    this.client = AiChatClient.fromOptions(options);
   }
 
   public async judge(candidates: readonly IAiRelationshipCandidate[]): Promise<readonly IAiRelationshipDecision[]> {
@@ -101,74 +81,43 @@ export class FriendNetworkLlmAiAdapter implements IFriendNetworkAiAdapter {
       return [];
     }
 
-    let response: Response;
-    try {
-      response = await fetchWithRetry(
-        `${normalizeBaseUrl(this.options.baseUrl)}/chat/completions`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.options.apiKey}`,
-          },
-          body: JSON.stringify({
-            model: this.options.model,
-            response_format: { type: 'json_object' },
-            ...(process.env.LLM_SMART_REASONING_EFFORT ? { reasoning_effort: process.env.LLM_SMART_REASONING_EFFORT } : { temperature: 0.1 }),
-            messages: [
-              {
-                role: 'system',
-                content: '你是股票图谱关系裁决助手，只返回合法 JSON。',
-              } satisfies IOpenAiCompatibleMessage,
-              {
-                role: 'user',
-                content: buildPrompt(candidates),
-              } satisfies IOpenAiCompatibleMessage,
-            ],
-          }),
-        },
-        {
-          maxRetries: 3,
-          requestTimeoutMs: process.env.LLM_SMART_REASONING_EFFORT ? 600000 : 30000,
-          fetchImpl: this.fetchImpl,
+    const result = await this.client.request({
+      label: 'Friend network AI',
+      messages: [
+        { role: 'system', content: '你是股票图谱关系裁决助手，只返回合法 JSON。' },
+        { role: 'user', content: buildPrompt(candidates) },
+      ],
+      temperature: 0.1,
+      timeoutMs: 30000,
+      validate: (value): readonly IRefinedAiDecision[] => {
+        if (!isAiRecord(value) || !Array.isArray(value.decisions)) throw new Error('Missing decisions');
+        for (const decision of value.decisions) {
+          if (!isAiRecord(decision) || typeof decision.sourceKeyword !== 'string' || typeof decision.targetKeyword !== 'string'
+            || !isRelationType(decision.relationType) || !isDirection(decision.direction)
+            || typeof decision.confidence !== 'number' || !Number.isFinite(decision.confidence)
+            || typeof decision.weakSignal !== 'boolean' || !Array.isArray(decision.evidence)
+            || !decision.evidence.every((item: unknown) => typeof item === 'string') || typeof decision.reasoning !== 'string' || !decision.reasoning.trim()
+            || (decision.shouldKeep !== undefined && typeof decision.shouldKeep !== 'boolean')) throw new Error('Invalid decision');
         }
-      );
-    } catch (error) {
-      const match = error instanceof Error ? error.message.match(/Retryable HTTP status:\s*(\d+)/) : null;
-      if (match) {
-        throw new Error(`Friend network AI request failed with HTTP ${match[1]}`);
-      }
-      throw error;
-    }
+        const decisions = value.decisions;
+        if (candidates.some(candidate => !decisions.some((decision: IRefinedAiDecision) => decision.sourceKeyword === candidate.sourceKeyword && decision.targetKeyword === candidate.targetKeyword))) {
+          throw new Error('Missing candidate decision');
+        }
+        return value.decisions;
+      },
+    });
+    const decisions = result.value;
 
-    if (!response.ok) {
-      throw new Error(`Friend network AI request failed with HTTP ${response.status}`);
-    }
-
-    const payload = await response.json() as IOpenAiCompatibleResponse;
-    const content = payload.choices?.[0]?.message?.content;
-
-    if (!content) {
-      throw new Error('Friend network AI response missing message content');
-    }
-
-    const parsed = JSON.parse(extractJsonObject(content)) as IRefinedAiDecisionEnvelope;
-    const decisions = parsed.decisions ?? [];
-
-    return candidates.flatMap((candidate) => {
+    return withAiSource(candidates.flatMap((candidate) => {
       const matched = decisions.find(decision => decision.sourceKeyword === candidate.sourceKeyword && decision.targetKeyword === candidate.targetKeyword);
       const decision = toDecision(candidate, matched);
       return decision ? [decision] : [];
-    });
+    }), result.source);
   }
 }
 
 export const createFriendNetworkLlmAiAdapterFromEnv = (
   environment: NodeJS.ProcessEnv = process.env,
 ): FriendNetworkLlmAiAdapter => {
-  return new FriendNetworkLlmAiAdapter({
-    baseUrl: requireEnvironmentValue(environment.LLM_SMART_BASE_URL, 'LLM_SMART_BASE_URL'),
-    apiKey: requireEnvironmentValue(environment.LLM_SMART_API_KEY, 'LLM_SMART_API_KEY'),
-    model: requireEnvironmentValue(environment.LLM_SMART_MODEL, 'LLM_SMART_MODEL'),
-  });
+  return new FriendNetworkLlmAiAdapter(createAiOptionsFromEnv(environment));
 };

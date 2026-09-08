@@ -158,8 +158,8 @@ describe('backend http runtime store', () => {
     expect(resolveBunExecutable({
       env: { HOME: '/home/test' },
       execPath: '/usr/local/bin/node',
-      existsSync: candidate => candidate === '/home/test/.bun/bin/bun',
-    })).toBe('/home/test/.bun/bin/bun');
+      existsSync: candidate => candidate === path.join('/home/test', '.bun', 'bin', process.platform === 'win32' ? 'bun.exe' : 'bun'),
+    })).toBe(path.join('/home/test', '.bun', 'bin', process.platform === 'win32' ? 'bun.exe' : 'bun'));
 
     expect(resolveBunExecutable({
       env: {},
@@ -478,7 +478,7 @@ describe('backend http runtime store', () => {
       options: {
         pgPool: {
           async query<T>(sql: string) {
-            if (sql.includes('FROM public."RecommendationSnapshot" r')) {
+            if (sql.includes('FROM (SELECT * FROM public."RecommendationSnapshot" WHERE "isPublished" = true) r')) {
               return {
                 rows: [{
                   traceId,
@@ -634,7 +634,7 @@ describe('backend http runtime store', () => {
       options: {
         pgPool: {
           async query<T>(sql: string) {
-            if (sql.includes('FROM public."RecommendationSnapshot" r') || sql.includes('FROM public."StrategyRecommendationEvent" e')) {
+            if (sql.includes('FROM (SELECT * FROM public."RecommendationSnapshot" WHERE "isPublished" = true) r') || sql.includes('FROM public."StrategyRecommendationEvent" e')) {
               return { rows: [] as T[] };
             }
             if (sql.includes('FROM public."RunTrace" rt')) {

@@ -24,12 +24,62 @@
 
 ## 需要配置
 
-复制 `.env.example` 为 `.env`，主要填 LLM 的 API Key：
+复制 `.env.example` 为 `.env`。所有 AI 功能只使用一份配置，无需分别配置主模型和廉价模型：
 
-- `LLM_SMART_BASE_URL` / `LLM_SMART_API_KEY` / `LLM_SMART_MODEL` — 主 LLM
-- `LLM_CHEAP_BASE_URL` / `LLM_CHEAP_API_KEY` / `LLM_CHEAP_MODEL` — 廉价 LLM
+1. 将 `backend/ai-config.example.json` 复制为 `backend/tmp/ai-config.json`（先创建 `tmp` 目录）。
+2. 填写供应商的 `id`、`baseUrl`、`apiKey` 和 `models`。至少保留一家供应商、一个模型即可运行。
+3. 从 `backend` 目录启动后端。默认读取 `tmp/ai-config.json`，也可用 `AI_CONFIG_FILE` 指定绝对路径或相对进程工作目录的路径。修改配置后重启相关进程。
 
-其他按需修改。
+配置 `DATABASE_URL` 后，所有 AI 入口共用 PostgreSQL 中的限额和健康状态，按有效响应率、耗时和空闲容量分流。每家供应商初始共享 2 个并发，稳定至少 2 分钟且成功 10 次后逐步增加，默认最高 5；全局最高 10。多个模型共享供应商额度。遇到 429 并发减半并冷却，网络连续失败时熔断，恢复阶段仅放行一个探测请求。配置顺序只用于初始同等条件下的排序。
+
+先运行 `cd backend && bunx prisma migrate deploy` 创建 AI 调度表。没有数据库的显式单模型调用仅用于隔离测试；生产入口需要数据库，不能用进程内限流替代共享限额。
+
+只要求供应商支持 Chat Completions；无需安装 CPA。`baseUrl` 填接口前缀，例如 `https://example.com/v1`，程序追加 `/chat/completions`。模型 ID 按供应商要求原样填写，同一模型可出现在不同供应商下。
+
+模型可选参数示例：
+
+```json
+{
+  "id": "your-model-id",
+  "timeoutMs": 120000,
+  "parameters": {
+    "stream": true,
+    "reasoning_effort": "high",
+    "response_format": null,
+    "max_completion_tokens": 8192
+  }
+}
+```
+
+仅填写供应商支持的参数。默认使用非流式、`response_format: {"type":"json_object"}`；不支持该参数时设为 `null`，仍会严格校验返回 JSON。设置 `reasoning_effort` 时默认不发送温度；可显式配置 `temperature`，设为 `null` 则不发送。输出长度使用 `max_tokens` 或 `max_completion_tokens`，二选一。自适应调用默认首响应 45 秒、流式无进展 45 秒、总耗时 180 秒，分别由模型 `timeouts.firstResponseMs/idleMs/totalMs` 覆盖；旧 `timeoutMs` 保留为总超时兼容字段。心跳不重置无进展计时，正文和推理增量会重置。
+
+请求提示词和完整请求体不得超过 240000 字符。新闻从每批 3 条开始，稳定完成后最多合并为 5 条；长度超限、截断或重复结构错误会拆批，最小一条，单条仍不合法时需要处理。限流不会触发拆批。结构合法但证据不合格的结果仍按原有业务规则拒绝，不通过换模型绕过证据门槛。
+
+供应商和模型的 `limits` 可设置 `initialConcurrency/maxConcurrency/rpm/tpm/dailyRequests/dailyTokens/minSpacingMs/contextTokens`。仅填写已知的硬上限；RPM/TPM 响应头用于保守学习，Token 预估使用请求 UTF-8 字节数加输出预算，有实际 usage 时对账，预估不等于服务端计费量。每日额度按 UTC 零点重置。多个入口共用额度时，配置顶层 `quotaGroups: {"account": {"maxConcurrency": 2}}`，并给这些供应商设置 `quotaGroup: "account"`。
+
+429 优先遵守 `Retry-After`；401、明确余额耗尽或模型不存在会停用对应凭证或模型。未知原因的 403 冷却 15 分钟后再试。配置变更和凭证轮换后重启进程；凭证不写入任务或调用日志。
+
+本项目当前配置的模型统一声明 `limits.contextTokens: 128000`，按用户提供的容量设定，指输入与输出合计的上下文预算。调度器在输入预估之外预留 `max_completion_tokens/max_tokens`，未指定时预留 4096 tokens；不把上下文容量直接当作最大输出长度。项目 240000 字符请求上限仍独立生效。修改此字段不会自动突破 `initialBatchSize/maxBatchSize` 的条数限制，配置重启或续跑后生效。
+
+### AI 断点续跑
+
+```bash
+cd backend
+bun scripts/run-daily-recommendation.ts --as-of 2026-09-07T16:00:00+08:00
+bun scripts/run-daily-recommendation.ts --resume-trace-id <原 traceId>
+```
+
+AI 阶段保存完整输入和继续流水线所需的检查点。恢复时沿用原始新闻与 `asOf`，不重新抓新闻，也不重新请求已完成任务（包括合法空结果）。并发、超时和供应商顺序的调整不会清掉完成记录；输入或工作流版本变化需要新 trace。旧版非持久化任务不能直接用新续跑入口恢复。
+
+每轮默认最多一小时，到期标记 `PAUSED`；任务预算耗尽、所有候选永久不可用等情况标记 `NEEDS_ATTENTION`。每个原任务及拆分子任务共享 24 次外部请求预算，续跑不重置。暂停后不会自动另开一轮。所有 AI 任务成功后才执行原推荐流程；已经进入下游或完成的 trace 不允许通过续跑入口重复发布。任务结果和因果候选事务提交，崩溃可能导致外部重复计费，但不会依靠重复写入生成额外候选。
+
+运行状态见 `AiWorkflow/AiWorkItem/AiAttempt`；所有请求共用 `AiSchedulerState` 中的原子并发租约和健康状态。真实数据库集成测试通过 `AI_TEST_DATABASE_URL` 显式启用，测试只创建并删除独立临时 schema。
+
+迁移旧配置：将原 `LLM_SMART_BASE_URL/API_KEY/MODEL` 的值分别填入供应商的 `baseUrl/apiKey/models[0].id`；其他供应商追加到数组。若之前使用 `OPENAI_*` 或 `AI_*` 配置，也按相同方式迁移。旧环境变量及各功能专用模型变量不再控制 AI 调用；原推理、流式和输出长度设置迁入对应模型的 `parameters`。保留 `CAUSAL_SIGNAL_EXTRACTOR=llm`；每日推荐 AI 批次和并发改由 `scheduling` 控制。
+
+真实密钥只放在被 Git 和 Docker 构建忽略的 `backend/tmp/` 中，勿写入示例文件。溯源记录使用实际成功的供应商和模型；不会重写历史推荐。
+
+其他配置按需修改。
 
 ## Docker 一键运行
 

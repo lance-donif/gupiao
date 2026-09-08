@@ -1,13 +1,5 @@
-node_modules/
-dist/
-tmp/
-tests/
-!prisma.config.ts
-!.env*
+node_modules
+dist
+tmp
 .env
 .env.*
-!.env.example
-.git/
-.gitignore
-*.md
-.vscode/

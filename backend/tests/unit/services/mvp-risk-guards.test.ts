@@ -143,7 +143,6 @@ describe('MVP recommendation risk guards', () => {
       apiKey: 'test-key',
       model: 'gpt-5.4-mini',
       fetchImpl: fetchImpl as typeof fetch,
-      maxRetries: 0,
     })).execute(db, {
       traceId: 'trace-oversized-default-limit',
       asOf: new Date('2026-05-24T15:59:59.999Z'),

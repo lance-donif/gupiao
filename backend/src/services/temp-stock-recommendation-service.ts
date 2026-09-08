@@ -1021,6 +1021,7 @@ export class TempStockRecommendationService {
     const previousRecommendations = await prisma.recommendationSnapshot.findMany({
       where: {
         clusterKey,
+        isPublished: true,
         asOf: {
           gte: startInclusive,
           lt: endExclusive,

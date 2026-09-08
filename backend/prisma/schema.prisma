@@ -197,6 +197,10 @@ model RecommendationSnapshot {
   yield1Day            Decimal? @db.Decimal(6, 4)
   yield3Day            Decimal? @db.Decimal(6, 4)
   yield5Day            Decimal? @db.Decimal(6, 4)
+  yield1DayVisibleAt   DateTime?
+  yield3DayVisibleAt   DateTime?
+  yield5DayVisibleAt   DateTime?
+  isPublished          Boolean @default(false)
   realizedPrice        Decimal? @db.Decimal(18, 4)
   realizedPriceTarget  Decimal? @db.Decimal(18, 4)
   isReconciled         Boolean  @default(false)
@@ -297,6 +301,57 @@ model StrategyRecommendationEvent {
   @@index([symbol, asOf])
 }
 
+model AiSchedulerState {
+  id String @id
+  state Json
+  updatedAt DateTime @default(now())
+}
+
+model AiWorkflow {
+  traceId String @id
+  asOf DateTime
+  clusterKey String
+  version String
+  checkpoint Json
+  status String @default("PENDING")
+  owner String?
+  leaseUntil DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+  tasks AiWorkItem[]
+}
+
+model AiWorkItem {
+  id String @id
+  traceId String
+  rootId String
+  input Json
+  result Json?
+  status String @default("PENDING")
+  requestCount Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  owner String?
+  leaseUntil DateTime?
+  error String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+  workflow AiWorkflow @relation(fields:[traceId],references:[traceId])
+  @@index([traceId,status],map:"AiWorkItem_trace_status_idx")
+}
+
+model AiAttempt {
+  id String @id
+  taskId String?
+  candidate String
+  status String
+  kind String?
+  httpStatus Int?
+  latencyMs Int?
+  startedAt DateTime @default(now())
+  completedAt DateTime?
+  @@index([taskId],map:"AiAttempt_task_idx")
+}
+
 model RunTrace {
   traceId      String             @id
   clusterKey   String
@@ -311,6 +366,16 @@ model RunTrace {
 
   @@index([clusterKey, status])
   @@index([asOf])
+}
+
+model PipelineCheckpoint {
+  traceId   String
+  stage     String
+  input     String
+  result    Json
+  updatedAt DateTime @default(now())
+
+  @@id([traceId, stage])
 }
 
 model PipelineStepTrace {
@@ -579,6 +644,9 @@ model CausalSignalCandidate {
   extractorType       String
   modelVersion        String
   promptVersion       String
+  /// SHA-256 of the exact title/content/source supplied to the extractor.
+  /// Legacy rows remain null and are deliberately not used as a cache hit.
+  inputFingerprint    String?
   status              String   @default("candidate")
   failureReason       String?
   createdAt           DateTime @default(now())
@@ -587,6 +655,7 @@ model CausalSignalCandidate {
   @@unique([traceId, newsId, businessVariable, assetOrThemeKeyword, extractorType])
   @@index([traceId, confidence])
   @@index([clusterKey, asOf, status])
+  @@index([clusterKey, inputFingerprint, extractorType, modelVersion, promptVersion])
   @@index([clusterKey, assetOrThemeKeyword])
   @@index([newsId])
 }

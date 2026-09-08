@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { toNumberOrNull } from '../lib/number-utils.js';
+import { visibleYields } from './yield-visibility.js';
 
 export interface IKeywordPerformancePenaltyRefreshInput {
   readonly asOf: Date;
@@ -26,8 +27,8 @@ const DEFAULT_LOSS_THRESHOLD_PCT = -0.03;
 const DEFAULT_PENALTY_FACTOR = 0.6;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
-const minAvailableYield = (row: Record<string, unknown>): number | null => {
-  const values = [row.yield1Day, row.yield3Day, row.yield5Day]
+const minAvailableYield = (row: Record<string, unknown>, asOf: Date): number | null => {
+  const values = visibleYields(row, asOf)
     .map(toNumberOrNull)
     .filter((value): value is number => value !== null);
   return values.length === 0 ? null : Math.min(...values);
@@ -72,6 +73,7 @@ export class KeywordPerformancePenaltyService {
       where: {
         clusterKey: input.clusterKey,
         isReconciled: true,
+        isPublished: true,
         asOf: {
           gte: windowStart,
           lt: input.asOf,
@@ -84,13 +86,16 @@ export class KeywordPerformancePenaltyService {
         yield1Day: true,
         yield3Day: true,
         yield5Day: true,
+        yield1DayVisibleAt: true,
+        yield3DayVisibleAt: true,
+        yield5DayVisibleAt: true,
       },
     }) as Array<Record<string, unknown>>;
 
     const losingRecommendations = recommendations
       .map(row => ({
         row,
-        lossPct: minAvailableYield(row),
+        lossPct: minAvailableYield(row, input.asOf),
       }))
       .filter((item): item is { row: Record<string, unknown>; lossPct: number } => {
         return item.lossPct !== null && item.lossPct <= lossThresholdPct;

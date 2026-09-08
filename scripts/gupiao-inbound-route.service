@@ -1,0 +1,12 @@
+[Unit]
+Description=Preserve gupiao port 10000 replies through Mihomo TUN
+After=network-online.target docker.service mihomo-docker-inbound-route.service
+Requires=mihomo-docker-inbound-route.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/gupiao/scripts/gupiao-inbound-route.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

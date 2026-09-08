@@ -11,14 +11,27 @@ export class TraceManager {
     kind: string,
     asOf: Date,
   ): Promise<void> {
-    await prisma.runTrace.create({
-      data: {
+    const existing = await prisma.runTrace.findUnique?.({ where: { traceId } });
+    if (existing && (existing.clusterKey !== clusterKey || existing.kind !== kind || new Date(existing.asOf).getTime() !== asOf.getTime())) {
+      throw new Error('Trace identity is immutable; use a new trace for changed asOf, cluster or kind');
+    }
+    // The same immutable trace ID is the resume key.  Clearing only terminal
+    // run state lets callers replay unfinished stages while their individual
+    // PipelineStepTrace rows decide which durable artifacts are reusable.
+    await prisma.runTrace.upsert({
+      where: { traceId },
+      create: {
         traceId,
         clusterKey,
         kind,
         asOf,
         status: 'PENDING',
         metrics: {},
+      },
+      update: {
+        status: 'PENDING',
+        errorMessage: null,
+        completedAt: null,
       },
     });
   }
@@ -31,7 +44,12 @@ export class TraceManager {
     traceId: string,
     metrics: Record<string, any>,
   ): Promise<void> {
-    await prisma.runTrace.update({
+    const commit = async (tx: any): Promise<void> => {
+    const trace = await tx.runTrace.findUnique?.({ where: { traceId } });
+    if (trace?.kind === 'DAILY_RECOMMENDATION') {
+      await tx.recommendationSnapshot.updateMany({ where: { traceId }, data: { isPublished: true } });
+    }
+    await tx.runTrace.update({
       where: { traceId },
       data: {
         status: 'SUCCESS',
@@ -39,6 +57,8 @@ export class TraceManager {
         completedAt: new Date(),
       },
     });
+    };
+    await prisma.$transaction(commit);
   }
 
   /**
@@ -68,8 +88,14 @@ export class TraceManager {
     stepName: string,
     inputSummary: Record<string, any>,
   ): Promise<void> {
-    await prisma.pipelineStepTrace.create({
-      data: {
+    // A run may be resumed after a process or dependency failure.  Reusing the
+    // same row keeps the trace identity stable and clears only the state owned
+    // by the step that is about to be retried.
+    await prisma.pipelineStepTrace.upsert({
+      where: {
+        traceId_stepName: { traceId, stepName },
+      },
+      create: {
         traceId,
         stepName,
         status: 'RUNNING',
@@ -77,7 +103,38 @@ export class TraceManager {
         outputSummary: {},
         startedAt: new Date(),
       },
+      update: {
+        status: 'RUNNING',
+        inputSummary: inputSummary as Prisma.InputJsonValue,
+        outputSummary: {},
+        errorMessage: null,
+        startedAt: new Date(),
+        endedAt: null,
+      },
     });
+  }
+
+  /**
+   * Returns only durable, successfully committed stage outputs.  Callers must
+   * still verify the concrete artifact before treating a stage as reusable.
+   */
+  public static async getSuccessfulStepOutputs(
+    prisma: any,
+    traceId: string,
+  ): Promise<ReadonlyMap<string, Record<string, unknown>>> {
+    if (!prisma.pipelineStepTrace?.findMany) {
+      return new Map();
+    }
+    const rows = await prisma.pipelineStepTrace.findMany({
+      where: { traceId, status: 'SUCCESS' },
+      select: { stepName: true, outputSummary: true },
+    });
+    return new Map(rows.map((row: { stepName: string; outputSummary: unknown }) => [
+      String(row.stepName),
+      row.outputSummary && typeof row.outputSummary === 'object' && !Array.isArray(row.outputSummary)
+        ? row.outputSummary as Record<string, unknown>
+        : {},
+    ]));
   }
 
   /**

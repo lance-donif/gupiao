@@ -1,8 +1,8 @@
+import { createHash } from 'node:crypto';
+import { AiChatClient, AiInputError, AiCandidatesExhaustedError, createAiOptionsFromEnv, withAiSource, type AiSourcedArray, type IAiSource } from './ai-chat-client.js';
+import { isAiRecord } from './ai-provider-config.js';
 import { Prisma } from '@prisma/client';
 import { DataRefreshLedgerService } from './data-refresh-ledger-service.js';
-import { fetchWithRetry } from './ai-client-utils.js';
-import { extractJsonObject } from '../lib/openai-utils.js';
-import { normalizeBaseUrl } from '../lib/url-utils.js';
 
 export type CausalSignalDirection = 'positive' | 'negative' | 'mixed' | 'neutral';
 
@@ -66,7 +66,8 @@ export interface ICausalSignalExtractor {
   readonly extractorType: 'rule' | 'llm';
   readonly modelVersion: string;
   readonly promptVersion: string;
-  extract: (input: ICausalSignalExtractionInput) => Promise<readonly ICausalSignalCandidateRecord[]>;
+  readonly cacheModelVersions?: readonly string[];
+  extract: (input: ICausalSignalExtractionInput) => Promise<AiSourcedArray<ICausalSignalCandidateRecord>>;
 }
 
 interface IVariablePattern {
@@ -192,35 +193,14 @@ export class RuleCausalSignalExtractor implements ICausalSignalExtractor {
   }
 }
 
-interface IOpenAiCompatibleMessage {
-  readonly role: 'system' | 'user';
-  readonly content: string;
-}
-
-interface IOpenAiCompatibleChoice {
-  readonly message?: {
-    readonly content?: string;
-  };
-}
-
-interface IOpenAiCompatibleResponse {
-  readonly choices?: readonly IOpenAiCompatibleChoice[];
-}
-
-interface ILlmSignalEnvelope {
-  readonly signals?: readonly Partial<ICausalSignalCandidateRecord>[];
-}
-
 interface IOpenAiCompatibleCausalSignalExtractorOptions {
+  readonly client?: AiChatClient;
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly model: string;
   readonly fetchImpl?: typeof fetch;
-  readonly maxRetries?: number;
-  readonly retryDelayMs?: number;
   readonly maxRequestChars?: number;
   readonly requestTimeoutMs?: number;
-  readonly maxTokens?: number;
 }
 
 const isDirection = (value: unknown): value is CausalSignalDirection => {
@@ -229,10 +209,7 @@ const isDirection = (value: unknown): value is CausalSignalDirection => {
 
 
 const DEFAULT_MAX_LLM_REQUEST_CHARS = 240_000;
-// 超时 30s→120s、max_tokens 4096→8192：因果抽取 prompt 改用 deepseek-v4-flash + 中文因果结构化输出，
-// 单 batch（CAUSAL_SIGNAL_BATCH_SIZE=20）实际需要 40-90s、~6k tokens；保留 env 覆盖（CAUSAL_SIGNAL_LLM_REQUEST_TIMEOUT_MS / _LLM_MAX_TOKENS）。
 const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 120_000;
-const DEFAULT_LLM_MAX_TOKENS = 8192;
 
 const LLM_CACHE_EXPIRES_AT = new Date('2099-12-31T23:59:59.999Z');
 
@@ -298,7 +275,7 @@ const isKeywordSupportedByNews = (
   return synonyms.some(synonym => supportText.includes(normalizeForSupportCheck(synonym)));
 };
 
-const validateCausalSignalCandidate = (
+export const validateCausalSignalCandidate = (
   candidate: ICausalSignalCandidateRecord,
   newsById: ReadonlyMap<string, ICausalSignalExtractionNews>,
 ): ICausalSignalCandidateRecord => {
@@ -335,6 +312,20 @@ const supportsLedgerCache = (prisma: any): boolean => {
   return typeof prisma?.$queryRawUnsafe === 'function' && typeof prisma?.$executeRawUnsafe === 'function';
 };
 
+/**
+ * The original news ID is source-local and changes for syndicated copies.  A
+ * cache key therefore uses the exact fields supplied to the LLM instead.
+ * Prompt/schema and model-chain versions live in the cache source key.
+ */
+export const createCausalSignalInputFingerprint = (news: ICausalSignalExtractionNews): string => {
+  return createHash('sha256').update(JSON.stringify({
+    version: 'causal-input-v1',
+    title: news.title,
+    content: news.content,
+    source: news.source,
+  })).digest('hex');
+};
+
 
 
 const buildLlmPrompt = (input: ICausalSignalExtractionInput): string => {
@@ -345,7 +336,8 @@ const buildLlmPrompt = (input: ICausalSignalExtractionInput): string => {
     'direction 只能是 positive, negative, mixed, neutral。',
     '每条 signal 必须包含 newsId,event,businessVariable,assetOrThemeKeyword,direction,confidence,evidenceText,evidenceOffsetStart,evidenceOffsetEnd。',
     'evidenceText 必须是原文片段，offset 是在 title + "。" + content 去空白后的字符区间。',
-    '返回格式：{"signals":[...]}。',
+    '每一条输入新闻必须恰好有一个明确结果：有信号时其 newsId 出现在 signals 中；无信号时其 newsId 出现在 noSignalNewsIds 中。两者不能重叠，不能遗漏或加入未知 newsId。',
+    '返回格式：{"signals":[...],"noSignalNewsIds":[...]}。',
     JSON.stringify(input.news.map(news => ({
       newsId: news.id,
       title: news.title,
@@ -358,96 +350,57 @@ const buildLlmPrompt = (input: ICausalSignalExtractionInput): string => {
 export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtractor {
   public readonly extractorType = 'llm' as const;
   public readonly modelVersion: string;
-  public readonly promptVersion = 'causal-signal-extraction-v1';
-  private readonly fetchImpl: typeof fetch;
-  private readonly maxRetries: number;
-  private readonly retryDelayMs: number;
+  public readonly promptVersion: string;
+  public readonly cacheModelVersions?: readonly string[];
+  private readonly client: AiChatClient;
   private readonly maxRequestChars: number;
   private readonly requestTimeoutMs: number;
 
-
-  public constructor(private readonly options: IOpenAiCompatibleCausalSignalExtractorOptions) {
-    this.modelVersion = options.model;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.maxRetries = Math.max(0, Math.min(options.maxRetries ?? 2, 5));
-    this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 800);
-    this.maxRequestChars = Math.max(1, options.maxRequestChars ?? DEFAULT_MAX_LLM_REQUEST_CHARS);
-    this.requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS);
-
+  public constructor(options: IOpenAiCompatibleCausalSignalExtractorOptions) {
+    this.client = AiChatClient.fromOptions(options);
+    this.modelVersion = options.client ? `ai-chain:${this.client.fingerprint}` : options.model;
+    this.promptVersion = `causal-signal-extraction-v2:outcome-schema-v1:${this.client.fingerprint}`;
+    this.cacheModelVersions = options.client ? this.client.modelVersions : undefined;
+    this.maxRequestChars = options.maxRequestChars ?? DEFAULT_MAX_LLM_REQUEST_CHARS;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
   }
 
-  public async extract(input: ICausalSignalExtractionInput): Promise<readonly ICausalSignalCandidateRecord[]> {
-    if (input.news.length === 0) {
-      return [];
-    }
-
-    const userPrompt = buildLlmPrompt(input);
-    const reasoningEffort = process.env.LLM_SMART_REASONING_EFFORT;
-    const requestBody = JSON.stringify({
-      model: this.options.model,
-      response_format: { type: 'json_object' },
-      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : { temperature: 0 }),
-      messages: [
-        {
-          role: 'system',
-          content: '你只返回合法 JSON，不做股票推荐，不编造原文不存在的证据。',
-        } satisfies IOpenAiCompatibleMessage,
-        {
-          role: 'user',
-          content: userPrompt,
-        } satisfies IOpenAiCompatibleMessage,
-      ],
-    });
-
-    if (userPrompt.length > this.maxRequestChars || requestBody.length > this.maxRequestChars) {
-      throw new Error(
-        `Causal signal AI request too large: promptChars=${userPrompt.length}, bodyChars=${requestBody.length}, maxRequestChars=${this.maxRequestChars}`,
-      );
-    }
-
-    let response: Response;
-    try {
-      response = await fetchWithRetry(
-        `${normalizeBaseUrl(this.options.baseUrl)}/chat/completions`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.options.apiKey}`,
-          },
-          body: requestBody,
-        },
-        {
-          maxRetries: this.maxRetries,
-          retryDelayMs: this.retryDelayMs,
-          requestTimeoutMs: this.requestTimeoutMs,
-          fetchImpl: this.fetchImpl,
-        }
-      );
-    } catch (error) {
-      const match = error instanceof Error ? error.message.match(/Retryable HTTP status:\s*(\d+)/) : null;
-      if (match) {
-        throw new Error(`Causal signal AI request failed with HTTP ${match[1]}`);
-      }
-      throw error;
-    }
-
-    if (!response.ok) {
-      throw new Error(`Causal signal AI request failed with HTTP ${response.status}`);
-    }
-
-    const payload = await response.json() as IOpenAiCompatibleResponse;
-    const content = payload.choices?.[0]?.message?.content;
-    if (!content) {
-      console.error('[CausalSignalExtractionService] Missing message content. Raw payload:', JSON.stringify(payload, null, 2));
-      throw new Error('Causal signal AI response missing message content');
-    }
-
-    const parsed = JSON.parse(extractJsonObject(content)) as ILlmSignalEnvelope;
-    const signals = parsed.signals ?? [];
+  public async extract(input: ICausalSignalExtractionInput): Promise<AiSourcedArray<ICausalSignalCandidateRecord>> {
+    if (input.news.length === 0) return [];
     const newsIds = new Set(input.news.map(news => news.id));
+    const result = await this.client.request({
+      label: 'Causal signal AI',
+      messages: [
+        { role: 'system', content: '你只返回合法 JSON，不做股票推荐，不编造原文不存在的证据。' },
+        { role: 'user', content: buildLlmPrompt(input) },
+      ],
+      temperature: 0,
+      timeoutMs: this.requestTimeoutMs,
+      maxRequestChars: this.maxRequestChars,
+      validate: (value): { readonly signals: readonly Partial<ICausalSignalCandidateRecord>[]; readonly noSignalNewsIds: readonly string[] } => {
+        if (!isAiRecord(value) || !Array.isArray(value.signals) || !Array.isArray(value.noSignalNewsIds)) throw new Error('Missing per-news extraction outcome');
+        const signalledNewsIds = new Set<string>();
+        for (const signal of value.signals) {
+          if (!isAiRecord(signal) || typeof signal.newsId !== 'string' || !newsIds.has(signal.newsId) || typeof signal.event !== 'string'
+            || typeof signal.businessVariable !== 'string' || typeof signal.assetOrThemeKeyword !== 'string'
+            || !isDirection(signal.direction) || typeof signal.evidenceText !== 'string'
+            || typeof signal.confidence !== 'number' || !Number.isFinite(signal.confidence)
+            || [signal.evidenceOffsetStart, signal.evidenceOffsetEnd].some(offset => offset != null && (typeof offset !== 'number' || !Number.isFinite(offset)))) throw new Error('Invalid signal');
+          signalledNewsIds.add(signal.newsId);
+        }
+        const noSignalNewsIds = value.noSignalNewsIds;
+        if (noSignalNewsIds.some(newsId => typeof newsId !== 'string' || !newsIds.has(newsId))
+          || new Set(noSignalNewsIds).size !== noSignalNewsIds.length
+          || noSignalNewsIds.some(newsId => signalledNewsIds.has(newsId))
+          || signalledNewsIds.size + noSignalNewsIds.length !== newsIds.size) {
+          throw new Error('Incomplete per-news extraction outcome');
+        }
+        return { signals: value.signals, noSignalNewsIds };
+      },
+    });
+    const signals = result.value.signals;
 
-    return signals.flatMap((signal) => {
+    return withAiSource(signals.flatMap((signal) => {
       if (
         typeof signal.newsId !== 'string'
         || !newsIds.has(signal.newsId)
@@ -478,12 +431,12 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
         evidenceOffsetStart: typeof signal.evidenceOffsetStart === 'number' ? signal.evidenceOffsetStart : null,
         evidenceOffsetEnd: typeof signal.evidenceOffsetEnd === 'number' ? signal.evidenceOffsetEnd : null,
         extractorType: this.extractorType,
-        modelVersion: this.modelVersion,
+        modelVersion: result.source.modelVersion,
         promptVersion: this.promptVersion,
         status: 'candidate',
         failureReason: null,
       } satisfies ICausalSignalCandidateRecord];
-    });
+    }), result.source, { completedNewsIds: [...newsIds] });
   }
 }
 
@@ -548,7 +501,7 @@ export class CausalSignalExtractionService {
       // Recursive helper for dynamic batching on failure
       const extractWithDynamicBatching = async (
         toExtract: readonly ICausalSignalExtractionNews[]
-      ): Promise<readonly ICausalSignalCandidateRecord[]> => {
+      ): Promise<AiSourcedArray<ICausalSignalCandidateRecord>> => {
         if (toExtract.length === 0) {
           return [];
         }
@@ -558,6 +511,7 @@ export class CausalSignalExtractionService {
             news: toExtract,
           });
         } catch (error) {
+          if (error instanceof AiCandidatesExhaustedError || error instanceof AiInputError) throw error;
           if (toExtract.length > 1) {
             const mid = Math.floor(toExtract.length / 2);
             const left = toExtract.slice(0, mid);
@@ -567,7 +521,18 @@ export class CausalSignalExtractionService {
             );
             const leftResult = await extractWithDynamicBatching(left);
             const rightResult = await extractWithDynamicBatching(right);
-            return [...leftResult, ...rightResult];
+            const combined = [...leftResult, ...rightResult];
+            const completedNewsIds = [
+              ...(leftResult.completedNewsIds ?? []),
+              ...(rightResult.completedNewsIds ?? []),
+            ];
+            if (leftResult.aiSource ?? rightResult.aiSource) {
+              return withAiSource(combined, leftResult.aiSource ?? rightResult.aiSource!, { completedNewsIds });
+            }
+            return Object.defineProperty(combined, 'completedNewsIds', {
+              value: completedNewsIds,
+              enumerable: false,
+            }) as AiSourcedArray<ICausalSignalCandidateRecord>;
           }
           throw error;
         }
@@ -590,9 +555,18 @@ export class CausalSignalExtractionService {
           const newsToExtract = batchNews.filter(news => !globalCached.completedNewsIds.has(news.id));
           
           const freshBatch = await extractWithDynamicBatching(newsToExtract);
+          if (
+            this.extractor.extractorType === 'llm'
+            && newsToExtract.length > 0
+            && (!freshBatch.completedNewsIds
+              || freshBatch.completedNewsIds.length !== newsToExtract.length
+              || new Set(freshBatch.completedNewsIds).size !== newsToExtract.length
+              || newsToExtract.some(news => !freshBatch.completedNewsIds!.includes(news.id)))
+          ) {
+            throw new AiInputError('LLM extraction response did not provide an outcome for every input news item');
+          }
           const batch = [...batchCachedCandidates, ...freshBatch]
             .map(candidate => validateCausalSignalCandidate(candidate, newsById));
-          await this.recordExtractionCache(prisma, input, newsToExtract, batch);
           input.onBatchComplete?.({
             batchIndex,
             batchCount,
@@ -600,8 +574,9 @@ export class CausalSignalExtractionService {
             elapsedMs: Date.now() - startedAt,
             signalCount: batch.length,
           });
+          const persist = async (tx: any): Promise<void> => {
           if (batch.length > 0) {
-            const result = await prisma.causalSignalCandidate.createMany({
+            const result = await tx.causalSignalCandidate.createMany({
               data: batch.map(candidate => ({
                 traceId: candidate.traceId,
                 asOf: candidate.asOf,
@@ -618,6 +593,7 @@ export class CausalSignalExtractionService {
                 extractorType: candidate.extractorType,
                 modelVersion: candidate.modelVersion,
                 promptVersion: candidate.promptVersion,
+                inputFingerprint: createCausalSignalInputFingerprint(newsById.get(candidate.newsId)!),
                 status: candidate.status,
                 failureReason: candidate.failureReason,
               })),
@@ -625,6 +601,17 @@ export class CausalSignalExtractionService {
             });
             activeInsertedCount += result.count;
           }
+          await this.recordExtractionCache(
+            tx,
+            input,
+            newsToExtract,
+            batch,
+            new Set(freshBatch.completedNewsIds ?? newsToExtract.map(news => news.id)),
+            freshBatch.aiSource,
+          );
+          };
+          if (prisma.$transaction) await prisma.$transaction(persist);
+          else await persist(prisma);
           extracted.push(...batch);
         });
       }
@@ -674,68 +661,87 @@ export class CausalSignalExtractionService {
     readonly cacheHitCount: number;
     readonly completedNewsIds: ReadonlySet<string>;
   }> {
-    const ledgerCompletedNewsIds = await this.loadCompletedNewsIdsFromLedger(prisma, input, news);
+    const ledgerCache = await this.loadCachedCandidatesFromLedger(prisma, input, news, newsById);
     if (!prisma.causalSignalCandidate?.findMany || news.length === 0) {
       return {
-        candidates: [],
-        cacheHitCount: ledgerCompletedNewsIds.size,
-        completedNewsIds: ledgerCompletedNewsIds,
+        candidates: ledgerCache.candidates,
+        cacheHitCount: ledgerCache.completedNewsIds.size,
+        completedNewsIds: ledgerCache.completedNewsIds,
       };
     }
 
-    const newsIds = news.map(item => item.id);
+    const fingerprintToNews = new Map<string, ICausalSignalExtractionNews[]>();
+    for (const item of news) {
+      const fingerprint = createCausalSignalInputFingerprint(item);
+      const matching = fingerprintToNews.get(fingerprint) ?? [];
+      matching.push(item);
+      fingerprintToNews.set(fingerprint, matching);
+    }
     const rows = await prisma.causalSignalCandidate.findMany({
       where: {
         clusterKey: input.clusterKey,
-        newsId: { in: newsIds },
+        inputFingerprint: { in: [...fingerprintToNews.keys()] },
         extractorType: this.extractor.extractorType,
-        modelVersion: this.extractor.modelVersion,
+        modelVersion: this.extractor.cacheModelVersions ? { in: this.extractor.cacheModelVersions } : this.extractor.modelVersion,
         promptVersion: this.extractor.promptVersion,
+        asOf: { lte: input.asOf },
       },
     });
     if (!Array.isArray(rows) || rows.length === 0) {
       return {
-        candidates: [],
-        cacheHitCount: ledgerCompletedNewsIds.size,
-        completedNewsIds: ledgerCompletedNewsIds,
+        candidates: ledgerCache.candidates,
+        cacheHitCount: ledgerCache.completedNewsIds.size,
+        completedNewsIds: ledgerCache.completedNewsIds,
       };
     }
 
     const candidatesByKey = new Map<string, ICausalSignalCandidateRecord>();
-    for (const row of rows) {
-      const candidate = {
-        traceId: input.traceId,
-        asOf: input.asOf,
-        clusterKey: input.clusterKey,
-        newsId: String(row.newsId),
-        event: String(row.event),
-        businessVariable: String(row.businessVariable),
-        assetOrThemeKeyword: String(row.assetOrThemeKeyword),
-        direction: isDirection(row.direction) ? row.direction : 'neutral',
-        confidence: Number(row.confidence),
-        evidenceText: String(row.evidenceText),
-        evidenceOffsetStart: row.evidenceOffsetStart ?? null,
-        evidenceOffsetEnd: row.evidenceOffsetEnd ?? null,
-        extractorType: this.extractor.extractorType,
-        modelVersion: this.extractor.modelVersion,
-        promptVersion: this.extractor.promptVersion,
-        status: row.status === 'rejected' ? 'rejected' : 'candidate',
-        failureReason: row.failureReason ?? null,
-      } satisfies ICausalSignalCandidateRecord;
+    for (const candidate of ledgerCache.candidates) {
       const key = [
         candidate.newsId,
         candidate.businessVariable,
         candidate.assetOrThemeKeyword,
         candidate.extractorType,
       ].join(':');
-      const revalidated = validateCausalSignalCandidate(candidate, newsById);
-      if (!candidatesByKey.has(key)) {
-        candidatesByKey.set(key, revalidated);
+      candidatesByKey.set(key, candidate);
+    }
+    for (const row of rows) {
+      const matchingNews = fingerprintToNews.get(String(row.inputFingerprint)) ?? [];
+      for (const currentNews of matchingNews) {
+        const candidate = {
+          traceId: input.traceId,
+          asOf: input.asOf,
+          clusterKey: input.clusterKey,
+          newsId: currentNews.id,
+          event: String(row.event),
+          businessVariable: String(row.businessVariable),
+          assetOrThemeKeyword: String(row.assetOrThemeKeyword),
+          direction: isDirection(row.direction) ? row.direction : 'neutral',
+          confidence: Number(row.confidence),
+          evidenceText: String(row.evidenceText),
+          evidenceOffsetStart: row.evidenceOffsetStart ?? null,
+          evidenceOffsetEnd: row.evidenceOffsetEnd ?? null,
+          extractorType: this.extractor.extractorType,
+          modelVersion: String(row.modelVersion),
+          promptVersion: this.extractor.promptVersion,
+          status: row.status === 'rejected' ? 'rejected' : 'candidate',
+          failureReason: row.failureReason ?? null,
+        } satisfies ICausalSignalCandidateRecord;
+        const key = [
+          candidate.newsId,
+          candidate.businessVariable,
+          candidate.assetOrThemeKeyword,
+          candidate.extractorType,
+        ].join(':');
+        const revalidated = validateCausalSignalCandidate(candidate, newsById);
+        if (!candidatesByKey.has(key)) {
+          candidatesByKey.set(key, revalidated);
+        }
       }
     }
     const candidates = [...candidatesByKey.values()];
     const completedNewsIds = new Set([
-      ...ledgerCompletedNewsIds,
+      ...ledgerCache.completedNewsIds,
       ...candidates.map(candidate => candidate.newsId),
     ]);
 
@@ -746,22 +752,76 @@ export class CausalSignalExtractionService {
     };
   }
 
-  private async loadCompletedNewsIdsFromLedger(
+  private async loadCachedCandidatesFromLedger(
     prisma: any,
     input: ICausalSignalExtractionInput,
     news: readonly ICausalSignalExtractionNews[],
-  ): Promise<ReadonlySet<string>> {
+    newsById: ReadonlyMap<string, ICausalSignalExtractionNews>,
+  ): Promise<{
+    readonly candidates: readonly ICausalSignalCandidateRecord[];
+    readonly completedNewsIds: ReadonlySet<string>;
+  }> {
     if (!supportsLedgerCache(prisma) || news.length === 0) {
-      return new Set();
+      return { candidates: [], completedNewsIds: new Set() };
     }
 
-    const ledger = new DataRefreshLedgerService();
-    return await ledger.getValidBucketKeys(
-      prisma,
-      { dataKind: 'causal_signal_extraction', source: this.cacheSourceKey, clusterKey: input.clusterKey },
-      news.map(item => item.id),
-      input.asOf,
-    );
+    const fingerprintToNews = new Map<string, ICausalSignalExtractionNews[]>();
+    for (const item of news) {
+      const fingerprint = createCausalSignalInputFingerprint(item);
+      const matching = fingerprintToNews.get(fingerprint) ?? [];
+      matching.push(item);
+      fingerprintToNews.set(fingerprint, matching);
+    }
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT "bucketKey", summary FROM "DataRefreshLedger" WHERE "dataKind" = $1 AND source = $2 AND "clusterKey" = $3 AND "bucketKey" = ANY($4::text[]) AND status = $5 AND "expiresAt" > $6 AND "fetchedAt" <= $6',
+      'causal_signal_extraction', this.cacheSourceKey, input.clusterKey, [...fingerprintToNews.keys()], 'success', input.asOf,
+    ) as readonly { bucketKey: string; summary: unknown }[];
+    const completedNewsIds = new Set<string>();
+    const candidates: ICausalSignalCandidateRecord[] = [];
+    for (const row of rows) {
+      const matchingNews = fingerprintToNews.get(String(row.bucketKey));
+      if (!matchingNews) continue;
+      let summary: unknown = row.summary;
+      if (typeof summary === 'string') {
+        try { summary = JSON.parse(summary); } catch { continue; }
+      }
+      if (!isAiRecord(summary) || summary.protocolVersion !== 2 || !Array.isArray(summary.signals)) continue;
+      const accepted = summary.signals.every(signal => isAiRecord(signal)
+        && typeof signal.event === 'string'
+        && typeof signal.businessVariable === 'string'
+        && typeof signal.assetOrThemeKeyword === 'string'
+        && isDirection(signal.direction)
+        && typeof signal.confidence === 'number'
+        && Number.isFinite(signal.confidence)
+        && typeof signal.evidenceText === 'string');
+      if (!accepted) continue;
+      for (const currentNews of matchingNews) {
+        completedNewsIds.add(currentNews.id);
+        for (const signal of summary.signals as readonly Record<string, unknown>[]) {
+          const candidate = validateCausalSignalCandidate({
+            traceId: input.traceId,
+            asOf: input.asOf,
+            clusterKey: input.clusterKey,
+            newsId: currentNews.id,
+            event: String(signal.event),
+            businessVariable: String(signal.businessVariable),
+            assetOrThemeKeyword: String(signal.assetOrThemeKeyword),
+            direction: signal.direction as CausalSignalDirection,
+            confidence: Number(signal.confidence),
+            evidenceText: String(signal.evidenceText),
+            evidenceOffsetStart: typeof signal.evidenceOffsetStart === 'number' ? signal.evidenceOffsetStart : null,
+            evidenceOffsetEnd: typeof signal.evidenceOffsetEnd === 'number' ? signal.evidenceOffsetEnd : null,
+            extractorType: this.extractor.extractorType,
+            modelVersion: typeof summary.modelVersion === 'string' ? summary.modelVersion : this.extractor.modelVersion,
+            promptVersion: this.extractor.promptVersion,
+            status: signal.status === 'rejected' ? 'rejected' : 'candidate',
+            failureReason: typeof signal.failureReason === 'string' ? signal.failureReason : null,
+          }, newsById);
+          candidates.push(candidate);
+        }
+      }
+    }
+    return { candidates, completedNewsIds };
   }
 
   private async recordExtractionCache(
@@ -769,6 +829,8 @@ export class CausalSignalExtractionService {
     input: ICausalSignalExtractionInput,
     extractedNews: readonly ICausalSignalExtractionNews[],
     batchCandidates: readonly ICausalSignalCandidateRecord[],
+    completedNewsIds: ReadonlySet<string>,
+    aiSource?: IAiSource,
   ): Promise<void> {
     if (!supportsLedgerCache(prisma) || extractedNews.length === 0) {
       return;
@@ -776,21 +838,39 @@ export class CausalSignalExtractionService {
 
     const ledger = new DataRefreshLedgerService();
     for (const news of extractedNews) {
+      if (!completedNewsIds.has(news.id)) {
+        continue;
+      }
       const candidatesForNews = batchCandidates.filter(candidate => candidate.newsId === news.id);
       await ledger.recordSuccess(prisma, {
         dataKind: 'causal_signal_extraction',
         source: this.cacheSourceKey,
         clusterKey: input.clusterKey,
-        bucketKey: news.id,
+        bucketKey: createCausalSignalInputFingerprint(news),
         fetchedAt: input.asOf,
         expiresAt: LLM_CACHE_EXPIRES_AT,
         traceId: input.traceId,
         summary: {
+          protocolVersion: 2,
+          outcome: candidatesForNews.length > 0 ? 'signals' : 'no_signal',
           signalCount: candidatesForNews.length,
           acceptedCount: candidatesForNews.filter(candidate => candidate.status === 'candidate').length,
           rejectedCount: candidatesForNews.filter(candidate => candidate.status === 'rejected').length,
-          modelVersion: this.extractor.modelVersion,
+          modelVersion: aiSource?.modelVersion ?? this.extractor.modelVersion,
+          ...(aiSource ? { providerId: aiSource.providerId, model: aiSource.model } : {}),
           promptVersion: this.extractor.promptVersion,
+          signals: candidatesForNews.map(candidate => ({
+            event: candidate.event,
+            businessVariable: candidate.businessVariable,
+            assetOrThemeKeyword: candidate.assetOrThemeKeyword,
+            direction: candidate.direction,
+            confidence: candidate.confidence,
+            evidenceText: candidate.evidenceText,
+            evidenceOffsetStart: candidate.evidenceOffsetStart ?? null,
+            evidenceOffsetEnd: candidate.evidenceOffsetEnd ?? null,
+            status: candidate.status,
+            failureReason: candidate.failureReason ?? null,
+          })),
         },
       });
     }
@@ -809,26 +889,10 @@ export const createCausalSignalExtractorFromEnv = (
   environment: NodeJS.ProcessEnv = process.env,
 ): ICausalSignalExtractor => {
   if (environment.CAUSAL_SIGNAL_EXTRACTOR === 'llm') {
-    const baseUrl = environment.LLM_SMART_BASE_URL;
-    const apiKey = environment.LLM_SMART_API_KEY;
-    const model = environment.LLM_SMART_MODEL;
-    if (!baseUrl || !apiKey || !model) {
-      throw new Error('CAUSAL_SIGNAL_EXTRACTOR=llm requires LLM_SMART_BASE_URL, LLM_SMART_API_KEY and LLM_SMART_MODEL');
-    }
-    const maxRetries = Number(environment.CAUSAL_SIGNAL_LLM_MAX_RETRIES ?? 2);
-    const retryDelayMs = Number(environment.CAUSAL_SIGNAL_LLM_RETRY_DELAY_MS ?? 800);
-    const maxRequestChars = Number(environment.CAUSAL_SIGNAL_LLM_MAX_REQUEST_CHARS ?? DEFAULT_MAX_LLM_REQUEST_CHARS);
-    const requestTimeoutMs = Number(environment.CAUSAL_SIGNAL_LLM_REQUEST_TIMEOUT_MS ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS);
-    const maxTokens = Number(environment.CAUSAL_SIGNAL_LLM_MAX_TOKENS ?? DEFAULT_LLM_MAX_TOKENS);
     return new OpenAiCompatibleCausalSignalExtractor({
-      baseUrl,
-      apiKey,
-      model,
-      maxRetries: Number.isFinite(maxRetries) ? maxRetries : 2,
-      retryDelayMs: Number.isFinite(retryDelayMs) ? retryDelayMs : 800,
-      maxRequestChars: Number.isFinite(maxRequestChars) ? maxRequestChars : DEFAULT_MAX_LLM_REQUEST_CHARS,
-      requestTimeoutMs: Number.isFinite(requestTimeoutMs) ? requestTimeoutMs : DEFAULT_LLM_REQUEST_TIMEOUT_MS,
-      maxTokens: Number.isFinite(maxTokens) ? maxTokens : DEFAULT_LLM_MAX_TOKENS,
+      ...createAiOptionsFromEnv(environment),
+      maxRequestChars: Number(environment.CAUSAL_SIGNAL_LLM_MAX_REQUEST_CHARS ?? DEFAULT_MAX_LLM_REQUEST_CHARS),
+      requestTimeoutMs: Number(environment.CAUSAL_SIGNAL_LLM_REQUEST_TIMEOUT_MS ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS),
     });
   }
 
