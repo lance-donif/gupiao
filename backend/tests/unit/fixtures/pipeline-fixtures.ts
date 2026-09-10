@@ -6,29 +6,104 @@ import { randomUUID } from 'node:crypto';
  */
 type Row = Record<string, any>;
 
-const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value, (_k, v) => typeof v === 'bigint' ? `${v}` : v)) as T;
+/**
+ * 深拷贝必须保留 `Date` 与 `bigint` 实例。
+ * 早期实现用 `JSON.parse(JSON.stringify(...))`，会把 Date 变成 ISO 字符串，
+ * 导致依赖 `publishedAt.getTime()` / `tradingDay` 日期比较的逻辑直接崩溃或静默失效。
+ */
+const clone = <T>(value: T): T => {
+  if (value === null || typeof value !== 'object') return value;
+  if (value instanceof Date) return new Date(value.getTime()) as unknown as T;
+  if (Array.isArray(value)) return value.map(item => clone(item)) as unknown as T;
+  const source = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(source)) result[key] = clone(source[key]);
+  return result as unknown as T;
+};
+
+const toTime = (value: unknown): number => value instanceof Date
+  ? value.getTime()
+  : new Date(String(value)).getTime();
 
 class Collection {
   public constructor(public rows: Row[] = []) {}
+
+  /** 支持 Prisma 的顶层逻辑运算：`OR` / `AND` / `NOT`。 */
   private match(row: Row, where?: Row): boolean {
     if (!where) return true;
-    return Object.entries(where).every(([key, cond]) => {
-      const value = row[key];
-      if (cond && typeof cond === 'object' && !Array.isArray(cond) && !(cond instanceof Date)) {
-        if ('in' in cond) return (cond.in as unknown[]).includes(value);
-        if ('equals' in cond) return value === cond.equals;
-        if ('not' in cond) return value !== cond.not;
-        if ('gt' in cond) return value > cond.gt;
-        if ('gte' in cond) return value >= cond.gte;
-        if ('lt' in cond) return value < cond.lt;
-        if ('lte' in cond) return value <= cond.lte;
-        return JSON.stringify(value) === JSON.stringify(cond);
-      }
-      return value === cond;
+    return Object.keys(where).every((key) => {
+      const condition = where[key];
+      if (key === 'OR') return (condition as Row[]).some(clause => this.match(row, clause));
+      if (key === 'AND') return (condition as Row[]).every(clause => this.match(row, clause));
+      if (key === 'NOT') return !this.match(row, condition as Row);
+      return this.matchValue(row[key], condition);
     });
   }
-  public async findMany(args?: { where?: Row }): Promise<Row[]> { return clone(this.rows.filter(row => this.match(row, args?.where))); }
-  public async findFirst(args?: { where?: Row }): Promise<Row | null> { return this.findMany(args).then(rows => rows[0] ?? null); }
+
+  private matchValue(value: unknown, condition: unknown): boolean {
+    if (condition === null || typeof condition !== 'object' || condition instanceof Date) {
+      return this.equal(value, condition);
+    }
+    const cond = condition as Row;
+    if ('equals' in cond) return this.equal(value, cond.equals);
+    if ('in' in cond) return (cond.in as unknown[]).some(candidate => this.equal(value, candidate));
+    if ('notIn' in cond) return !(cond.notIn as unknown[]).some(candidate => this.equal(value, candidate));
+    if ('not' in cond) return !this.matchValue(value, cond.not);
+    if ('gt' in cond) return this.order(value, cond.gt) > 0;
+    if ('gte' in cond) return this.order(value, cond.gte) >= 0;
+    if ('lt' in cond) return this.order(value, cond.lt) < 0;
+    if ('lte' in cond) return this.order(value, cond.lte) <= 0;
+    if ('contains' in cond) return String(value ?? '').includes(String(cond.contains));
+    return this.equal(value, condition);
+  }
+
+  private equal(value: unknown, expected: unknown): boolean {
+    if (value instanceof Date || expected instanceof Date) return toTime(value) === toTime(expected);
+    return value === expected;
+  }
+
+  private order(value: unknown, expected: unknown): number {
+    if (value instanceof Date || expected instanceof Date) {
+      const left = toTime(value);
+      const right = toTime(expected);
+      return left === right ? 0 : (left > right ? 1 : -1);
+    }
+    if (typeof value === 'number' && typeof expected === 'number') {
+      return value === expected ? 0 : (value > expected ? 1 : -1);
+    }
+    const left = String(value ?? '');
+    const right = String(expected ?? '');
+    return left === right ? 0 : (left > right ? 1 : -1);
+  }
+
+  private applyOrderBy(rows: Row[], args?: { orderBy?: Row | Row[]; take?: number; skip?: number }): Row[] {
+    let result = rows;
+    const orderBy = args?.orderBy;
+    if (orderBy) {
+      const clauses = Array.isArray(orderBy) ? orderBy : [orderBy];
+      result = [...result].sort((left, right) => {
+        for (const clause of clauses) {
+          for (const key of Object.keys(clause)) {
+            const direction = String(clause[key]);
+            const delta = this.order(left[key], right[key]);
+            if (delta !== 0) return direction === 'desc' ? -delta : delta;
+          }
+        }
+        return 0;
+      });
+    }
+    if (args?.skip) result = result.slice(args.skip);
+    if (args?.take !== undefined) result = result.slice(0, args.take);
+    return result;
+  }
+
+  public async findMany(args?: { where?: Row; orderBy?: Row | Row[]; take?: number; skip?: number }): Promise<Row[]> {
+    const matched = this.rows.filter(row => this.match(row, args?.where));
+    return clone(this.applyOrderBy(matched, args));
+  }
+  public async findFirst(args?: { where?: Row; orderBy?: Row | Row[]; take?: number; skip?: number }): Promise<Row | null> {
+    return this.findMany(args).then(rows => rows[0] ?? null);
+  }
   public async findUnique(args?: { where?: Row }): Promise<Row | null> { return this.findFirst(args); }
   public async count(args?: { where?: Row }): Promise<number> { return this.findMany(args).then(rows => rows.length); }
   public async create(args: { data: Row }): Promise<Row> {

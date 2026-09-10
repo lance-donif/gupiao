@@ -59,6 +59,8 @@ model Stock {
   runContextId   String?
   lastSyncedAt   DateTime?
   latestTradeDay DateTime?
+  listedAt       DateTime?
+  delistedAt     DateTime?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
   runContext     RunContext? @relation(fields: [runContextId], references: [id], onDelete: SetNull)
@@ -78,6 +80,12 @@ model Candle {
   low         Decimal  @db.Decimal(18, 4)
   close       Decimal  @db.Decimal(18, 4)
   volume      BigInt
+  tradingStatus    String?
+  limitUpPrice     Decimal? @db.Decimal(12, 4)
+  limitDownPrice   Decimal? @db.Decimal(12, 4)
+  adjType          String?
+  visibleAt        DateTime?
+  datasetVersionId String?
   capturedAt  DateTime @default(now())
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -316,6 +324,7 @@ model AiWorkflow {
   status String @default("PENDING")
   owner String?
   leaseUntil DateTime?
+  leaseGeneration Int @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now())
   tasks AiWorkItem[]
@@ -332,6 +341,7 @@ model AiWorkItem {
   nextAttemptAt DateTime @default(now())
   owner String?
   leaseUntil DateTime?
+  leaseGeneration Int @default(0)
   error String?
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now())
@@ -360,6 +370,9 @@ model RunTrace {
   status       String
   metrics      Json
   errorMessage String?
+  recipeVersion String?
+  businessConfigHash String?
+  stageVersionMapJson Json?
   triggeredAt  DateTime           @default(now())
   completedAt  DateTime?
   steps        PipelineStepTrace[]
@@ -382,6 +395,8 @@ model PipelineStepTrace {
   id           String    @id @default(cuid())
   traceId      String
   stepName     String
+  stageId      String?
+  artifactId   String?
   status       String
   inputSummary Json
   outputSummary Json
@@ -647,6 +662,7 @@ model CausalSignalCandidate {
   /// SHA-256 of the exact title/content/source supplied to the extractor.
   /// Legacy rows remain null and are deliberately not used as a cache hit.
   inputFingerprint    String?
+  protocolVersion     Int?
   status              String   @default("candidate")
   failureReason       String?
   createdAt           DateTime @default(now())
@@ -723,4 +739,134 @@ model ThemeForecast {
   @@unique([traceId, theme])
   @@index([clusterKey, asOf, direction])
   @@index([clusterKey, theme, asOf])
+}
+
+/// 不可变阶段产物清单
+model RunArtifact {
+  id                   String   @id @default(cuid())
+  traceId              String
+  stageId              String
+  version              Int
+  inputFingerprint     String
+  upstreamFingerprints Json
+  shardCount           Int      @default(1)
+  contentHash          String
+  originTraceId        String?
+  originArtifactId     String?
+  committedAt          DateTime @default(now())
+
+  @@unique([traceId, stageId, version])
+  @@index([traceId])
+  @@index([originTraceId])
+}
+
+/// 分片清单（用于「全部分片完成」校验）
+model RunArtifactShard {
+  id          String @id @default(cuid())
+  artifactId  String
+  shardIndex  Int
+  contentHash String
+  byteSize    Int?
+
+  @@unique([artifactId, shardIndex])
+}
+
+/// 发布记录，替代 RecommendationSnapshot.isPublished 布尔位
+model RecommendationPublish {
+  id             String   @id @default(cuid())
+  traceId        String
+  publishVersion Int
+  publishedAt    DateTime @default(now())
+  auditStatus    String
+  supersededBy   String?
+  reason         String?
+  asOf           DateTime
+  clusterKey     String
+
+  @@unique([traceId, publishVersion])
+  @@index([clusterKey, asOf])
+  @@index([supersededBy])
+}
+
+/// 抽取缓存（原文 + 结果 + 并发领取租约）
+model ContentCacheEntry {
+  id                        String    @id @default(cuid())
+  cacheKey                  String
+  extractionSemanticVersion String
+  promptVersion             String
+  schemaVersion             String
+  sourceModel               String?
+  rawText                   String
+  evidenceOffsetsJson       Json?
+  resultJson                Json?
+  status                    String
+  contentVersion            String
+  leaseOwner                String?
+  leaseUntil                DateTime?
+  committedAt               DateTime?
+
+  @@unique([cacheKey, contentVersion])
+  @@index([status])
+  @@index([leaseUntil])
+}
+
+/// 冻结的数据修订版本
+model MarketDatasetVersion {
+  id            String    @id @default(cuid())
+  source        String
+  asOf          DateTime
+  revision      String
+  checksum      String?
+  coverageStart DateTime?
+  coverageEnd   DateTime?
+  importedAt    DateTime  @default(now())
+
+  @@unique([source, asOf, revision])
+}
+
+/// 版本化交易日历
+model TradingCalendarDay {
+  id              String   @id @default(cuid())
+  exchange        String
+  date            DateTime
+  isOpen          Boolean
+  openTime        String?
+  closeTime       String?
+  source          String
+  calendarVersion String
+
+  @@unique([exchange, date, calendarVersion])
+  @@index([exchange, date])
+}
+
+/// 分周期收益元数据
+model YieldRecord {
+  id             String    @id @default(cuid())
+  snapshotId     String
+  symbol         String
+  horizon        Int
+  value          Decimal?  @db.Decimal(12, 6)
+  status         String
+  plannedExitDay DateTime?
+  actualExitDay  DateTime?
+  maturityAt     DateTime?
+  computeVersion String
+
+  @@unique([snapshotId, symbol, horizon, computeVersion])
+  @@index([status, maturityAt])
+}
+
+/// 股票历史状态
+model StockStatusHistory {
+  id            String    @id @default(cuid())
+  symbol        String
+  effectiveFrom DateTime
+  isST          Boolean   @default(false)
+  industry      String?
+  listedAt      DateTime?
+  delistedAt    DateTime?
+  source        String?
+
+  @@unique([symbol, effectiveFrom])
+  @@index([symbol])
 }

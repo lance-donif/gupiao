@@ -11,6 +11,7 @@ import type { INewsSourceArticle } from '../sources/contracts.js';
 import type { PublicNewsSourceMode } from './public-news-source-orchestrator.js';
 import { createDefaultPublicNewsSourceOrchestrator } from './public-news-source-orchestrator.js';
 import { dateKey } from '../lib/date-utils.js';
+import { DEFAULT_BUSINESS_CONFIG_HASH, RECIPE_VERSION } from '../version.js';
 
 const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
 const NEWS_FETCH_CACHE_BUCKET_MINUTES = 15;
@@ -126,9 +127,25 @@ export const getBeijingDateKey = (date: Date): string => {
   }).format(date);
 };
 
+/**
+ * 运行键：clusterKey + mode + asOf + recipeVersion + businessConfigHash。
+ * 供应商顺序、凭证、并发与超时不参与，因此调度配置变化不会产生新的运行。
+ */
+export const buildRunKey = (input: {
+  readonly asOf: Date;
+  readonly clusterKey: string;
+  readonly mode: string;
+}): string => [
+  input.clusterKey,
+  input.mode,
+  input.asOf.toISOString(),
+  RECIPE_VERSION,
+  DEFAULT_BUSINESS_CONFIG_HASH,
+].join('|');
+
 export const createTraceId = (asOf: Date, clusterKey: string): string => {
   const suffix = crypto.randomBytes(4).toString('hex');
-  return `daily-${clusterKey}-${dateKey(asOf)}-${suffix}`;
+  return `daily-${clusterKey}-${dateKey(asOf)}-${RECIPE_VERSION}-${DEFAULT_BUSINESS_CONFIG_HASH}-${suffix}`;
 };
 
 const createStableNewsRecordId = (
