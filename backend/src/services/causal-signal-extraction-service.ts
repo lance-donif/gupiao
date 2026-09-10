@@ -211,7 +211,7 @@ interface IOpenAiCompatibleCausalSignalExtractorOptions {
   readonly requestTimeoutMs?: number;
   /**
    * `items` = v3 逐条结果协议；`legacy` = v2 `{signals,noSignalNewsIds}`。
-   * 默认 `legacy`，保持既有线上契约与历史缓存键稳定；新链路可显式启用 `items`。
+   * 默认 `items`；只有调试旧报文时才显式设 `CAUSAL_PROTOCOL_MODE=legacy`。
    */
   readonly protocolMode?: CausalProtocolMode;
 }
@@ -965,7 +965,7 @@ export const createCausalSignalExtractorFromEnv = (
   environment: NodeJS.ProcessEnv = process.env,
 ): ICausalSignalExtractor => {
   if (environment.CAUSAL_SIGNAL_EXTRACTOR === 'llm') {
-    const protocolMode: CausalProtocolMode = environment.CAUSAL_PROTOCOL_MODE === 'items' ? 'items' : 'legacy';
+    const protocolMode: CausalProtocolMode = environment.CAUSAL_PROTOCOL_MODE === 'legacy' ? 'legacy' : 'items';
     return new OpenAiCompatibleCausalSignalExtractor({
       ...createAiOptionsFromEnv(environment),
       protocolMode,

@@ -478,7 +478,7 @@ describe('backend http runtime store', () => {
       options: {
         pgPool: {
           async query<T>(sql: string) {
-            if (sql.includes('FROM (SELECT * FROM public."RecommendationSnapshot" WHERE "isPublished" = true) r')) {
+            if (sql.includes('FROM (SELECT r.* FROM public."RecommendationSnapshot" r JOIN public."RecommendationPublish" rp')) {
               return {
                 rows: [{
                   traceId,
@@ -634,7 +634,7 @@ describe('backend http runtime store', () => {
       options: {
         pgPool: {
           async query<T>(sql: string) {
-            if (sql.includes('FROM (SELECT * FROM public."RecommendationSnapshot" WHERE "isPublished" = true) r') || sql.includes('FROM public."StrategyRecommendationEvent" e')) {
+            if (sql.includes('FROM (SELECT r.* FROM public."RecommendationSnapshot" r JOIN public."RecommendationPublish" rp') || sql.includes('FROM public."StrategyRecommendationEvent" e')) {
               return { rows: [] as T[] };
             }
             if (sql.includes('FROM public."RunTrace" rt')) {

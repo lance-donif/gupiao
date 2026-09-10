@@ -78,7 +78,7 @@ describe.skipIf(!connection)('stage executor PostgreSQL integration', () => {
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: connection! });
     await admin.query(`CREATE SCHEMA "${schema}"`);
-    for (const table of ['RunTrace', 'PipelineStepTrace', 'PipelineCheckpoint', 'RunArtifact', 'RunArtifactShard']) {
+    for (const table of ['RunTrace', 'PipelineStepTrace', 'PipelineCheckpoint', 'RunArtifact', 'RunArtifactShard', 'RunLease']) {
       await admin.query(`CREATE TABLE "${schema}"."${table}" (LIKE public."${table}" INCLUDING ALL)`);
     }
     const scoped = new URL(connection!);
@@ -88,7 +88,7 @@ describe.skipIf(!connection)('stage executor PostgreSQL integration', () => {
   }, 30000);
 
   beforeEach(async () => {
-    await prisma.$executeRawUnsafe('TRUNCATE "RunArtifactShard","RunArtifact","PipelineStepTrace","PipelineCheckpoint","RunTrace"');
+    await prisma.$executeRawUnsafe('TRUNCATE "RunArtifactShard","RunArtifact","PipelineStepTrace","PipelineCheckpoint","RunTrace","RunLease"');
     await TraceManager.startRunTrace(prisma, 'trace', 'test', 'DAILY_RECOMMENDATION', asOf);
   });
 

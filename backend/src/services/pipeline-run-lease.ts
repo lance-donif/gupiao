@@ -34,6 +34,19 @@ export interface LeaseHolderQuery extends LeaseGuard {
 
 /** 读取持久化租约记录；无记录返回 null。 */
 export async function readLeaseRecord(prisma: any, traceId: string): Promise<LeaseRecord | null> {
+  if (prisma.runLease?.findUnique) {
+    const row = await prisma.runLease.findUnique({
+      where: { traceId },
+      select: { owner: true, generation: true, leaseUntil: true },
+    });
+    if (row) {
+      return {
+        owner: row.owner ?? null,
+        leaseUntil: row.leaseUntil instanceof Date ? row.leaseUntil.toISOString() : String(row.leaseUntil),
+        generation: Number(row.generation),
+      };
+    }
+  }
   if (!prisma.pipelineCheckpoint?.findFirst) return null;
   const row = await prisma.pipelineCheckpoint.findFirst({
     where: { traceId, stage: PIPELINE_LEASE_STAGE },
@@ -90,19 +103,31 @@ export class PipelineRunLease {
   }
   public async start(timeoutMs: number): Promise<void> {
     await this.client.connect();
-    const result = await this.client.query('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS owned', [`pipeline:${this.traceId}`]);
-    if (!result.rows[0]?.owned) {
-      await this.client.end();
-      throw new AiNeedsAttentionError('This pipeline is already running');
+    try {
+      // advisory lock 是数据库级全局的，测试/多环境并行时必须把 database + schema 纳入 key，
+      // 否则不同 schema 下同名 traceId 会互相抢锁（生产固定 public，语义不变）。
+      const result = await this.client.query(
+        "SELECT pg_try_advisory_lock(hashtextextended(current_database() || ':' || current_schema() || ':pipeline:' || $1, 0)) AS owned",
+        [this.traceId],
+      );
+      if (!result.rows[0]?.owned) {
+        throw new AiNeedsAttentionError('This pipeline is already running');
+      }
+      this.timeoutMs = timeoutMs;
+      this.leaseUntil = new Date(Date.now() + timeoutMs);
+      const existing = await this.readPersistedLease();
+      // 代次单调递增：接管者必然拿到比前任更大的 generation。
+      this.generation = (existing?.generation ?? 0) + 1;
+      await this.writePersistedLease();
+      this.timer = setTimeout(() => this.controller.abort(new AiPausedError('One-hour pipeline deadline reached')), timeoutMs);
+      this.heartbeat = setInterval(() => { void this.renew(); }, 10000);
+    } catch (error) {
+      // 启动失败必须关闭连接：否则会话会一直持有 advisory lock，阻塞后续接管。
+      clearTimeout(this.timer);
+      clearInterval(this.heartbeat);
+      await this.client.end().catch(() => undefined);
+      throw error;
     }
-    this.timeoutMs = timeoutMs;
-    this.leaseUntil = new Date(Date.now() + timeoutMs);
-    const existing = await this.readPersistedLease();
-    // 代次单调递增：接管者必然拿到比前任更大的 generation。
-    this.generation = (existing?.generation ?? 0) + 1;
-    await this.writePersistedLease();
-    this.timer = setTimeout(() => this.controller.abort(new AiPausedError('One-hour pipeline deadline reached')), timeoutMs);
-    this.heartbeat = setInterval(() => { void this.renew(); }, 10000);
   }
   /** 当前代次；`start()` 之前为 0。 */
   public currentGeneration(): number { return this.generation; }
@@ -141,6 +166,19 @@ export class PipelineRunLease {
     }
   }
   private async readPersistedLease(): Promise<LeaseRecord | null> {
+    const hasRunLease = await this.leaseTableExists();
+    if (hasRunLease) {
+      const result = await this.client.query('SELECT owner, generation, "leaseUntil" FROM "RunLease" WHERE "traceId"=$1', [this.traceId]);
+      const row = result.rows[0] as { owner?: string | null; generation?: number | string; leaseUntil?: string | Date } | undefined;
+      if (!row) return null;
+      const generation = Number(row.generation);
+      if (!Number.isFinite(generation)) return null;
+      return {
+        owner: row.owner ?? null,
+        leaseUntil: row.leaseUntil instanceof Date ? row.leaseUntil.toISOString() : String(row.leaseUntil),
+        generation,
+      };
+    }
     const result = await this.client.query('SELECT result FROM "PipelineCheckpoint" WHERE "traceId"=$1 AND stage=$2', [this.traceId, PIPELINE_LEASE_STAGE]);
     const value = result.rows[0]?.result;
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -154,6 +192,14 @@ export class PipelineRunLease {
     };
   }
   private async writePersistedLease(): Promise<void> {
+    if (await this.leaseTableExists()) {
+      await this.client.query(
+        'INSERT INTO "RunLease"("id","traceId",owner,generation,"leaseUntil","updatedAt") VALUES(gen_random_uuid(),$1,$2,$3,$4,now()) '
+        + 'ON CONFLICT ("traceId") DO UPDATE SET owner=EXCLUDED.owner,generation=EXCLUDED.generation,"leaseUntil"=EXCLUDED."leaseUntil","updatedAt"=now()',
+        [this.traceId, this.owner, this.generation, this.leaseUntil],
+      );
+      return;
+    }
     const payload: LeaseRecord = { owner: this.owner, leaseUntil: this.leaseUntil.toISOString(), generation: this.generation };
     await this.client.query(
       'INSERT INTO "PipelineCheckpoint"("traceId",stage,input,result,"updatedAt") VALUES($1,$2,$3,$4::jsonb,now()) '
@@ -163,11 +209,24 @@ export class PipelineRunLease {
   }
   private async releasePersistedLease(): Promise<void> {
     if (this.generation <= 0) return;
-    // 保留 generation 以便下次 start() 继续单调递增；仅将 owner 置空使 isLeaseHolder 判定为 false。
+    if (await this.leaseTableExists()) {
+      await this.client.query(
+        'UPDATE "RunLease" SET "owner"=NULL,"leaseUntil"=now(),"updatedAt"=now() WHERE "traceId"=$1 AND "owner"=$2',
+        [this.traceId, this.owner],
+      );
+      return;
+    }
+    // 保留 generation 只是旧表兼容；新 schema 迁移后走 RunLease。
     const payload: LeaseRecord = { owner: null, leaseUntil: new Date().toISOString(), generation: this.generation };
     await this.client.query(
-      'UPDATE "PipelineCheckpoint" SET result=$4::jsonb,"updatedAt"=now() WHERE "traceId"=$1 AND stage=$2 AND (result->>\'owner\')=$3',
+      "UPDATE \"PipelineCheckpoint\" SET result=$4::jsonb,\"updatedAt\"=now() WHERE \"traceId\"=$1 AND stage=$2 AND (result->>'owner')=$3",
       [this.traceId, PIPELINE_LEASE_STAGE, this.owner, JSON.stringify(payload)],
     );
+  }
+
+  private async leaseTableExists(): Promise<boolean> {
+    // 用 search_path 相对名判断：schema 隔离的测试库/多 schema 部署下与后续查询保持一致。
+    const result = await this.client.query("SELECT to_regclass('\"RunLease\"') IS NOT NULL AS ok");
+    return Boolean(result.rows[0]?.ok);
   }
 }

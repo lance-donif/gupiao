@@ -391,6 +391,19 @@ model PipelineCheckpoint {
   @@id([traceId, stage])
 }
 
+
+model RunLease {
+  id         String   @id @default(cuid())
+  traceId    String   @unique
+  owner      String
+  generation Int      @default(1)
+  leaseUntil DateTime
+  acquiredAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([leaseUntil])
+}
+
 model PipelineStepTrace {
   id           String    @id @default(cuid())
   traceId      String

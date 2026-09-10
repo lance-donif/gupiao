@@ -487,7 +487,10 @@ export interface IContributionDetailQuery {
 }
 
 export interface IContributionDetailReader {
-  getContributionDetail: (query: IContributionDetailQuery) => Promise<IContributionDetailPayload | null>;
+  getContributionDetail: (
+    query: IContributionDetailQuery,
+    options?: { allowUnpublished?: boolean },
+  ) => Promise<IContributionDetailPayload | null>;
   close?: () => Promise<void>;
 }
 

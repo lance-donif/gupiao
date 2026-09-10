@@ -12,6 +12,7 @@ import type { PublicNewsSourceMode } from './public-news-source-orchestrator.js'
 import { createDefaultPublicNewsSourceOrchestrator } from './public-news-source-orchestrator.js';
 import { dateKey } from '../lib/date-utils.js';
 import { DEFAULT_BUSINESS_CONFIG_HASH, RECIPE_VERSION } from '../version.js';
+import { STAGE_IDS, type StageId } from './pipeline/stage-registry.js';
 
 const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
 const NEWS_FETCH_CACHE_BUCKET_MINUTES = 15;
@@ -106,7 +107,7 @@ export interface IPublicNewsFetchSummary {
   readonly sourceSummary: Record<string, unknown>;
 }
 
-export type StopAfterStage = 'none' | 'dedup';
+export type StopAfterStage = 'none' | 'dedup' | StageId;
 
 export class PipelineStopError extends Error {
   public constructor(
@@ -176,7 +177,10 @@ export const getStopAfter = (raw: string | undefined): StopAfterStage => {
   if (raw === 'dedup') {
     return raw;
   }
-  throw new Error(`Invalid --stop-after: ${raw}. Supported values: dedup`);
+  if ((STAGE_IDS as readonly string[]).includes(raw)) {
+    return raw as StageId;
+  }
+  throw new Error(`Invalid --stop-after: ${raw}. Supported values: none, dedup, ${STAGE_IDS.join(', ')}`);
 };
 
 export const getPositiveIntegerOption = (

@@ -126,15 +126,15 @@ describe('pipeline stage status machine', () => {
 });
 
 describe('version resolvers', () => {
-  it('defaults scoring recipe to baseline-v1', () => {
-    expect(resolveScoringRecipe({})).toBe('baseline-v1');
+  it('defaults scoring recipe to event-v2 (forced production switch)', () => {
+    expect(resolveScoringRecipe({})).toBe('event-v2');
     expect(resolveScoringRecipe({ SCORING_RECIPE: 'baseline-v1' })).toBe('baseline-v1');
     expect(resolveScoringRecipe({ SCORING_RECIPE: 'event-v2' })).toBe('event-v2');
     expect(() => resolveScoringRecipe({ SCORING_RECIPE: 'bogus' })).toThrow();
   });
 
-  it('defaults stage executor to legacy', () => {
-    expect(resolveStageExecutor({})).toBe('legacy');
+  it('defaults stage executor to registry', () => {
+    expect(resolveStageExecutor({})).toBe('registry');
     expect(resolveStageExecutor({ PIPELINE_STAGE_EXECUTOR: 'legacy' })).toBe('legacy');
     expect(resolveStageExecutor({ PIPELINE_STAGE_EXECUTOR: 'registry' })).toBe('registry');
     expect(() => resolveStageExecutor({ PIPELINE_STAGE_EXECUTOR: 'bogus' })).toThrow();

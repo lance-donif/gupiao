@@ -5,6 +5,12 @@
 
 import { clamp } from '../../lib/number-utils.js';
 import { normalizeKeyword, longestCommonSubstringLength } from '../scoring-utils.js';
+import {
+  aggregateEventEvidence,
+  type EvidenceDirection,
+  type EventEvidenceItem,
+  type EventEvidenceSummary,
+} from '../event-scoring/event-evidence.js';
 import { DIRECT_STOCK_NAME_MATCH_MIN_LENGTH } from './constants.js';
 
 export interface IExposureKeywordMatch {
@@ -34,6 +40,20 @@ export interface IExposureKeywordIndex {
   readonly exactByNorm: ReadonlyMap<string, readonly IExposureKeywordEntry[]>;
   readonly twoGramByNorm: ReadonlyMap<string, readonly IExposureKeywordEntry[]>;
   readonly threeGramByNorm: ReadonlyMap<string, readonly IExposureKeywordEntry[]>;
+}
+
+/** event-v2 证据聚合：同一关键词只取最强的 top-K 独立事件，K 固定为 3。 */
+export const EVENT_EVIDENCE_TOP_K = 3;
+
+/** event-v2 证据特征：按关键词聚合后的 E=E+−E−（截断到 0 以上）。 */
+export interface IEventEvidenceFeatures {
+  readonly summaries: readonly EventEvidenceSummary[];
+  /** 关键词 -> E，只包含 E>0 的关键词，直接喂给证据贡献组件曲线。 */
+  readonly keywordScores: ReadonlyMap<string, number>;
+  /** 全部关键词 E 的合计，用于「零正向证据不可评分」门槛。 */
+  readonly aggregatedEvidence: number;
+  readonly itemCount: number;
+  readonly topK: number;
 }
 
 export const hasDelegate = (prisma: any, delegateName: string, methodName: string): boolean => {
@@ -255,4 +275,112 @@ export const buildExposureKeywordMatches = (
   return [...matches.values()]
     .sort((left, right) => right.confidence - left.confidence || left.exposureKeyword.localeCompare(right.exposureKeyword))
     .slice(0, 6);
+};
+
+const KNOWN_EVIDENCE_DIRECTIONS = new Set<EvidenceDirection>([
+  'positive',
+  'negative',
+  'mixed',
+  'neutral',
+]);
+
+/** 贡献行使用的暴露关键词（与引擎 `readContributionKeyword` 保持同一口径）。 */
+export const contributionExposureKeyword = (contribution: any): string =>
+  String(contribution?.matchedExposureKeyword ?? contribution?.keyword ?? '').trim();
+
+/**
+ * 贡献行的确定性证据 ID。
+ *
+ * 由 traceId/newsId/symbol/曝光关键词/暴露事实/匹配方式拼成，不依赖输入顺序；
+ * 同事件去重与并列时的 tie-break 都以它为唯一依据。
+ */
+export const contributionEvidenceId = (contribution: any): string => [
+  String(contribution?.traceId ?? ''),
+  String(contribution?.newsId ?? ''),
+  String(contribution?.symbol ?? ''),
+  contributionExposureKeyword(contribution),
+  String(contribution?.exposureFactId ?? '-'),
+  String(contribution?.matchMethod ?? '-'),
+].join('|');
+
+/**
+ * 解析贡献行的极性。
+ *
+ * event-v2 下引擎会把 `CausalSignalCandidate.direction` 以 `__direction` 透传到贡献行；
+ * 缺少该字段时，能落到暴露事实上的贡献行按正向处理（旧数据兼容），其余视为中性。
+ */
+export const resolveEvidenceDirection = (contribution: any): EvidenceDirection => {
+  const raw = contribution?.__direction;
+  if (typeof raw === 'string' && KNOWN_EVIDENCE_DIRECTIONS.has(raw as EvidenceDirection)) {
+    return raw as EvidenceDirection;
+  }
+  const hasExposurePath = Boolean(contribution?.exposureFactId)
+    || Boolean(contribution?.matchedExposureKeyword)
+    || Boolean(contribution?.keyword);
+  return hasExposurePath ? 'positive' : 'neutral';
+};
+
+/**
+ * 贡献行 -> 事件证据项（纯函数）。
+ *
+ * 无有效正向暴露证据或非正有效贡献的行返回 null，不进入聚合（不做任何补位/降级）。
+ */
+export const toEventEvidenceItem = (contribution: any): EventEvidenceItem | null => {
+  const canonicalKeyword = contributionExposureKeyword(contribution);
+  const effectiveContribution = Number(contribution?.finalContribScore);
+  if (!canonicalKeyword || !Number.isFinite(effectiveContribution) || effectiveContribution <= 0) {
+    return null;
+  }
+
+  const direction = resolveEvidenceDirection(contribution);
+  if (direction === 'neutral') {
+    return null;
+  }
+
+  return {
+    evidenceId: contributionEvidenceId(contribution),
+    event: String(contribution?.__signalEvent ?? '').trim(),
+    canonicalKeyword,
+    businessVariable: String(contribution?.__businessVariable ?? '').trim(),
+    direction,
+    effectiveContribution,
+    hasPositiveExposureEvidence: direction === 'positive' || direction === 'mixed',
+  };
+};
+
+/**
+ * event-v2 证据特征构建（纯函数，无副作用、不查库）。
+ *
+ * 规则：同（关键词/经营变量/极性/事件）取最大有效贡献并按键内证据 ID 破平；每个关键词按
+ * 正负分开聚合 top-K 独立事件 E+=1-∏(1-q)、E−=1-∏(1-q)；E=max(0,E+−E−)。
+ */
+export const buildEventEvidenceFeatures = (
+  contributions: readonly any[],
+  topK: number = EVENT_EVIDENCE_TOP_K,
+): IEventEvidenceFeatures => {
+  const items: EventEvidenceItem[] = [];
+  for (const contribution of contributions) {
+    const item = toEventEvidenceItem(contribution);
+    if (item) {
+      items.push(item);
+    }
+  }
+
+  const summaries = aggregateEventEvidence(items, topK);
+  const keywordScores = new Map<string, number>();
+  let aggregatedEvidence = 0;
+  for (const summary of summaries) {
+    if (summary.E > 0) {
+      keywordScores.set(summary.keyword, summary.E);
+    }
+    aggregatedEvidence += summary.E;
+  }
+
+  return {
+    summaries,
+    keywordScores,
+    aggregatedEvidence: Number(aggregatedEvidence.toFixed(6)),
+    itemCount: items.length,
+    topK,
+  };
 };

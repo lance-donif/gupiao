@@ -227,16 +227,18 @@ export const handleBackendRoute = async (
       writeJson(response, 400, { status: '待查', detail: '缺少 traceId 或 symbol' });
       return { handled: true, ok: false };
     }
+    // 调试入口：显式 ?unpublished=1 允许查看未发布明细，响应会带 publishStatus: 'draft' 标记。
+    const allowUnpublished = (url.searchParams.get('unpublished') ?? '').trim() === '1';
     let payload: Awaited<ReturnType<BackendRuntimeStore['getContributionDetail']>>;
     try {
-      payload = await store.getContributionDetail(traceId, symbol);
+      payload = await store.getContributionDetail(traceId, symbol, allowUnpublished);
     }
     catch {
       writeJson(response, 500, { status: '查询失败', detail: '查询失败' });
       return { handled: true, ok: false };
     }
     if (!payload || payload.rows.length === 0) {
-      writeJson(response, 200, payload ?? { traceId, symbol, totalContribution: 0, rows: [] });
+      writeJson(response, 200, payload ?? { traceId, symbol, totalContribution: 0, rows: [], publishStatus: allowUnpublished ? 'draft' : 'unpublished' });
       return { handled: true, ok: true };
     }
     writeJson(response, 200, payload);

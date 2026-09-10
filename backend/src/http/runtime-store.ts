@@ -141,8 +141,8 @@ export class BackendRuntimeStore {
     return this.data.getBatchNodeResult(batchId, nodeId, section, page, pageSize);
   }
 
-  public async getContributionDetail(traceId: string, symbol: string): Promise<IContributionDetailPayload | null> {
-    return this.data.getContributionDetail(traceId, symbol);
+  public async getContributionDetail(traceId: string, symbol: string, allowUnpublished = false): Promise<IContributionDetailPayload | null> {
+    return this.data.getContributionDetail(traceId, symbol, allowUnpublished);
   }
 
   public async listStrategies(groupId: string) {

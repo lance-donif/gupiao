@@ -1503,6 +1503,22 @@ export class RuntimeDataOperations {
     return dbRunTraceToTraceRecord(runTrace, stepRows.rows);
   }
 
+  /**
+   * 解析某 trace 的发布状态（供 Trace 调试接口标注）。
+   * 存在未被取代的发布记录即视为已发布，否则为草稿。
+   */
+  private async resolveTracePublishStatus(traceId: string): Promise<'published' | 'draft'> {
+    const pool = this.deps.options.pgPool;
+    if (!pool) {
+      return 'draft';
+    }
+    const rows = await pool.query<{ c: number }>(
+      'SELECT count(*)::int AS c FROM public."RecommendationPublish" WHERE "traceId" = $1 AND "supersededBy" IS NULL',
+      [traceId],
+    );
+    return (rows.rows[0]?.c ?? 0) > 0 ? 'published' : 'draft';
+  }
+
   public async dispatchDaily(input: IDispatchDailyInput): Promise<{ trace_id: string; celery_task_id: string }> {
     const clusterKey = toClusterKey(input.groupId);
     const suffix = crypto.randomBytes(4).toString('hex');
@@ -1942,7 +1958,7 @@ export class RuntimeDataOperations {
     };
   }
 
-  public async getContributionDetail(traceId: string, symbol: string): Promise<IContributionDetailPayload | null> {
+  public async getContributionDetail(traceId: string, symbol: string, allowUnpublished = false): Promise<IContributionDetailPayload | null> {
     if (!this.deps.options.contributionReader) {
       return {
         traceId,
@@ -1951,7 +1967,7 @@ export class RuntimeDataOperations {
         rows: [],
       };
     }
-    return this.deps.options.contributionReader.getContributionDetail({ traceId, symbol });
+    return this.deps.options.contributionReader.getContributionDetail({ traceId, symbol }, { allowUnpublished });
   }
 
   public async listStrategies(groupId: string): Promise<{ items: readonly IStrategyDefinitionRecord[] }> {
@@ -2699,7 +2715,7 @@ export class RuntimeDataOperations {
             '    FROM public."RunTrace" t',
             '    WHERE t."clusterKey" = $1',
             '      AND t.status = \'SUCCESS\' AND t.kind = \'DAILY_RECOMMENDATION\'',
-            '      AND EXISTS (SELECT 1 FROM public."RecommendationSnapshot" p WHERE p."traceId" = t."traceId" AND p."isPublished")',
+            '      AND EXISTS (SELECT 1 FROM public."RecommendationPublish" pp WHERE pp."traceId" = t."traceId" AND pp."supersededBy" IS NULL)',
             '      AND (t."asOf" + interval \'8 hours\')::date = $2::date',
             '    ORDER BY',
             '      CASE WHEN t.status = \'SUCCESS\' THEN 0 ELSE 1 END ASC,',
@@ -2721,7 +2737,7 @@ export class RuntimeDataOperations {
             '       ms."latestTradingDay"::text AS "latestTradingDay",',
             '       c.close AS "latestClose",',
             '       NULL::text AS "strategyId"',
-            'FROM (SELECT * FROM public."RecommendationSnapshot" WHERE "isPublished" = true) r',
+            'FROM (SELECT r.* FROM public."RecommendationSnapshot" r JOIN public."RecommendationPublish" rp ON rp."traceId" = r."traceId" AND rp."supersededBy" IS NULL) r',
             'LEFT JOIN LATERAL (',
             '  SELECT count(*)::int AS evidence_count,',
             '         count(*) FILTER (WHERE COALESCE(e."matchConfidence", 0) >= 0.8)::int AS l1_evidence_count,',
@@ -2747,7 +2763,7 @@ export class RuntimeDataOperations {
             '    FROM public."RunTrace" t',
             '    WHERE t."clusterKey" = $1',
             '      AND t.status = \'SUCCESS\' AND t.kind = \'DAILY_RECOMMENDATION\'',
-            '      AND EXISTS (SELECT 1 FROM public."RecommendationSnapshot" p WHERE p."traceId" = t."traceId" AND p."isPublished")',
+            '      AND EXISTS (SELECT 1 FROM public."RecommendationPublish" pp WHERE pp."traceId" = t."traceId" AND pp."supersededBy" IS NULL)',
             '      AND (t."asOf" + interval \'8 hours\')::date = $2::date',
             '    ORDER BY',
             '      CASE WHEN t.status = \'SUCCESS\' THEN 0 ELSE 1 END ASC,',
@@ -2773,6 +2789,8 @@ export class RuntimeDataOperations {
         ') pst ON true',
         'WHERE rt."clusterKey" = $1',
         '  AND (rt."asOf" + interval \'8 hours\')::date = $2::date',
+        // 读取隔离：执行历史默认只展示已发布（存在未被取代的发布记录）的 trace。
+        '  AND EXISTS (SELECT 1 FROM public."RecommendationPublish" rp WHERE rp."traceId" = rt."traceId" AND rp."supersededBy" IS NULL)',
         'ORDER BY rt."triggeredAt" DESC',
         'LIMIT 20',
       ].join(' '),
@@ -2807,7 +2825,7 @@ export class RuntimeDataOperations {
           'FROM (',
           '  SELECT r.symbol, r.\"scoreBreakdown\",',
           '         row_number() OVER (PARTITION BY r.symbol ORDER BY r.\"asOf\" DESC) AS rn',
-          '  FROM (SELECT * FROM public.\"RecommendationSnapshot\" WHERE \"isPublished\" = true) r',
+          '  FROM (SELECT r.* FROM public.\"RecommendationSnapshot\" r JOIN public.\"RecommendationPublish\" rp ON rp.\"traceId\" = r.\"traceId\" AND rp.\"supersededBy\" IS NULL) r',
           `  WHERE r.\"clusterKey\" = $1 AND r.symbol = ANY($2) AND (r.\"asOf\" + interval '8 hours')::date < $3::date`,
           ') r',
           'WHERE r.rn <= 30',
@@ -3037,6 +3055,7 @@ export class RuntimeDataOperations {
             '  LIMIT 1',
             ') c ON true',
             'WHERE e."traceId" = $1 AND e.symbol = $2 AND e."clusterKey" = $3 AND e."strategyId" = $4',
+            '  AND EXISTS (SELECT 1 FROM public."RecommendationPublish" pp WHERE pp."traceId" = e."traceId" AND pp."supersededBy" IS NULL)',
             'LIMIT 1',
           ].join(' '),
           [traceId, symbol, toClusterKey(groupId), normalizedStrategyId],
@@ -3052,7 +3071,7 @@ export class RuntimeDataOperations {
             '       ms."latestTradingDay"::text AS "latestTradingDay",',
             '       c.close AS "latestClose",',
             '       NULL::text AS "strategyId"',
-            'FROM (SELECT * FROM public."RecommendationSnapshot" WHERE "isPublished" = true) r',
+            'FROM (SELECT r.* FROM public."RecommendationSnapshot" r JOIN public."RecommendationPublish" rp ON rp."traceId" = r."traceId" AND rp."supersededBy" IS NULL) r',
             'LEFT JOIN LATERAL (',
             '  SELECT count(*)::int AS evidence_count,',
             '         count(*) FILTER (WHERE COALESCE(e."matchConfidence", 0) >= 0.8)::int AS l1_evidence_count,',
@@ -3079,6 +3098,10 @@ export class RuntimeDataOperations {
 
     const rawRow = recommendationRows.rows[0];
     if (!rawRow) {
+      const publishStatus = await this.resolveTracePublishStatus(traceId);
+      if (publishStatus === 'draft') {
+        throw new Error('UNPUBLISHED_TRACE');
+      }
       throw new Error(`未找到股票详情：${symbol}`);
     }
     const stockNameBySymbol = await resolveChineseStockNameMap(
@@ -3105,7 +3128,7 @@ export class RuntimeDataOperations {
         'FROM (',
         '  SELECT r.\"scoreBreakdown\",',
         '         row_number() OVER (ORDER BY r.\"asOf\" DESC) AS rn',
-        '  FROM (SELECT * FROM public.\"RecommendationSnapshot\" WHERE \"isPublished\" = true) r',
+        '  FROM (SELECT r.* FROM public.\"RecommendationSnapshot\" r JOIN public.\"RecommendationPublish\" rp ON rp.\"traceId\" = r.\"traceId\" AND rp.\"supersededBy\" IS NULL) r',
         `  WHERE r.\"clusterKey\" = $1 AND r.symbol = $2 AND r.\"asOf\" < $3::timestamp`,
         ') r',
         'WHERE r.rn <= 30',
@@ -3293,6 +3316,7 @@ export class RuntimeDataOperations {
         'LEFT JOIN public."StockExposureFact" sef ON sef.id = e."exposureFactId"',
         'LEFT JOIN public."RecommendationSnapshot" rs ON rs."traceId" = e."traceId" AND rs.symbol = e.symbol',
         'WHERE e."traceId" = $1 AND e.symbol = $2 AND e."clusterKey" = $3',
+        '  AND EXISTS (SELECT 1 FROM public."RecommendationPublish" pp WHERE pp."traceId" = e."traceId" AND pp."supersededBy" IS NULL)',
         'ORDER BY e."finalContribScore" DESC, e."matchConfidence" DESC NULLS LAST, n."publishedAt" DESC NULLS LAST, e."newsId" ASC, e.id ASC',
         normalizedLimit === null ? '' : 'LIMIT $4',
       ].filter(Boolean).join(' '),
@@ -3398,6 +3422,23 @@ export class RuntimeDataOperations {
   public async getDashboardStockNetwork(symbol: string, traceId: string, groupId: string): Promise<IDashboardNetworkPayload> {
     const evidence = await this.getDashboardStockEvidence(symbol, traceId, groupId);
     const stockName = evidence.stock_name ?? symbol;
+
+    // 发布隔离：未发布 trace（或该 trace 无可读证据）不得返回任何节点，
+    // 否则仅凭股票节点就会泄漏「该 trace 曾为这只股票出过推荐」。
+    if (evidence.items.length === 0) {
+      return {
+        trace_id: traceId,
+        group_id: groupId,
+        symbol,
+        stock_name: stockName,
+        nodes: [],
+        edges: [],
+        relations: [],
+        related_theme_forecasts: [],
+        network_preview: { explanation: null },
+      };
+    }
+
     const stockNodeId = `stock:${symbol}`;
     const nodes = new Map<string, IDashboardNetworkNode>();
     const edges = new Map<string, IDashboardNetworkEdge>();
@@ -3596,14 +3637,15 @@ export class RuntimeDataOperations {
 
   public async getTraceOverview(traceId: string): Promise<Record<string, unknown>> {
     const dbTrace = await this.getDbTraceRecord(traceId);
+    const publishStatus = await this.resolveTracePublishStatus(traceId);
     if (dbTrace) {
-      return buildTraceOverview(dbTrace);
+      return { ...buildTraceOverview(dbTrace), publishStatus };
     }
 
     const trace = (await this.deps.runtimeStateStore.read()).traces[traceId];
     return trace
-      ? buildTraceOverview(trace)
-      : buildTraceOverview({
+      ? { ...buildTraceOverview(trace), publishStatus }
+      : { ...buildTraceOverview({
           trace_id: traceId,
           batch_id: '',
           group_id: '',
@@ -3616,25 +3658,27 @@ export class RuntimeDataOperations {
           steps: [],
           events: [],
           costs: [],
-        });
+        }), publishStatus };
   }
 
   public async getTraceSteps(traceId: string, cursor: number | undefined, limit: number): Promise<Record<string, unknown>> {
     const dbTrace = await this.getDbTraceRecord(traceId);
+    const publishStatus = await this.resolveTracePublishStatus(traceId);
     if (dbTrace) {
       const page = paginateRows(dbTrace.steps, cursor, limit);
-      return { trace_id: traceId, ...page };
+      return { trace_id: traceId, publishStatus, ...page };
     }
 
     const trace = (await this.deps.runtimeStateStore.read()).traces[traceId];
     const page = paginateRows(trace?.steps ?? [], cursor, limit);
-    return { trace_id: traceId, ...page };
+    return { trace_id: traceId, publishStatus, ...page };
   }
 
   public async getTraceEvents(traceId: string, cursor: number | undefined, limit: number): Promise<Record<string, unknown>> {
+    const publishStatus = await this.resolveTracePublishStatus(traceId);
     const trace = (await this.deps.runtimeStateStore.read()).traces[traceId];
     const page = paginateRows(trace?.events ?? [], cursor, limit);
-    return { trace_id: traceId, ...page };
+    return { trace_id: traceId, publishStatus, ...page };
   }
 
   public async getTraceEventsAfter(traceId: string, lastEventId: number): Promise<readonly unknown[]> {
@@ -3646,8 +3690,11 @@ export class RuntimeDataOperations {
   }
 
   public async getTraceCosts(traceId: string): Promise<Record<string, unknown>> {
+    const publishStatus = await this.resolveTracePublishStatus(traceId);
     const trace = (await this.deps.runtimeStateStore.read()).traces[traceId];
-    return trace ? buildTraceCosts(trace) : { trace_id: traceId, total_cost_usd: 0, total_tokens: 0, rows: [] };
+    return trace
+      ? { ...buildTraceCosts(trace), publishStatus }
+      : { trace_id: traceId, publishStatus, total_cost_usd: 0, total_tokens: 0, rows: [] };
   }
 
   public async getMLRecommendations(query: IMLRecommendationQuery): Promise<Record<string, unknown>> {

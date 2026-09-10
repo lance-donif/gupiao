@@ -17,14 +17,15 @@ describe.skipIf(!connection)('pipeline consistency PostgreSQL integration',()=>{
   beforeAll(async()=>{
     admin=new pg.Pool({connectionString:connection!});
     await admin.query(`CREATE SCHEMA "${schema}"`);
-    for(const table of ['RunTrace','PipelineStepTrace','PipelineCheckpoint','GraphSnapshot','RecommendationSnapshot']) {
+    // RecommendationPublish 是发布隔离读取的唯一真源，报表读取路径会 JOIN 它。
+    for(const table of ['RunTrace','PipelineStepTrace','PipelineCheckpoint','GraphSnapshot','RecommendationSnapshot','RecommendationPublish','RunLease']) {
       await admin.query(`CREATE TABLE "${schema}"."${table}" (LIKE public."${table}" INCLUDING ALL)`);
     }
     const scoped=new URL(connection!);scoped.searchParams.set('options',`-c search_path=${schema}`);url=scoped.toString();
     prisma=new PrismaClient({adapter:new PrismaPg({connectionString:url},{schema})});
   },30000);
   beforeEach(async()=>{
-    await prisma.$executeRawUnsafe('TRUNCATE "RunTrace","PipelineStepTrace","PipelineCheckpoint","GraphSnapshot","RecommendationSnapshot"');
+    await prisma.$executeRawUnsafe('TRUNCATE "RunTrace","PipelineStepTrace","PipelineCheckpoint","GraphSnapshot","RecommendationSnapshot","RecommendationPublish","RunLease"');
     await TraceManager.startRunTrace(prisma,'trace','test','DAILY_RECOMMENDATION',asOf);
   });
   afterAll(async()=>{await prisma?.$disconnect();if(admin){await admin.query(`DROP SCHEMA "${schema}" CASCADE`);await admin.end();}},30000);

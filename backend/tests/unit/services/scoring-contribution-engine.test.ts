@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { ScoringContributionEngine } from '../../../src/services/scoring-contribution-engine.js';
+import {
+  ScoringContributionEngine,
+  calculateEvidenceComponentScore,
+} from '../../../src/services/scoring-contribution-engine.js';
 import { TempStockRecommendationService } from '../../../src/services/temp-stock-recommendation-service.js';
 
 class MockPrismaClient {
@@ -460,6 +463,27 @@ const addStockWithCandles = (
   }
 };
 
+/**
+ * 评分配方由 `SCORING_RECIPE` 驱动（生产默认 event-v2）。
+ * 断言 baseline 数字的用例必须显式锁定配方，避免被默认值切换影响。
+ */
+const withScoringRecipe = async <T>(
+  recipe: 'baseline-v1' | 'event-v2',
+  run: () => Promise<T>,
+): Promise<T> => {
+  const previous = process.env.SCORING_RECIPE;
+  process.env.SCORING_RECIPE = recipe;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.SCORING_RECIPE;
+    } else {
+      process.env.SCORING_RECIPE = previous;
+    }
+  }
+};
+
 describe('scoring contribution engine', () => {
   it('creates evidence contributions from causal signal candidates and stock exposure facts', async () => {
     const mockDb = new MockPrismaClient();
@@ -848,12 +872,12 @@ describe('scoring contribution engine', () => {
       });
     }
 
-    const result = await new ScoringContributionEngine().execute(mockDb, {
+    const result = await withScoringRecipe('baseline-v1', () => new ScoringContributionEngine().execute(mockDb, {
       traceId,
       asOf,
       clusterKey,
       newsWindowDays: 7,
-    });
+    }));
 
     expect(result.contributionCount).toBe(100);
     expect(mockDb.evidenceContributionsCreated).toHaveLength(100);
@@ -2112,9 +2136,82 @@ describe('scoring contribution engine', () => {
       latestVolume: 2_000_000,
     });
 
-    await new ScoringContributionEngine().execute(mockDb, { traceId, asOf, clusterKey });
+    await withScoringRecipe('baseline-v1', () => new ScoringContributionEngine().execute(mockDb, { traceId, asOf, clusterKey }));
 
     expect(Number(mockDb.stockFeatureSnapshotsCreated[0]?.newsFrequencyScore)).toBeLessThan(45);
     expect(mockDb.stockFeatureSnapshotsCreated[0]?.reasons.join('\n')).toContain('单关键词有效贡献按 1.5 封顶');
+  });
+
+  it('drives evidence from aggregated event E under the event-v2 recipe', async () => {
+    const buildFixture = (traceId: string): MockPrismaClient => {
+      const mockDb = new MockPrismaClient();
+      const asOf = new Date('2026-05-24T12:00:00.000Z');
+      const clusterKey = 'global';
+
+      addExposure(mockDb, {
+        clusterKey,
+        symbol: '600111',
+        stockName: '北方稀土',
+        keyword: '白银',
+        sourceName: '白银伴生矿',
+      });
+      for (const [index, suffix] of ['original', 'reprint'].entries()) {
+        const newsId = `news-${suffix}`;
+        addNews(mockDb, {
+          id: newsId,
+          title: '白银库存下降',
+          content: '白银库存下降，供给不足。',
+          publishedAt: new Date(asOf.getTime() - (30 + index * 30) * 60 * 1000),
+          clusterKey,
+          reprintWeight: index === 0 ? 1 : 0.15,
+        });
+        addSignal(mockDb, {
+          traceId,
+          asOf,
+          clusterKey,
+          newsId,
+          keyword: '白银',
+          businessVariable: '库存下降',
+          confidence: '0.8000',
+        });
+      }
+      return mockDb;
+    };
+
+    const asOf = new Date('2026-05-24T12:00:00.000Z');
+    const clusterKey = 'global';
+    const eventDb = buildFixture('trace-event-v2');
+    const eventResult = await withScoringRecipe('event-v2', () => new ScoringContributionEngine().execute(eventDb, {
+      traceId: 'trace-event-v2',
+      asOf,
+      clusterKey,
+      newsWindowDays: 7,
+    }));
+    const baselineDb = buildFixture('trace-baseline-v1');
+    await withScoringRecipe('baseline-v1', () => new ScoringContributionEngine().execute(baselineDb, {
+      traceId: 'trace-baseline-v1',
+      asOf,
+      clusterKey,
+      newsWindowDays: 7,
+    }));
+
+    // 两条新闻的持久化行为不变，只有打分口径不同。
+    expect(eventDb.evidenceContributionsCreated).toHaveLength(2);
+    expect(eventResult.metrics?.scoringRecipe).toBe('event-v2');
+    expect(eventResult.metrics?.suppressedZeroEvidenceSymbols).toBe(0);
+
+    const maxContribution = Math.max(
+      ...eventDb.evidenceContributionsCreated.map(row => Number(row.finalContribScore)),
+    );
+    const eventSnapshot = eventDb.stockFeatureSnapshotsCreated[0];
+    const baselineSnapshot = baselineDb.stockFeatureSnapshotsCreated[0];
+    const eventScore = Number(eventSnapshot?.newsFrequencyScore);
+    const baselineScore = Number(baselineSnapshot?.newsFrequencyScore);
+
+    // 同事件（同关键词/经营变量/极性/事件文本）取最大：E=max q，而不是两条贡献求和。
+    expect(eventScore).toBeCloseTo(calculateEvidenceComponentScore(new Map([['白银', maxContribution]])), 6);
+    expect(baselineScore).toBeGreaterThan(eventScore);
+    expect(eventSnapshot?.reasons.join('\n')).toContain('事件证据聚合 [白银]');
+    expect(eventSnapshot?.reasons.join('\n')).toContain('评分配方 event-v2');
   });
 });

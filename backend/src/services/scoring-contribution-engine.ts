@@ -34,10 +34,19 @@ import {
 import {
   buildExposureKeywordIndex,
   buildExposureKeywordMatches,
+  buildEventEvidenceFeatures,
   hasDelegate,
+  type IEventEvidenceFeatures,
   type IActiveKeywordAlias,
   type IExposureKeywordMatch,
 } from './scoring/scoring-helpers.js';
+import { resolveScoringRecipe, type ScoringRecipe } from '../version.js';
+// 行情读取（含双重可见性守卫）已统一迁至 market-signal-loader，由 market-data-reader 把关。
+import {
+  loadMarketSignalFreshnessBySymbol,
+  loadRecentCandlesRawSql,
+  loadRecentCandlesPrismaFallback,
+} from './scoring/market-signal-loader.js';
 
 
 
@@ -303,18 +312,18 @@ const extractInternalMetadata = (contribution: any): IInternalContributionMetada
   taxonomyLevel: typeof contribution.__taxonomyLevel === 'string' ? contribution.__taxonomyLevel : null,
 });
 
+/**
+ * 去掉引擎内部字段（统一 `__` 前缀）后的持久化行。
+ * 内部字段既不落库也不参与 EvidenceContribution 的唯一键。
+ */
 const toEvidenceContributionCreateRow = (contribution: any): any => {
-  const {
-    __exposurePrecisionScore: _exposurePrecisionScore,
-    __exposureFactId: _exposureFactId,
-    __exposureType: _exposureType,
-    __taxonomyLevel: _taxonomyLevel,
-    ...row
-  } = contribution;
-  void _exposurePrecisionScore;
-  void _exposureFactId;
-  void _exposureType;
-  void _taxonomyLevel;
+  const row: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(contribution ?? {})) {
+    if (key.startsWith('__')) {
+      continue;
+    }
+    row[key] = value;
+  }
   return row;
 };
 
@@ -496,7 +505,13 @@ const readContributionKeyword = (contribution: any): string => {
   return String(contribution.matchedExposureKeyword ?? contribution.keyword);
 };
 
-const calculateEvidenceComponentScore = (keywordContribSums: ReadonlyMap<string, number>): number => {
+/**
+ * 证据贡献组件曲线（45 分满分）。
+ *
+ * baseline-v1 直接喂「单关键词累计净贡献」，event-v2 喂「同关键词聚合后的 E」；
+ * 两条配方共用同一条对数曲线与多样性加分，保证 45/20/15/20 权重拆分不变。
+ */
+export const calculateEvidenceComponentScore = (keywordContribSums: ReadonlyMap<string, number>): number => {
   let evidencePower = 0;
   for (const sumFinalContrib of keywordContribSums.values()) {
     const effectiveContrib = Math.min(EVIDENCE_KEYWORD_CONTRIB_CAP, Math.max(0, sumFinalContrib));
@@ -935,7 +950,7 @@ const parseLongTermMomentumFromReasons = (reasons: readonly string[]): number | 
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-interface IMarketSignalFreshness {
+export interface IMarketSignalFreshness {
   readonly latestMarketTradingDay: string | null;
   readonly latestMarketTradingDayDate: Date | null;
   readonly staleTradingDays: number;
@@ -962,111 +977,8 @@ const withMarketSignalFreshness = (
   };
 };
 
-const loadMarketSignalFreshnessBySymbol = async (
-  prisma: any,
-  input: {
-    readonly clusterKey: string;
-    readonly asOf: Date;
-    readonly snapshots: readonly { readonly symbol: string; readonly latestTradingDay: Date | null }[];
-  },
-): Promise<Map<string, IMarketSignalFreshness>> => {
-  const symbols = [...new Set(input.snapshots.map(row => row.symbol))];
-  const snapshotBySymbol = new Map(input.snapshots.map(row => [row.symbol, row.latestTradingDay]));
-  const results = new Map<string, IMarketSignalFreshness>();
-  if (symbols.length === 0 || !hasDelegate(prisma, 'candle', 'findMany')) {
-    return results;
-  }
-
-  if (typeof prisma?.$queryRawUnsafe === 'function') {
-    const rows = await prisma.$queryRawUnsafe(
-      [
-        'WITH input_rows AS (',
-        '  SELECT * FROM jsonb_to_recordset($1::jsonb) AS row(symbol text, "latestTradingDay" timestamp)',
-        ')',
-        'SELECT input_rows.symbol,',
-        '       max(c."tradingDay") AS "latestMarketTradingDay",',
-        '       count(c."tradingDay") FILTER (',
-        '         WHERE input_rows."latestTradingDay" IS NOT NULL AND c."tradingDay" > input_rows."latestTradingDay"',
-        '       )::int AS "staleTradingDays"',
-        'FROM input_rows',
-        'LEFT JOIN "Stock" s ON s.symbol = input_rows.symbol AND s."clusterKey" = $2',
-        'LEFT JOIN "Candle" c ON c."stockId" = s.id AND c."tradingDay" <= $3',
-        'GROUP BY input_rows.symbol',
-      ].join(' '),
-      JSON.stringify(input.snapshots.map(row => ({
-        symbol: row.symbol,
-        latestTradingDay: row.latestTradingDay?.toISOString?.() ?? null,
-      }))),
-      input.clusterKey,
-      input.asOf,
-    ) as readonly any[];
-
-    for (const row of rows) {
-      const latest = row.latestMarketTradingDay instanceof Date
-        ? row.latestMarketTradingDay
-        : (row.latestMarketTradingDay ? new Date(row.latestMarketTradingDay) : null);
-      results.set(String(row.symbol), {
-        latestMarketTradingDay: toDayKey(latest),
-        latestMarketTradingDayDate: latest,
-        staleTradingDays: Number(row.staleTradingDays ?? 0),
-      });
-    }
-    return results;
-  }
-
-  const candles = await prisma.candle.findMany({
-    where: {
-      stock: {
-        clusterKey: input.clusterKey,
-        symbol: { in: symbols },
-      },
-      tradingDay: { lte: input.asOf },
-    },
-    select: {
-      tradingDay: true,
-      stock: { select: { symbol: true } },
-    },
-    orderBy: [
-      { stockId: 'asc' },
-      { tradingDay: 'desc' },
-    ],
-  });
-
-  for (const symbol of symbols) {
-    results.set(symbol, {
-      latestMarketTradingDay: null,
-      latestMarketTradingDayDate: null,
-      staleTradingDays: 0,
-    });
-  }
-
-  for (const candle of candles) {
-    const symbol = String(candle.stock?.symbol ?? '');
-    if (!symbol) {
-      continue;
-    }
-    const current = results.get(symbol);
-    const tradingDay = candle.tradingDay instanceof Date ? candle.tradingDay : new Date(candle.tradingDay);
-    if (!current?.latestMarketTradingDayDate || tradingDay > current.latestMarketTradingDayDate) {
-      results.set(symbol, {
-        latestMarketTradingDay: toDayKey(tradingDay),
-        latestMarketTradingDayDate: tradingDay,
-        staleTradingDays: current?.staleTradingDays ?? 0,
-      });
-    }
-    const snapshotTradingDay = snapshotBySymbol.get(symbol);
-    if (snapshotTradingDay && tradingDay > snapshotTradingDay) {
-      const latest = results.get(symbol);
-      results.set(symbol, {
-        latestMarketTradingDay: latest?.latestMarketTradingDay ?? toDayKey(tradingDay),
-        latestMarketTradingDayDate: latest?.latestMarketTradingDayDate ?? tradingDay,
-        staleTradingDays: (latest?.staleTradingDays ?? 0) + 1,
-      });
-    }
-  }
-
-  return results;
-};
+// loadMarketSignalFreshnessBySymbol 已迁移至 ./scoring/market-signal-loader.ts，
+// 统一经由 market-data-reader 施加「业务时间 + 可信可见时间」双重守卫，见顶部 import。
 
 const loadExistingMarketSignals = async (
   prisma: any,
@@ -1146,81 +1058,8 @@ const loadExistingMarketSignals = async (
   return results;
 };
 
-const loadRecentCandlesRawSql = async (
-  prisma: any,
-  input: {
-    readonly clusterKey: string;
-    readonly asOf: Date;
-    readonly stockIds: readonly string[];
-  },
-  lookbackDays: number,
-): Promise<Map<string, any[]>> => {
-  const rows = await prisma.$queryRawUnsafe(
-    [
-      'SELECT s.id AS "stockId", c."tradingDay", c.open, c.high, c.low, c.close, c.volume',
-      'FROM "Stock" s',
-      'JOIN LATERAL (',
-      '  SELECT "tradingDay", open, high, low, close, volume',
-      '  FROM "Candle" c',
-      '  WHERE c."stockId" = s.id AND c."tradingDay" <= $2',
-      '  ORDER BY c."tradingDay" DESC',
-      `  LIMIT ${lookbackDays}`,
-      ') c ON TRUE',
-      'WHERE s."clusterKey" = $1 AND s.id = ANY($3::text[])',
-      'ORDER BY s.id ASC, c."tradingDay" DESC',
-    ].join(' '),
-    input.clusterKey,
-    input.asOf,
-    [...input.stockIds],
-  ) as readonly any[];
-
-  const candlesByStockId = new Map<string, any[]>();
-  for (const row of rows) {
-    const stockId = String(row.stockId);
-    const list = candlesByStockId.get(stockId) ?? [];
-    list.push(row);
-    candlesByStockId.set(stockId, list);
-  }
-  return candlesByStockId;
-};
-
-const loadRecentCandlesPrismaFallback = async (
-  prisma: any,
-  input: {
-    readonly stockIds: readonly string[];
-    readonly asOf: Date;
-  },
-  lookbackDays: number,
-): Promise<Map<string, any[]>> => {
-  // Approximate the calendar days needed for the trading days lookback window
-  const calendarDays = Math.ceil(lookbackDays * 1.6) + 15;
-  const marketWindowStart = new Date(input.asOf.getTime() - calendarDays * 24 * 60 * 60 * 1000);
-  
-  const candles = await prisma.candle.findMany({
-    where: {
-      stockId: { in: [...input.stockIds] },
-      tradingDay: {
-        lte: input.asOf,
-        gte: marketWindowStart,
-      },
-    },
-    orderBy: [
-      { stockId: 'asc' },
-      { tradingDay: 'desc' },
-    ],
-  });
-
-  const candlesByStockId = new Map<string, any[]>();
-  for (const candle of candles) {
-    const stockId = String(candle.stockId);
-    const list = candlesByStockId.get(stockId) ?? [];
-    if (list.length < lookbackDays) {
-      list.push(candle);
-      candlesByStockId.set(stockId, list);
-    }
-  }
-  return candlesByStockId;
-};
+// loadRecentCandlesRawSql / loadRecentCandlesPrismaFallback 已迁移至
+// ./scoring/market-signal-loader.ts，统一经由 market-data-reader 施加双重可见性守卫。
 
 const loadRecentCandlesByStockId = async (
   prisma: any,
@@ -1242,10 +1081,10 @@ const loadRecentCandlesByStockId = async (
   );
 
   if (typeof prisma?.$queryRawUnsafe === 'function') {
-    return await loadRecentCandlesRawSql(prisma, input, lookbackDays);
+    return await loadRecentCandlesRawSql(prisma, input, lookbackDays, undefined);
   }
 
-  return await loadRecentCandlesPrismaFallback(prisma, input, lookbackDays);
+  return await loadRecentCandlesPrismaFallback(prisma, input, lookbackDays, undefined);
 };
 
 const persistMarketSignals = async (
@@ -1658,6 +1497,10 @@ const createExposureContributions = async (
           __exposureFactId: typeof exposure.id === 'string' ? exposure.id : null,
           __exposureType: String(exposure.exposureType ?? 'unknown'),
           __taxonomyLevel: typeof exposure.taxonomyLevel === 'string' ? exposure.taxonomyLevel : null,
+          // event-v2 事件证据聚合所需的信号维度（仅内存传递，不落库）。
+          __signalEvent: typeof signal.event === 'string' ? signal.event : '',
+          __businessVariable: typeof signal.businessVariable === 'string' ? signal.businessVariable : '',
+          __direction: typeof signal.direction === 'string' ? signal.direction : 'positive',
         });
       }
     }
@@ -1672,12 +1515,31 @@ const createExposureContributions = async (
   });
 };
 
+/**
+ * 同一（traceId/newsId/symbol/keyword）只保留有效贡献最大的一条；
+ * 并列时按确定性排序键取字典序更小者，保证结果与输入顺序无关。
+ */
+const contributionDeterministicKey = (contribution: any): string => [
+  stableEvidenceContributionId(toEvidenceContributionCreateRow(contribution)),
+  String(contribution?.exposureFactId ?? ''),
+  String(contribution?.matchMethod ?? ''),
+].join('|');
+
+const isPreferredContribution = (candidate: any, existing: any): boolean => {
+  const candidateScore = Number(candidate.finalContribScore);
+  const existingScore = Number(existing.finalContribScore);
+  if (candidateScore !== existingScore) {
+    return candidateScore > existingScore;
+  }
+  return contributionDeterministicKey(candidate) < contributionDeterministicKey(existing);
+};
+
 const deduplicateContributions = (contributions: readonly any[]): readonly any[] => {
   const byKey = new Map<string, any>();
   for (const contribution of contributions) {
     const key = `${contribution.traceId}:${contribution.newsId}:${contribution.symbol}:${contribution.keyword}`;
     const existing = byKey.get(key);
-    if (!existing || Number(contribution.finalContribScore) > Number(existing.finalContribScore)) {
+    if (!existing || isPreferredContribution(contribution, existing)) {
       byKey.set(key, contribution);
     }
   }
@@ -1690,6 +1552,8 @@ export class ScoringContributionEngine {
    */
   public async execute(prisma: any, input: IScoringEngineInput): Promise<IScoringEngineOutput> {
     const { traceId, asOf, clusterKey } = input;
+    // 评分配方：默认生产配方 event-v2；baseline-v1 仅保留给测试/内部回退。
+    const scoringRecipe: ScoringRecipe = resolveScoringRecipe();
     const timings: Record<string, number> = {};
     const startedAt = Date.now();
 
@@ -1749,6 +1613,7 @@ export class ScoringContributionEngine {
         halfLifeDaysUsed: halfLifeDays,
         maxWindowDaysUsed: maxWindowDays,
         metrics: {
+          scoringRecipe,
           newsRecords: 0,
           activeAliases: activeAliases.length,
           activeKeywordPerformancePenalties: activeKeywordPerformancePenalties.size,
@@ -1783,6 +1648,7 @@ export class ScoringContributionEngine {
         halfLifeDaysUsed: halfLifeDays,
         maxWindowDaysUsed: maxWindowDays,
         metrics: {
+          scoringRecipe,
           newsRecords: newsRecords.length,
           exposureContributions: 0,
           activeAliases: activeAliases.length,
@@ -1823,6 +1689,7 @@ export class ScoringContributionEngine {
     }
 
     const featureSnapshots: any[] = [];
+    let suppressedZeroEvidenceSymbols = 0;
 
     const marketSignalStartedAt = Date.now();
     const marketSignals = await loadMarketSignals(prisma, {
@@ -1857,14 +1724,43 @@ export class ScoringContributionEngine {
         }
       }
 
-      const newsFrequencyScore = calculateEvidenceComponentScore(contribsByKeyword);
-      for (const [keyword, sumFinalContrib] of contribsByKeyword.entries()) {
-        const capReason = sumFinalContrib > EVIDENCE_KEYWORD_CONTRIB_CAP
-          ? `，单关键词有效贡献按 ${EVIDENCE_KEYWORD_CONTRIB_CAP.toFixed(1)} 封顶`
-          : '';
+      // event-v2：先按「同事件取最大 + top-3 独立事件 + 正负分离」聚合出 E，再喂证据组件；
+      // baseline-v1：保持原有「单关键词累计净贡献」路径不变。
+      const eventEvidenceFeatures: IEventEvidenceFeatures | null = scoringRecipe === 'event-v2'
+        ? buildEventEvidenceFeatures(symbolContribs)
+        : null;
+      if (eventEvidenceFeatures && eventEvidenceFeatures.aggregatedEvidence <= 0) {
+        // 零正向有效暴露证据的候选不可评分、不可被选股（不补位、不回退）。
+        suppressedZeroEvidenceSymbols += 1;
+        continue;
+      }
+
+      const newsFrequencyScore = calculateEvidenceComponentScore(
+        eventEvidenceFeatures ? eventEvidenceFeatures.keywordScores : contribsByKeyword,
+      );
+
+      if (eventEvidenceFeatures) {
+        for (const summary of eventEvidenceFeatures.summaries) {
+          if (summary.E <= 0) {
+            continue;
+          }
+          const topEvent = summary.topEvents[0];
+          reasons.push(
+            `事件证据聚合 [${summary.keyword}] E+=${summary.Eplus.toFixed(4)}，E-=${summary.Eminus.toFixed(4)}，E=${summary.E.toFixed(4)}，独立事件 ${summary.topEvents.length} 个（top-${eventEvidenceFeatures.topK}，1-∏(1-q)，同事件取最大），最强事件 q=${(topEvent?.q ?? 0).toFixed(4)}，证据贡献组件映射为 ${newsFrequencyScore.toFixed(4)}/${EVIDENCE_SCORE_MAX} (基于 ${profile} 衰减)`,
+          );
+        }
         reasons.push(
-          `关键词 [${keyword}] 累计净贡献值 ${sumFinalContrib.toFixed(4)}${capReason}，证据贡献组件累计后映射为 ${newsFrequencyScore.toFixed(4)}/${EVIDENCE_SCORE_MAX} (基于 ${profile} 衰减)`,
+          `评分配方 event-v2：证据聚合覆盖 ${eventEvidenceFeatures.itemCount} 条有效证据，聚合后 E 合计 ${eventEvidenceFeatures.aggregatedEvidence.toFixed(4)}，全部贡献均需落在正向暴露证据链路（负向证据只做扣减，不参与补位）`,
         );
+      } else {
+        for (const [keyword, sumFinalContrib] of contribsByKeyword.entries()) {
+          const capReason = sumFinalContrib > EVIDENCE_KEYWORD_CONTRIB_CAP
+            ? `，单关键词有效贡献按 ${EVIDENCE_KEYWORD_CONTRIB_CAP.toFixed(1)} 封顶`
+            : '';
+          reasons.push(
+            `关键词 [${keyword}] 累计净贡献值 ${sumFinalContrib.toFixed(4)}${capReason}，证据贡献组件累计后映射为 ${newsFrequencyScore.toFixed(4)}/${EVIDENCE_SCORE_MAX} (基于 ${profile} 衰减)`,
+          );
+        }
       }
 
       const symbolKeywords = new Set<string>();
@@ -1997,10 +1893,12 @@ export class ScoringContributionEngine {
       halfLifeDaysUsed: halfLifeDays,
       maxWindowDaysUsed: maxWindowDays,
       metrics: {
+        scoringRecipe,
         newsRecords: newsRecords.length,
         exposureContributions: exposureContribs.length,
         deduplicatedContributions: contribs.length,
         symbolsScored: contribsBySymbol.size,
+        suppressedZeroEvidenceSymbols,
         marketSignals: marketSignals.size,
         featureSnapshots: featureSnapshots.length,
         exposureMatchCacheRows,

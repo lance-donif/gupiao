@@ -27,7 +27,8 @@ const decision = { ...relationship, relationType: 'driver', direction: 'forward'
 const completion = (value: unknown) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) }, finish_reason: 'stop' }] }));
 
 const cases = [
-  { name: 'causal', value: { signals: [signal], noSignalNewsIds: [] }, invoke: (env: NodeJS.ProcessEnv) => createCausalSignalExtractorFromEnv(env).extract(input) },
+  // causal 抽取默认走 v3 逐条协议（CAUSAL_PROTOCOL_MODE 未设置 = items）。
+  { name: 'causal', value: { items: [{ newsId: 'n1', status: 'signals', signals: [signal] }] }, invoke: (env: NodeJS.ProcessEnv) => createCausalSignalExtractorFromEnv(env).extract(input) },
   { name: 'keywords', value: keywordPayload, invoke: (env: NodeJS.ProcessEnv) => createAiStockKeywordRequesterFromEnv(env).requestKeywords({ stocks: [stock], prompt: 'keywords', model: 'ignored', promptVersion: 'test' }) },
   { name: 'relationships', value: { decisions: [decision] }, invoke: (env: NodeJS.ProcessEnv) => createFriendNetworkLlmAiAdapterFromEnv(env).judge([relationship]) },
   { name: 'exposures', value: { candidates: [{ keyword: '白银', exposureType: 'industry_exposure', sourceId: 'n1', evidenceText: news.title, confidence: 0.9 }] }, invoke: (env: NodeJS.ProcessEnv) => createExposureCandidateExtractorFromEnv(env).extract({ limitUpCase: { symbol: stock.symbol, stockName: stock.name, tradeDate: asOf }, news: [news] }) },
@@ -52,7 +53,7 @@ describe('all four AI entrypoints', () => {
   });
 
   it.each([
-    { index: 0, invalid: { signals: [{ ...signal, evidenceOffsetStart: 'bad' }], noSignalNewsIds: [] } },
+    { index: 0, invalid: { items: [{ newsId: 'n1', status: 'signals', signals: [{ ...signal, evidenceOffsetStart: 'bad' }] }] } },
     { index: 1, invalid: { stocks: [{ symbol: stock.symbol, keywords: [] }] } },
     { index: 2, invalid: { decisions: [{ ...decision, reasoning: '' }] } },
     { index: 3, invalid: { candidates: [{ keyword: '白银', exposureType: 'industry_exposure', sourceId: 'n1', evidenceText: news.title, confidence: 0.9, aliasSuggestions: [null] }] } },
@@ -91,7 +92,7 @@ describe('all four AI entrypoints', () => {
       createMany: vi.fn(async ({ data }: any) => { rows.push(...data); return { count: data.length }; }),
     } };
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response('', { status: 500 }))
-      .mockImplementation(async () => completion({ signals: [signal], noSignalNewsIds: [] }));
+      .mockImplementation(async () => completion({ items: [{ newsId: 'n1', status: 'signals', signals: [signal] }] }));
     vi.stubGlobal('fetch', fetchMock);
     const service = new CausalSignalExtractionService(createCausalSignalExtractorFromEnv(environment()));
     await service.execute(prisma, input);
@@ -110,7 +111,7 @@ describe('all four AI entrypoints', () => {
   });
 
   it('records source metadata for successful empty extractions and bounds ledger reads by asOf', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(completion({})).mockResolvedValueOnce(completion({ signals: [], noSignalNewsIds: ['n1'] }));
+    const fetchMock = vi.fn().mockResolvedValueOnce(completion({})).mockResolvedValueOnce(completion({ items: [{ newsId: 'n1', status: 'no_signal', signals: [] }] }));
     vi.stubGlobal('fetch', fetchMock);
     const execute = vi.fn().mockResolvedValue(1);
     const query = vi.fn().mockResolvedValue([]);

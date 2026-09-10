@@ -40,7 +40,22 @@ const toIsoString = (value: Date | string): string => {
 class PgContributionDetailReader implements IContributionDetailReader {
   public constructor(private readonly client: IMinimalPgClient) {}
 
-  public async getContributionDetail(query: IContributionDetailQuery): Promise<IContributionDetailPayload> {
+  public async getContributionDetail(
+    query: IContributionDetailQuery,
+    options?: { allowUnpublished?: boolean },
+  ): Promise<IContributionDetailPayload | null> {
+    const allowUnpublished = options?.allowUnpublished ?? false;
+
+    // 发布隔离：未发布 trace 的明细默认不可读。
+    const pubRows = await this.client.query<{ published: number }>(
+      'SELECT 1 AS published FROM public."RecommendationPublish" WHERE "traceId" = $1 AND "supersededBy" IS NULL LIMIT 1',
+      [query.traceId],
+    );
+    const isPublished = pubRows.rows.length > 0;
+    if (!isPublished && !allowUnpublished) {
+      return null;
+    }
+
     const rows = await this.client.query<IContributionDbRow>(
       [
         'SELECT',
@@ -81,12 +96,17 @@ class PgContributionDetailReader implements IContributionDetailReader {
       clusterKey: row.cluster_key,
     }));
     const totalContribution = mappedRows.reduce((sum, row) => sum + row.finalContribScore, 0);
-    return {
+    const payload: IContributionDetailPayload = {
       traceId: query.traceId,
       symbol: query.symbol,
       totalContribution,
       rows: mappedRows,
     };
+    // 调试入口（allowUnpublished）需显式标注草稿状态，不能假装已发布。
+    return {
+      ...payload,
+      publishStatus: isPublished ? 'published' : 'draft',
+    } as IContributionDetailPayload;
   }
 
   public close(): Promise<void> {

@@ -127,12 +127,12 @@ export const DEFAULT_BUSINESS_CONFIG_HASH = businessConfigHashSync();
 export type ScoringRecipe = 'baseline-v1' | 'event-v2';
 
 /**
- * 解析评分配方版本：读 `SCORING_RECIPE`，未设置默认 `baseline-v1`，
+ * 解析评分配方版本：读 `SCORING_RECIPE`，未设置默认 `event-v2`（生产强制切换），
  * 非法值抛错（不静默回退）。`env` 可注入，默认取 `process.env`。
  */
 export function resolveScoringRecipe(env: Record<string, string | undefined> = process.env): ScoringRecipe {
   const raw = env.SCORING_RECIPE;
-  if (raw === undefined) return 'baseline-v1';
+  if (raw === undefined) return 'event-v2';
   if (raw === 'baseline-v1' || raw === 'event-v2') return raw;
   throw new Error(`Invalid SCORING_RECIPE: ${raw}`);
 }
@@ -140,12 +140,12 @@ export function resolveScoringRecipe(env: Record<string, string | undefined> = p
 export type StageExecutor = 'legacy' | 'registry';
 
 /**
- * 解析阶段执行器：读 `PIPELINE_STAGE_EXECUTOR`，未设置默认 `legacy`，
+ * 解析阶段执行器：读 `PIPELINE_STAGE_EXECUTOR`，未设置默认 `registry`（主链路走阶段执行器），
  * 非法值抛错（不静默回退）。`env` 可注入，默认取 `process.env`。
  */
 export function resolveStageExecutor(env: Record<string, string | undefined> = process.env): StageExecutor {
   const raw = env.PIPELINE_STAGE_EXECUTOR;
-  if (raw === undefined) return 'legacy';
+  if (raw === undefined) return 'registry';
   if (raw === 'legacy' || raw === 'registry') return raw;
   throw new Error(`Invalid PIPELINE_STAGE_EXECUTOR: ${raw}`);
 }

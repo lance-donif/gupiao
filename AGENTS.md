@@ -166,9 +166,10 @@ docker compose down
 
 ## Rewrite Status
 
-- 项目处于推荐链路重写计划（M0–M7）中间态，完成度复核见 `PLAN_M0_M7_VERIFY_2026-09-10.md`（修正了 `PLAN_M0_M7_AUDIT_2026-09-10.md` 的过时判断）。
-- 工作区存在未提交改动（M0/M1/M2 阶段），测试套件已全绿；`causal-signal-extraction-service.test.ts` 的 mock 回归已修复（原 A1 完成）。
-- 待开发项按优先级列于复核报告"待开发项汇总"一节，从 A2（把 `src/version.ts` 版本常量接入消费方）开始。
+- M0–M7 开发已落地，完成情况见 `M0_M7_COMPLETION_REPORT_2026-09-10.md`（`PLAN_M0_M7_VERIFY_2026-09-10.md` 是实施前的过时复核）。
+- 生产默认：`SCORING_RECIPE=event-v2`、`PIPELINE_STAGE_EXECUTOR=registry`、`CAUSAL_PROTOCOL_MODE=items`。
+- 验收基线：`cd backend && bun run check:fix` 全绿；带 `AI_TEST_DATABASE_URL` 时 80 文件 / 605 用例全部通过（0 跳过）；后端与前端构建通过。
+- 评测门槛是"报告"而非"开关"：M7 报告会输出 bootstrap 置信区间与回撤对比，未达门槛时标记 `overrideForced=true` 并保留 `event-v2`。
 
 ## Frontend Layout Rules
 
