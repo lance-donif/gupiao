@@ -35,100 +35,25 @@ interface IBeijingDateParts {
 
 const BEIJING_UTC_OFFSET_HOURS = 8;
 const MS_PER_HOUR = 60 * 60 * 1000;
+/**
+ * 每天只在晚间 20:00（北京时间）跑一次：日线增量 → 历史收益对账 → 推荐主链路。
+ *
+ * 顺序不可调换：
+ *  - 日线增量先行，否则推荐链路的 candle 预检会因数据陈旧直接停止；
+ *  - 收益对账在推荐之前，让关键词惩罚读到已成熟的 5 日收益；
+ *  - 推荐主链路自身包含新闻抓取、LLM 因果抽取、图谱/评分与发布。
+ *
+ * 任一步失败即中断当日链路（`&&` 串联），保留上一份已发布快照，绝不降级或折中。
+ */
 const MVP_SCHEDULE_TABLE: readonly IMvpScheduleTask[] = [
   {
-    id: 'stock_list_check',
-    description: 'Verify the local stock universe before market workflows start.',
+    id: 'daily_recommendation',
+    description: '每晚 20:00 一次性执行：日线增量 → 历史收益对账 → 新闻/LLM 抽取 → 图谱评分 → 发布推荐。',
     cadence: 'daily',
-    beijingTime: { hour: 7, minute: 30 },
-    dataFrequency: 'daily before A-share market open',
-    failureStrategy: 'fail fast and block downstream market-data tasks until the stock list is checked',
-    commandHint: 'bun dist/scripts/sync-stocks.js --mode check',
-  },
-  {
-    id: 'daily_candle_incremental',
-    description: 'Prepare the latest daily candle increment after market close.',
-    cadence: 'daily',
-    beijingTime: { hour: 16, minute: 10 },
-    dataFrequency: 'daily trading-day OHLCV increment',
-    failureStrategy: 'fail fast; do not publish snapshots when candle data is stale',
-    commandHint: 'bun dist/scripts/sync-stock-history.js --mode incremental',
-  },
-  {
-    id: 'news_fetch',
-    description: 'Fetch the day news corpus for later normalization.',
-    cadence: 'daily',
-    beijingTime: { hour: 16, minute: 30 },
-    dataFrequency: 'daily news batch',
-    failureStrategy: 'fail fast and preserve the previous successful corpus; no silent fallback news source',
-    commandHint: 'bun dist/scripts/fetch-newsnow.js',
-  },
-  {
-    id: 'normalize_dedupe_llm',
-    description: 'Normalize and deduplicate the fetched news with LLM-assisted extraction.',
-    cadence: 'daily',
-    beijingTime: { hour: 16, minute: 40 },
-    dataFrequency: 'daily news normalization batch',
-    failureStrategy: 'throw on any LLM error; no rule-based downgrade or fallback extraction',
-    commandHint: 'bun dist/scripts/run-daily-recommendation.js --stop-after dedup',
-  },
-  {
-    id: 'graph_score_recommend',
-    description: 'Build graph signals, score contributions, and produce recommendations.',
-    cadence: 'daily',
-    beijingTime: { hour: 16, minute: 50 },
-    dataFrequency: 'daily recommendation scoring batch',
-    failureStrategy: 'fail fast; keep partial traces for debugging and skip publish_snapshot',
-    commandHint: 'bun dist/scripts/run-daily-recommendation.js',
-  },
-  {
-    id: 'publish_snapshot',
-    description: 'Publish the recommendation snapshot after scoring succeeds.',
-    cadence: 'daily',
-    beijingTime: { hour: 17, minute: 0 },
-    dataFrequency: 'daily immutable recommendation snapshot',
-    failureStrategy: 'fail fast and leave the last published snapshot untouched',
-    commandHint: 'bun dist/scripts/run-daily-recommendation.js --publish-only',
-  },
-  {
-    id: 'forecast_replay',
-    description: '盘中基于已存档预测+最新Candle重排推荐（不重新抓新闻/LLM）',
-    cadence: 'daily',
-    beijingTime: { hour: 14, minute: 30 },
-    dataFrequency: 'intraday forecast replay',
-    failureStrategy: 'fail fast; leave morning snapshot untouched',
-    commandHint: 'bun dist/scripts/run-daily-recommendation.js --from-forecast true',
-  },
-  {
-    id: 'tickflow_industry_exposure_refresh',
-    description: 'Refresh monthly tick-flow industry exposure facts.',
-    cadence: 'monthly',
-    monthDays: [1],
-    beijingTime: { hour: 3, minute: 30 },
-    dataFrequency: 'monthly first-day industry exposure refresh',
-    failureStrategy: 'fail fast; retain the previous exposure table and require manual retry',
-    commandHint: 'bun dist/scripts/sync-tickflow-stock-exposure.js',
-  },
-  {
-    id: 'history_gap_repair',
-    description: 'Repair historical market-data gaps after the morning stock-pool check window.',
-    cadence: 'daily',
-    beijingTime: { hour: 8, minute: 30 },
-    dataFrequency: 'daily morning historical data gap scan',
-    failureStrategy: 'fail fast for the current repair batch; retry on the next scheduler cycle',
-    // incremental 会按“数据库已有 vs 最新交易日”自动识别并补齐缺口；
-    // 旧值 --mode repair-gaps 不是该脚本支持的枚举（只有 incremental / yahoo-backfill-missing）。
-    commandHint: 'bun dist/scripts/sync-stock-history.js --mode incremental',
-  },
-  {
-    id: 'reconcile_recommendations',
-    description: 'Reconcile historical recommendations with actual returns (1/3/5 日收益元数据与成熟度).',
-    cadence: 'daily',
-    beijingTime: { hour: 16, minute: 45 },
-    dataFrequency: 'daily after candle sync batch',
-    failureStrategy: 'fail gracefully; log errors but do not block downstream scoring tasks',
-    // 收益对账脚本：写 YieldRecord（成熟度/可见时间口径与推荐链路一致），关键词惩罚在次日推荐链路读取。
-    commandHint: 'bun dist/scripts/backfill-yield-records.js',
+    beijingTime: { hour: 20, minute: 0 },
+    dataFrequency: 'daily after market close',
+    failureStrategy: 'fail fast; 任一步失败即停止当日链路并保留上一份已发布快照，不降级、不折中',
+    commandHint: 'bun dist/scripts/sync-stock-history.js --mode incremental && bun dist/scripts/backfill-yield-records.js && bun dist/scripts/run-daily-recommendation.js',
   },
 ];
 

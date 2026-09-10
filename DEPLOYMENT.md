@@ -101,7 +101,15 @@ docker compose -f docker-compose.production.yml stop scheduler
 docker compose -f docker-compose.production.yml up -d scheduler
 ```
 
-当日任务（北京时间）：07:30 股票池检查、08:30 历史缺口修复、14:30 盘中预测重排、
-16:10 日线增量、16:30 新闻抓取、16:40 归一化+LLM 抽取、16:45 收益对账、
-16:50 图谱/评分/推荐、17:00 发布快照；每月 1 日 03:30 刷新 TickFlow 行业暴露。
-启动日志会打印 `[scheduler] next task=... beijing=...`，可直接用来确认下一次执行时间。
+**每个自然日只在 20:00（北京时间）跑一次** `daily_recommendation`，一条命令按顺序串联：
+
+```sh
+bun dist/scripts/sync-stock-history.js --mode incremental   # 1. 日线增量（否则推荐预检会 candle_stale 停止）
+  && bun dist/scripts/backfill-yield-records.js             # 2. 历史收益对账（关键词惩罚读到已成熟收益）
+  && bun dist/scripts/run-daily-recommendation.js           # 3. 新闻/LLM 抽取 → 图谱评分 → 发布推荐
+```
+
+任一步失败即中断当日链路并保留上一份已发布快照，不降级、不折中。
+调度是串行的：若某个任务运行超过下一次调度时间，该次会被顺延（不会补跑），
+因此这里只保留一个任务、把所有步骤串在同一条命令里。
+启动日志会打印 `[scheduler] next task=... beijing=...`，可直接确认下一次执行时间。
