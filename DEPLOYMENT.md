@@ -63,7 +63,7 @@ host's existing Mihomo inbound routing convention. It depends on the existing
 `mihomo-docker-inbound-route.service`. Neither service exposes database ports.
 The additional service is enabled at boot; its source is in `scripts/`.
 
-## AI later
+## AI configuration
 
 Copy `backend/ai-config.example.json` to `backend/tmp/ai-config.json` and fill
 in the providers' API prefixes, keys, and ordered model lists. The existing
@@ -73,6 +73,35 @@ container. Subsequent JSON edits require restarting the API process. Every AI
 function shares this list and moves to the next model on a request/output
 failure; exhaustion stops the workflow. Old `LLM_SMART_*` / `OPENAI_*` AI
 credentials are no longer read. Keep the real JSON file private and out of Git.
-Do not enable the repository's
-default scheduler before resolving its missing compiled entrypoint and checking
-the scheduled commands. Recommendation verification is a separate later step.
+
+AI 环境变量（VPS `.env`）：
+
+```sh
+AI_CONFIG_FILE=tmp/ai-config.json
+CAUSAL_SIGNAL_EXTRACTOR=llm
+CAUSAL_PROTOCOL_MODE=items
+SCORING_RECIPE=event-v2
+PIPELINE_STAGE_EXECUTOR=registry
+```
+
+## Scheduler
+
+`docker-compose.production.yml` 里的 `scheduler` 服务与 api 共用镜像和 `.env`，
+入口是 `bun dist/scripts/run-scheduler.js`（构建步骤现在会把 `scripts/**/*.ts`
+一起编译进 `dist/scripts/`，所以 `run-scheduler.js` 与全部命令脚本都在镜像内）。
+调度表定义在 `backend/src/services/mvp-daily-scheduler.ts`，时区按北京时间。
+
+```sh
+# 状态与日志
+docker compose -f docker-compose.production.yml ps scheduler
+docker compose -f docker-compose.production.yml logs --tail=50 scheduler
+
+# 暂停 / 恢复定时任务
+docker compose -f docker-compose.production.yml stop scheduler
+docker compose -f docker-compose.production.yml up -d scheduler
+```
+
+当日任务（北京时间）：07:30 股票池检查、08:30 历史缺口修复、14:30 盘中预测重排、
+16:10 日线增量、16:30 新闻抓取、16:40 归一化+LLM 抽取、16:45 收益对账、
+16:50 图谱/评分/推荐、17:00 发布快照；每月 1 日 03:30 刷新 TickFlow 行业暴露。
+启动日志会打印 `[scheduler] next task=... beijing=...`，可直接用来确认下一次执行时间。

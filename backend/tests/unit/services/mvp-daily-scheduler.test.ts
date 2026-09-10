@@ -34,7 +34,7 @@ describe('mvp daily scheduler', () => {
       id: 'history_gap_repair',
       cadence: 'daily',
       beijingTime: { hour: 8, minute: 30 },
-      commandHint: 'bun dist/scripts/sync-stock-history.js --mode repair-gaps',
+      commandHint: 'bun dist/scripts/sync-stock-history.js --mode incremental',
     });
     expect(schedule[7]).toMatchObject({
       id: 'tickflow_industry_exposure_refresh',
@@ -51,14 +51,14 @@ describe('mvp daily scheduler', () => {
     expect(schedule.map(task => task.commandHint)).toEqual([
       'bun dist/scripts/sync-stocks.js --mode check',
       'bun dist/scripts/sync-stock-history.js --mode incremental',
-      'bun dist/scripts/fetch-newsnow.js --date today',
+      'bun dist/scripts/fetch-newsnow.js',
       'bun dist/scripts/run-daily-recommendation.js --stop-after dedup',
       'bun dist/scripts/run-daily-recommendation.js',
       'bun dist/scripts/run-daily-recommendation.js --publish-only',
       'bun dist/scripts/run-daily-recommendation.js --from-forecast true',
       'bun dist/scripts/sync-tickflow-stock-exposure.js',
-      'bun dist/scripts/sync-stock-history.js --mode repair-gaps',
-      'bun dist/scripts/reconcile-historical-recommendations.js',
+      'bun dist/scripts/sync-stock-history.js --mode incremental',
+      'bun dist/scripts/backfill-yield-records.js',
     ]);
   });
 

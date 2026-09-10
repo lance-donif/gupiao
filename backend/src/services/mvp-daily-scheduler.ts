@@ -61,7 +61,7 @@ const MVP_SCHEDULE_TABLE: readonly IMvpScheduleTask[] = [
     beijingTime: { hour: 16, minute: 30 },
     dataFrequency: 'daily news batch',
     failureStrategy: 'fail fast and preserve the previous successful corpus; no silent fallback news source',
-    commandHint: 'bun dist/scripts/fetch-newsnow.js --date today',
+    commandHint: 'bun dist/scripts/fetch-newsnow.js',
   },
   {
     id: 'normalize_dedupe_llm',
@@ -116,16 +116,19 @@ const MVP_SCHEDULE_TABLE: readonly IMvpScheduleTask[] = [
     beijingTime: { hour: 8, minute: 30 },
     dataFrequency: 'daily morning historical data gap scan',
     failureStrategy: 'fail fast for the current repair batch; retry on the next scheduler cycle',
-    commandHint: 'bun dist/scripts/sync-stock-history.js --mode repair-gaps',
+    // incremental 会按“数据库已有 vs 最新交易日”自动识别并补齐缺口；
+    // 旧值 --mode repair-gaps 不是该脚本支持的枚举（只有 incremental / yahoo-backfill-missing）。
+    commandHint: 'bun dist/scripts/sync-stock-history.js --mode incremental',
   },
   {
     id: 'reconcile_recommendations',
-    description: 'Reconcile historical recommendations with actual returns and update keyword penalties.',
+    description: 'Reconcile historical recommendations with actual returns (1/3/5 日收益元数据与成熟度).',
     cadence: 'daily',
     beijingTime: { hour: 16, minute: 45 },
     dataFrequency: 'daily after candle sync batch',
     failureStrategy: 'fail gracefully; log errors but do not block downstream scoring tasks',
-    commandHint: 'bun dist/scripts/reconcile-historical-recommendations.js',
+    // 收益对账脚本：写 YieldRecord（成熟度/可见时间口径与推荐链路一致），关键词惩罚在次日推荐链路读取。
+    commandHint: 'bun dist/scripts/backfill-yield-records.js',
   },
 ];
 
@@ -281,11 +284,13 @@ export const runSchedulerLoop = async (options?: {
   const nowFn = options?.now ?? (() => new Date());
   const completedToday = new Set<string>();
   let lastDayKey = formatBeijingDayKey(nowFn());
+  console.log(`[scheduler] started tasks=${MVP_SCHEDULE_TABLE.length} now=${formatBeijingDateTime(nowFn())} (Asia/Shanghai)`);
 
   // ponytail: 内存 Set 防当日重跑；进程重启会清空（可接受，最多重跑一次）。
   // ponytail: 不处理"同一时刻多任务"——当前调度表无时间冲突，若未来出现需改用任务级游标。
   while (!signal?.aborted) {
     const next = getNextScheduledRunBeijing(nowFn());
+    console.log(`[scheduler] next task=${next.task.id} beijing=${next.beijingDateTime} delayMs=${next.delayMs}`);
     await sleepWithSignal(next.delayMs, signal);
     if (signal?.aborted) {
       break;

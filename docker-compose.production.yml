@@ -93,3 +93,27 @@ services:
     depends_on:
       api:
         condition: service_healthy
+
+  # 定时任务：按北京时间固定时刻执行行情增量、新闻抓取、推荐链路与收益对账。
+  # 与 api 使用同一镜像与 .env；调度表见 backend/src/services/mvp-daily-scheduler.ts。
+  scheduler:
+    <<: *defaults
+    image: gupiao-backend:local
+    build: ./backend
+    command: ["bun", "dist/scripts/run-scheduler.js"]
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379/0
+      AKTOOLS_BASE_URL: http://aktools:8010
+    volumes:
+      - ./backend/tmp:/app/tmp
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      aktools:
+        condition: service_healthy
