@@ -548,3 +548,48 @@ describe('causal signal extraction service', () => {
     }));
   });
 });
+
+describe('causal signal v3 items protocol extractor', () => {
+  const asOf = new Date('2026-05-24T15:59:59.999Z');
+  const itemsNews = [
+    { id: 'n1', title: '白银库存下降', content: '白银库存下降，供给不足。', source: 'test', publishedAt: new Date('2026-05-24T08:00:00Z') },
+    { id: 'n2', title: '光伏装机增长', content: '光伏装机需求增长，组件订单改善。', source: 'test', publishedAt: new Date('2026-05-24T08:00:00Z') },
+  ];
+  const responder = (items: unknown) => {
+    const fetchImpl = async (): Promise<Response> => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ items }) }, finish_reason: 'stop' }],
+    }), { status: 200 });
+    return new OpenAiCompatibleCausalSignalExtractor({
+      baseUrl: 'https://llm.example/v1', apiKey: 'test-key', model: 'test-model', protocolMode: 'items', fetchImpl: fetchImpl as typeof fetch,
+    });
+  };
+
+  it('accepts a valid items response and honors explicit no_signal coverage', async () => {
+    const mockDb = new MockCausalSignalPrismaClient();
+    const result = await new CausalSignalExtractionService(responder([
+      { newsId: 'n1', status: 'signals', signals: [{ event: '白银库存下降', businessVariable: '供给不足', assetOrThemeKeyword: '白银', direction: 'positive', confidence: 0.9, evidenceText: '白银库存下降' }] },
+      { newsId: 'n2', status: 'no_signal', signals: [] },
+    ])).execute(mockDb, { traceId: 'trace-v3', asOf, clusterKey: 'global', news: itemsNews });
+
+    expect(result).toMatchObject({ candidateCount: 1, acceptedCount: 1 });
+    expect(mockDb.rows[0]).toEqual(expect.objectContaining({ newsId: 'n1', status: 'candidate' }));
+  });
+
+  it('rejects the whole extraction without any partial commit when a signal violates the contract', async () => {
+    const mockDb = new MockCausalSignalPrismaClient();
+    await expect(new CausalSignalExtractionService(responder([
+      { newsId: 'n1', status: 'signals', signals: [{ event: '白银库存下降', businessVariable: '供给不足', assetOrThemeKeyword: '白银', direction: 'positive', confidence: 0.9, evidenceText: '白银库存下降' }] },
+      { newsId: 'n2', status: 'signals', signals: [{ event: '不存在', businessVariable: '供给不足', assetOrThemeKeyword: '白银', direction: 'positive', confidence: 0.9, evidenceText: '原文不存在的证据' }] },
+    ])).execute(mockDb, { traceId: 'trace-v3-bad', asOf, clusterKey: 'global', news: itemsNews })).rejects.toThrow('All AI candidates failed');
+    expect(mockDb.rows).toEqual([]);
+  });
+
+  it('rejects the whole extraction when an item is missing', async () => {
+    const mockDb = new MockCausalSignalPrismaClient();
+    await expect(new CausalSignalExtractionService(responder([
+      { newsId: 'n1', status: 'signals', signals: [{ event: '白银库存下降', businessVariable: '供给不足', assetOrThemeKeyword: '白银', direction: 'positive', confidence: 0.9, evidenceText: '白银库存下降' }] },
+    ])).execute(mockDb, { traceId: 'trace-v3-missing', asOf, clusterKey: 'global', news: itemsNews })).rejects.toThrow('All AI candidates failed');
+    expect(mockDb.rows).toEqual([]);
+  });
+});
+

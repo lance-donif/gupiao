@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client';
+import { evaluateArtifactCompleteness, type ArtifactShardLike } from './pipeline/artifact-completeness.js';
 
 export class TraceManager {
   /**
@@ -136,6 +137,25 @@ export class TraceManager {
         ? row.outputSummary as Record<string, unknown>
         : {},
     ]));
+  }
+
+  /**
+   * 按**实际产物**判定阶段是否完成：必须存在该 `(traceId, stageId)` 的产物清单，
+   * 且分片数等于 `shardCount`、索引恰好覆盖 `0..shardCount-1`。
+   * 绝不依据 `PipelineStepTrace.status === 'SUCCESS'` 单独判定（状态可能早于/脱离产物）。
+   */
+  public static async isStageComplete(
+    prisma: any,
+    input: { traceId: string; stageId: string },
+  ): Promise<boolean> {
+    if (!prisma.runArtifact?.findFirst) return false;
+    const artifact = await prisma.runArtifact.findFirst({
+      where: { traceId: input.traceId, stageId: input.stageId },
+      orderBy: { version: 'desc' },
+    });
+    if (!artifact) return false;
+    const shards: ArtifactShardLike[] = await prisma.runArtifactShard.findMany({ where: { artifactId: artifact.id } });
+    return evaluateArtifactCompleteness(artifact, shards).complete;
   }
 
   /**

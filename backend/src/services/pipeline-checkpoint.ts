@@ -1,16 +1,33 @@
 import { createHash } from 'node:crypto';
 import { AiNeedsAttentionError } from './ai-scheduling-errors.js';
+import { assertLeaseHolder, type LeaseGuard } from './pipeline-run-lease.js';
 import { TraceManager } from './trace-manager.js';
 
-export function inputFingerprint(value: unknown): string {
+/** 稳定规范化：对象键排序、Date 转 ISO、bigint 转字符串、遵循 toJSON。 */
+export function canonicalizeValue(value: unknown): unknown {
   const canonical = (item: any): any => typeof item === 'bigint' ? item.toString() : item instanceof Date ? item.toISOString()
     : item && typeof item.toJSON === 'function' ? canonical(item.toJSON())
     : Array.isArray(item) ? item.map(canonical)
     : item && typeof item === 'object' ? Object.fromEntries(Object.keys(item).sort().map(key => [key, canonical(item[key])])) : item;
-  return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+  return canonical(value);
 }
 
-export async function checkpointWork<T>(prisma: any, traceId: string, stage: string, input: unknown, work: () => Promise<T>): Promise<T> {
+/** 规范化后的 JSON 字符串；分片切分与哈希都基于它，保证跨执行者一致。 */
+export function canonicalJsonString(value: unknown): string {
+  return JSON.stringify(canonicalizeValue(value));
+}
+
+export function inputFingerprint(value: unknown): string {
+  return createHash('sha256').update(canonicalJsonString(value)).digest('hex');
+}
+
+/**
+ * 可选租约守卫：产物/检查点提交前，调用方须通过 `owner + generation` 证明自己仍是
+ * 当前租约持有者。缺省（undefined）表示不启用守卫，保持旧调用点行为不变。
+ */
+export type CheckpointLeaseGuard = LeaseGuard;
+
+export async function checkpointWork<T>(prisma: any, traceId: string, stage: string, input: unknown, work: () => Promise<T>, lease?: CheckpointLeaseGuard | null): Promise<T> {
   const fingerprint = inputFingerprint(input);
   const rows = await prisma.$queryRawUnsafe('SELECT input,result FROM "PipelineCheckpoint" WHERE "traceId"=$1 AND stage=$2', traceId, stage);
   if (rows.length) {
@@ -19,6 +36,8 @@ export async function checkpointWork<T>(prisma: any, traceId: string, stage: str
   }
   const result = await work();
   if (result === undefined) return result;
+  // 过期执行者即便拿到成功响应，也不得落库：提交前做 owner + leaseUntil + generation 三重校验。
+  if (lease) await assertLeaseHolder(prisma, { traceId, owner: lease.owner, generation: lease.generation });
   await prisma.$executeRawUnsafe('INSERT INTO "PipelineCheckpoint"("traceId",stage,input,result) VALUES($1,$2,$3,$4::jsonb)', traceId, stage, fingerprint, JSON.stringify(result));
   return result;
 }

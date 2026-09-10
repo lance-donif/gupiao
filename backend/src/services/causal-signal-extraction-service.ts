@@ -3,6 +3,8 @@ import { AiChatClient, AiInputError, AiCandidatesExhaustedError, createAiOptions
 import { isAiRecord } from './ai-provider-config.js';
 import { Prisma } from '@prisma/client';
 import { DataRefreshLedgerService } from './data-refresh-ledger-service.js';
+import { buildItemsProtocolInstruction, parseItemsProtocol, toProtocolVersion, type CausalProtocolMode, type ParsedCausalItem } from './causal-protocol.js';
+import { CAUSAL_PROTOCOL_VERSION, CAUSAL_PROTOCOL_VERSION_ITEMS } from '../version.js';
 
 export type CausalSignalDirection = 'positive' | 'negative' | 'mixed' | 'neutral';
 
@@ -66,6 +68,11 @@ export interface ICausalSignalExtractor {
   readonly extractorType: 'rule' | 'llm';
   readonly modelVersion: string;
   readonly promptVersion: string;
+  /**
+   * 抽取结果协议版本。旧实现未声明时按 v2（`CAUSAL_PROTOCOL_VERSION`）处理，
+   * 缓存键/持久化列据此区分新旧协议，避免跨协议复用。
+   */
+  readonly protocolVersion?: number;
   readonly cacheModelVersions?: readonly string[];
   extract: (input: ICausalSignalExtractionInput) => Promise<AiSourcedArray<ICausalSignalCandidateRecord>>;
 }
@@ -146,6 +153,7 @@ export class RuleCausalSignalExtractor implements ICausalSignalExtractor {
   public readonly extractorType = 'rule' as const;
   public readonly modelVersion = 'rule-causal-signal-v1';
   public readonly promptVersion = 'rule-pattern-v1';
+  public readonly protocolVersion = CAUSAL_PROTOCOL_VERSION;
 
   public async extract(input: ICausalSignalExtractionInput): Promise<readonly ICausalSignalCandidateRecord[]> {
     const candidates = new Map<string, ICausalSignalCandidateRecord>();
@@ -201,6 +209,11 @@ interface IOpenAiCompatibleCausalSignalExtractorOptions {
   readonly fetchImpl?: typeof fetch;
   readonly maxRequestChars?: number;
   readonly requestTimeoutMs?: number;
+  /**
+   * `items` = v3 逐条结果协议；`legacy` = v2 `{signals,noSignalNewsIds}`。
+   * 默认 `legacy`，保持既有线上契约与历史缓存键稳定；新链路可显式启用 `items`。
+   */
+  readonly protocolMode?: CausalProtocolMode;
 }
 
 const isDirection = (value: unknown): value is CausalSignalDirection => {
@@ -312,6 +325,10 @@ const supportsLedgerCache = (prisma: any): boolean => {
   return typeof prisma?.$queryRawUnsafe === 'function' && typeof prisma?.$executeRawUnsafe === 'function';
 };
 
+/** v2/v3 协议结果都能作为抽取产物读取；其它版本一律视为不可用缓存。 */
+const isSupportedProtocolVersion = (value: unknown): boolean =>
+  value === CAUSAL_PROTOCOL_VERSION || value === CAUSAL_PROTOCOL_VERSION_ITEMS;
+
 /**
  * The original news ID is source-local and changes for syndicated copies.  A
  * cache key therefore uses the exact fields supplied to the LLM instead.
@@ -351,7 +368,9 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
   public readonly extractorType = 'llm' as const;
   public readonly modelVersion: string;
   public readonly promptVersion: string;
+  public readonly protocolVersion: number;
   public readonly cacheModelVersions?: readonly string[];
+  private readonly protocolMode: CausalProtocolMode;
   private readonly client: AiChatClient;
   private readonly maxRequestChars: number;
   private readonly requestTimeoutMs: number;
@@ -360,6 +379,8 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
     this.client = AiChatClient.fromOptions(options);
     this.modelVersion = options.client ? `ai-chain:${this.client.fingerprint}` : options.model;
     this.promptVersion = `causal-signal-extraction-v2:outcome-schema-v1:${this.client.fingerprint}`;
+    this.protocolMode = options.protocolMode ?? 'legacy';
+    this.protocolVersion = toProtocolVersion(this.protocolMode);
     this.cacheModelVersions = options.client ? this.client.modelVersions : undefined;
     this.maxRequestChars = options.maxRequestChars ?? DEFAULT_MAX_LLM_REQUEST_CHARS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
@@ -367,6 +388,59 @@ export class OpenAiCompatibleCausalSignalExtractor implements ICausalSignalExtra
 
   public async extract(input: ICausalSignalExtractionInput): Promise<AiSourcedArray<ICausalSignalCandidateRecord>> {
     if (input.news.length === 0) return [];
+    return this.protocolMode === 'items' ? this.extractItems(input) : this.extractLegacy(input);
+  }
+
+  /** v3 逐条结果协议：结构/覆盖/证据任一不满足都 throw，绝不部分提交。 */
+  private async extractItems(input: ICausalSignalExtractionInput): Promise<AiSourcedArray<ICausalSignalCandidateRecord>> {
+    const newsSource = input.news.map(news => ({ id: news.id, title: news.title, content: news.content }));
+    const result = await this.client.request({
+      label: 'Causal signal AI',
+      messages: [
+        { role: 'system', content: '你只返回合法 JSON，不做股票推荐，不编造原文不存在的证据。' },
+        { role: 'user', content: [buildItemsProtocolInstruction(), JSON.stringify(input.news.map(news => ({
+          newsId: news.id,
+          title: news.title,
+          content: news.content,
+          source: news.source,
+        })), null, 2)].join('\n') },
+      ],
+      temperature: 0,
+      timeoutMs: this.requestTimeoutMs,
+      maxRequestChars: this.maxRequestChars,
+      validate: (value): { readonly items: readonly ParsedCausalItem[] } => ({
+        items: parseItemsProtocol(value, newsSource),
+      }),
+    });
+
+    const candidates: ICausalSignalCandidateRecord[] = [];
+    for (const item of result.value.items) {
+      for (const signal of item.signals) {
+        candidates.push({
+          traceId: input.traceId,
+          asOf: input.asOf,
+          clusterKey: input.clusterKey,
+          newsId: item.newsId,
+          event: signal.event.slice(0, 240),
+          businessVariable: signal.businessVariable.slice(0, 80),
+          assetOrThemeKeyword: signal.assetOrThemeKeyword.slice(0, 80),
+          direction: signal.direction,
+          confidence: Math.max(0, Math.min(signal.confidence, 1)),
+          evidenceText: signal.evidenceText.slice(0, 500),
+          evidenceOffsetStart: signal.evidenceOffsetStart ?? null,
+          evidenceOffsetEnd: signal.evidenceOffsetEnd ?? null,
+          extractorType: this.extractorType,
+          modelVersion: result.source.modelVersion,
+          promptVersion: this.promptVersion,
+          status: signal.status === 'rejected' ? 'rejected' : 'candidate',
+          failureReason: signal.failureReason ?? null,
+        } satisfies ICausalSignalCandidateRecord);
+      }
+    }
+    return withAiSource(candidates, result.source, { completedNewsIds: input.news.map(news => news.id) });
+  }
+
+  private async extractLegacy(input: ICausalSignalExtractionInput): Promise<AiSourcedArray<ICausalSignalCandidateRecord>> {
     const newsIds = new Set(input.news.map(news => news.id));
     const result = await this.client.request({
       label: 'Causal signal AI',
@@ -785,7 +859,7 @@ export class CausalSignalExtractionService {
       if (typeof summary === 'string') {
         try { summary = JSON.parse(summary); } catch { continue; }
       }
-      if (!isAiRecord(summary) || summary.protocolVersion !== 2 || !Array.isArray(summary.signals)) continue;
+      if (!isAiRecord(summary) || !isSupportedProtocolVersion(summary.protocolVersion) || !Array.isArray(summary.signals)) continue;
       const accepted = summary.signals.every(signal => isAiRecord(signal)
         && typeof signal.event === 'string'
         && typeof signal.businessVariable === 'string'
@@ -851,7 +925,7 @@ export class CausalSignalExtractionService {
         expiresAt: LLM_CACHE_EXPIRES_AT,
         traceId: input.traceId,
         summary: {
-          protocolVersion: 2,
+          protocolVersion: this.extractor.protocolVersion ?? CAUSAL_PROTOCOL_VERSION,
           outcome: candidatesForNews.length > 0 ? 'signals' : 'no_signal',
           signalCount: candidatesForNews.length,
           acceptedCount: candidatesForNews.filter(candidate => candidate.status === 'candidate').length,
@@ -877,11 +951,13 @@ export class CausalSignalExtractionService {
   }
 
   private get cacheSourceKey(): string {
-    return [
+    const base = [
       this.extractor.extractorType,
       this.extractor.modelVersion,
       this.extractor.promptVersion,
     ].join(':');
+    const protocol = this.extractor.protocolVersion ?? CAUSAL_PROTOCOL_VERSION;
+    return protocol === CAUSAL_PROTOCOL_VERSION ? base : `${base}:protocol-${protocol}`;
   }
 }
 
@@ -889,8 +965,10 @@ export const createCausalSignalExtractorFromEnv = (
   environment: NodeJS.ProcessEnv = process.env,
 ): ICausalSignalExtractor => {
   if (environment.CAUSAL_SIGNAL_EXTRACTOR === 'llm') {
+    const protocolMode: CausalProtocolMode = environment.CAUSAL_PROTOCOL_MODE === 'items' ? 'items' : 'legacy';
     return new OpenAiCompatibleCausalSignalExtractor({
       ...createAiOptionsFromEnv(environment),
+      protocolMode,
       maxRequestChars: Number(environment.CAUSAL_SIGNAL_LLM_MAX_REQUEST_CHARS ?? DEFAULT_MAX_LLM_REQUEST_CHARS),
       requestTimeoutMs: Number(environment.CAUSAL_SIGNAL_LLM_REQUEST_TIMEOUT_MS ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS),
     });
