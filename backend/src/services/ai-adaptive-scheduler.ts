@@ -42,12 +42,14 @@ export class AiAdaptiveScheduler {
         if (excluded.has(candidateKey(candidate))) continue;
         const scopes = this.scopes(candidate);
         const body=JSON.parse(candidate.serialized);
-        const tokens = Buffer.byteLength(candidate.serialized, 'utf8') + Number(body.max_completion_tokens ?? body.max_tokens ?? aiRequestContext.getStore()?.outputTokenBudget ?? 4096);
+        const outputTokens=Number(body.max_completion_tokens ?? body.max_tokens ?? aiRequestContext.getStore()?.outputTokenBudget ?? 4096);
+        if(outputTokens<(aiRequestContext.getStore()?.minimumOutputTokens ?? 0)){oversized++;continue;}
+        const tokens = Buffer.byteLength(candidate.serialized, 'utf8') + outputTokens;
         if(tokens>(candidate.model.limits?.contextTokens ?? 128000)){oversized++;continue;}
         if (scopes.some(scope=>scope.limits.contextTokens && tokens>scope.limits.contextTokens)) {oversized++;continue;}
         let readyAt = now;
         let disabled = false;
-        let score = 0;
+        let score = candidateKey(candidate)===aiRequestContext.getStore()?.preferredCandidate ? -1000 : 0;
         for (const scope of scopes) {
           let state = snapshot.health[scope.key];
           if (!state || state.identity !== scope.identity) {

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { loadBackendEnv } from '../services/load-backend-env.js';
 import { FileBackedConfigStore } from './config-store.js';
@@ -25,6 +26,8 @@ async function main(): Promise<void> {
   console.log(`backend http shell listening on http://${host}:${server.port}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// 入口守卫必须用 pathToFileURL 归一化：Windows 下 process.argv[1] 是 `C:\...\server.ts`，
+// 与 import.meta.url(`file:///C:/...`) 永远不相等，会导致直接执行时静默退出。
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   void main();
 }

@@ -662,7 +662,7 @@ export class CausalSignalExtractionService {
     readonly completedNewsIds: ReadonlySet<string>;
   }> {
     const ledgerCache = await this.loadCachedCandidatesFromLedger(prisma, input, news, newsById);
-    if (!prisma.causalSignalCandidate?.findMany || news.length === 0) {
+    if (supportsLedgerCache(prisma) || !prisma.causalSignalCandidate?.findMany || news.length === 0) {
       return {
         candidates: ledgerCache.candidates,
         cacheHitCount: ledgerCache.completedNewsIds.size,

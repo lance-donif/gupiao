@@ -122,13 +122,15 @@ gupiao/
 ```bash
 cd backend && PORT=8000 HOST=127.0.0.1 bun run dev:http
 cd backend && bun run build
-cd backend && bun test
+cd backend && bun run test
 cd backend && bun run typecheck
 cd backend && bun run lint
 cd backend && bun run check:fix
 cd backend && bun run scripts/audit-recommendation-quality.ts --date 2026-06-29
 cd backend && bun run scripts/audit-recommendation-quality.ts --trace-id <traceId>
 ```
+
+注意：后端测试运行器是 **Vitest**（`bun run test` = `vitest run`）。`bun test` 是 Bun 原生运行器，无法识别用例，禁止使用。`check:fix` = typecheck + lint(`oxlint src scripts`) + test，三个独立命令都存在。
 
 前端：
 
@@ -158,8 +160,15 @@ docker compose down
 
 - 单元测试：纯逻辑，无外部依赖。
 - 集成测试：真实外部服务，必须明确依赖。
+- 后端测试用 `bun run test`（Vitest）；当前基线 401 通过 / 0 失败 / 17 跳过（65 文件：63 通过、2 跳过），以实测为准。
 - 前端变更：需要浏览器页面验证。
-- 后端交接：禁止带 lint error。
+- 后端交接：禁止带 lint error；跳过的测试必须单列，不得计为通过。
+
+## Rewrite Status
+
+- 项目处于推荐链路重写计划（M0–M7）中间态，完成度复核见 `PLAN_M0_M7_VERIFY_2026-09-10.md`（修正了 `PLAN_M0_M7_AUDIT_2026-09-10.md` 的过时判断）。
+- 工作区存在未提交改动（M0/M1/M2 阶段），测试套件已全绿；`causal-signal-extraction-service.test.ts` 的 mock 回归已修复（原 A1 完成）。
+- 待开发项按优先级列于复核报告"待开发项汇总"一节，从 A2（把 `src/version.ts` 版本常量接入消费方）开始。
 
 ## Frontend Layout Rules
 

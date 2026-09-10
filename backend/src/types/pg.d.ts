@@ -12,7 +12,7 @@ declare module 'pg' {
     on(event: 'error', listener: (error: Error) => void): void;
   }
   export class Client {
-    public constructor(options: { connectionString: string });
+    public constructor(options: { connectionString: string; connectionTimeoutMillis?: number; query_timeout?: number });
     public connect(): Promise<void>;
     public query(queryText: string, values?: readonly unknown[]): Promise<PoolQueryResult>;
     public on(event: 'error', listener: (error: Error) => void): void;

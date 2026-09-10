@@ -1,5 +1,6 @@
 import { writeFile, mkdir, readdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { createBackendIntegrationConfig } from '../src/services/integration-config.js';
 
@@ -385,6 +386,6 @@ const toValidationPayload = (
   };
 };
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   void main();
 }

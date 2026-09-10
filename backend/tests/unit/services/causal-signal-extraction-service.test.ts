@@ -11,6 +11,13 @@ class MockCausalSignalPrismaClient {
   public rows: any[] = [];
   public ledgerRows: any[] = [];
 
+  public commitSeededExtraction(): void {
+    const row=this.rows[0];
+    this.ledgerRows.push({dataKind:'causal_signal_extraction',source:[row.extractorType,row.modelVersion,row.promptVersion].join(':'),
+      clusterKey:row.clusterKey,bucketKey:row.inputFingerprint,status:'success',fetchedAt:row.asOf,expiresAt:new Date('2099-01-01'),
+      summary:{protocolVersion:2,promptVersion:row.promptVersion,modelVersion:row.modelVersion,signals:[{...row,confidence:Number(row.confidence)}]}});
+  }
+
   public readonly $queryRawUnsafe = async (_query: string, ...args: any[]) => {
     if (!_query.includes('"DataRefreshLedger"')) {
       return [];
@@ -322,6 +329,7 @@ describe('causal signal extraction service', () => {
         publishedAt: new Date('2026-05-24T08:00:00.000Z'),
       }),
     });
+    mockDb.commitSeededExtraction();
     let requestCount = 0;
     const fetchImpl = async (): Promise<Response> => {
       requestCount += 1;
@@ -383,6 +391,7 @@ describe('causal signal extraction service', () => {
         publishedAt: new Date('2026-05-24T08:00:00.000Z'),
       }),
     });
+    mockDb.commitSeededExtraction();
     let requestCount = 0;
     const fetchImpl = async (): Promise<Response> => {
       requestCount += 1;
@@ -475,7 +484,7 @@ describe('causal signal extraction service', () => {
     expect(requestCount).toBe(1);
     expect(replay).toMatchObject({ candidateCount: 0, cacheHitCount: 1 });
     expect(mockDb.ledgerRows[0]?.summary).toMatchObject({
-      protocolVersion: 1,
+      protocolVersion: 2,
       outcome: 'no_signal',
     });
   });

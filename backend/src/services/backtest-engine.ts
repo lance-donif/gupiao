@@ -19,6 +19,8 @@ export interface IBacktestRunInput {
   readonly scoringProfile?: 'short_news' | 'industry_cycle' | 'fundamental_theme';
   readonly halfLifeDays?: number;
   readonly maxWindowDays?: number;
+  /** Separate from the recommendation time; limits observable evaluation prices. */
+  readonly evaluationAsOf?: Date;
 }
 
 export interface IBacktestReplayTraceSummary {
@@ -109,7 +111,13 @@ export class BacktestEngine {
       await TraceManager.startRunTrace(prisma, traceId, clusterKey, 'BACKTEST', asOf);
     }
     const completedSteps = new Map(await TraceManager.getSuccessfulStepOutputs(prisma, traceId));
+    const facts = await Promise.all([
+      artifactFingerprint(prisma,{clusterKey,status:'active',validFrom:{lte:asOf},OR:[{validTo:null},{validTo:{gte:asOf}}]},['stockExposureFact']),
+      artifactFingerprint(prisma,{clusterKey,publishedAt:{lte:asOf,gte:new Date(asOf.getTime()-replaySummary.maxWindowDays*86400000)}},['normalizedNewsRecord']),
+      artifactFingerprint(prisma,{clusterKey,validFrom:{lte:asOf},validTo:{gte:asOf}},['keywordPerformancePenalty']),
+    ]);
     const fingerprint = inputFingerprint({version:'backtest-v3',...replaySummary,
+      facts,
       upstream:await artifactFingerprint(prisma,{traceId,clusterKey},['causalSignalCandidate','graphSnapshot','expectationGapSnapshot','themeForecast'])});
     const scoreArtifact = (db: any) => artifactFingerprint(db,{traceId,clusterKey},['stockFeatureSnapshot','evidenceContribution','marketSignalSnapshot']);
     const recommendationArtifact = (db: any) => artifactFingerprint(db,{traceId,clusterKey},['recommendationSnapshot'],['symbol','rank','finalScore','reasons']);
@@ -131,6 +139,9 @@ export class BacktestEngine {
       }
     }
     if (!scoreResult) try {
+      if (await prisma.recommendationSnapshot.count?.({where:{traceId,isPublished:true}})) {
+        throw new Error('Published recommendation artifacts cannot be rewritten; use a new trace');
+      }
       for (const stage of ['recommendation','reconciliation','strategy_experiment']) completedSteps.delete(stage);
       await prisma.$transaction(async (tx: any) => {
       for (const table of ['stockFeatureSnapshot','evidenceContribution','marketSignalSnapshot','recommendationSnapshot']) {
@@ -189,6 +200,9 @@ export class BacktestEngine {
       }
     }
     if (!recommendations) try {
+      if (await prisma.recommendationSnapshot.count?.({where:{traceId,isPublished:true}})) {
+        throw new Error('Published recommendation artifacts cannot be rewritten; use a new trace');
+      }
       for (const stage of ['reconciliation','strategy_experiment']) completedSteps.delete(stage);
       await prisma.$transaction(async (tx: any) => {
       await tx.recommendationSnapshot.deleteMany?.({where:{traceId,clusterKey}});
@@ -286,7 +300,7 @@ export class BacktestEngine {
 
         // 2. 批量查询历史与未来 K 线 (基准价为 <= asOf 最后一天，未来价为 > asOf 5个交易日以内)
         const marginBefore = new Date(asOf.getTime() - 30 * 24 * 60 * 60 * 1000);
-        const marginAfter = new Date(asOf.getTime() + 20 * 24 * 60 * 60 * 1000);
+        const marginAfter = new Date(Math.min((input.evaluationAsOf ?? new Date()).getTime(),asOf.getTime() + 20 * 24 * 60 * 60 * 1000));
         const allCandles = await prisma.candle.findMany({
           where: {
             stockId: { in: stockIds },
@@ -294,9 +308,11 @@ export class BacktestEngine {
           },
           orderBy: { tradingDay: 'asc' },
         });
+        // Intraday replay must not observe that day's closing price before 15:00.
+        const visibleCandles = allCandles.filter((candle:any)=>dailyCloseVisibleAt(candle.tradingDay)<=marginAfter);
 
         const candlesByStockId = new Map<string, any[]>();
-        for (const candle of allCandles) {
+        for (const candle of visibleCandles) {
           const list = candlesByStockId.get(candle.stockId) ?? [];
           list.push(candle);
           candlesByStockId.set(candle.stockId, list);

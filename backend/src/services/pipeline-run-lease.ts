@@ -9,7 +9,7 @@ export class PipelineRunLease {
   private heartbeat?: ReturnType<typeof setInterval>;
   private checking = false;
   public constructor(connectionString: string, private readonly traceId: string) {
-    this.client = new pg.Client({ connectionString });
+    this.client = new pg.Client({ connectionString, connectionTimeoutMillis:10000, query_timeout:10000 });
     this.client.on('error', () => this.controller.abort(new AiPausedError('Pipeline database lease lost')));
   }
   public async start(timeoutMs: number): Promise<void> {

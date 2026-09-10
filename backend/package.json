@@ -13,10 +13,11 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "check:deps": "knip",
-    "check:fix": "bun run typecheck && bun run test",
-    "check:all": "bun run typecheck && bun run test",
+    "check:fix": "bun run typecheck && bun run lint && bun run test",
+    "check:all": "bun run typecheck && bun run lint && bun run test",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:migrate": "prisma migrate dev",
+    "lint": "oxlint src scripts"
   },
   "keywords": [
     "typescript",
@@ -26,7 +27,11 @@
   ],
   "author": "",
   "license": "MIT",
-  "trustedDependencies": ["prisma", "@prisma/engines", "esbuild"],
+  "trustedDependencies": [
+    "prisma",
+    "@prisma/engines",
+    "esbuild"
+  ],
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
@@ -38,6 +43,7 @@
     "@types/node": "^25.9.1",
     "dotenv": "^16.4.7",
     "knip": "^6.14.2",
+    "oxlint": "^1.82.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.7"
   }

@@ -27,7 +27,7 @@ export interface AiPipelineCheckpoint {
   stepTimings: Record<string,number>;
 }
 interface ICheckpointExposure { factCount: number; symbolCount: number; [key:string]:unknown; }
-interface WorkItem { id: string; rootId: string; input: ICausalSignalExtractionInput['news']; status: string; requestCount: number; outputBudget?: number; }
+interface WorkItem { id: string; rootId: string; input: ICausalSignalExtractionInput['news']; status: string; requestCount: number; outputBudget?: number; minimumOutputTokens?:number; preferredCandidate?:string; }
 
 const durableCacheSource = (extractor: ICausalSignalExtractor): string => [
   extractor.extractorType,
@@ -126,10 +126,10 @@ export class DurableCausalExtractionService {
         try {summary=JSON.parse(summary);} catch {continue;}
       }
       if(!summary || typeof summary!=='object' || Array.isArray(summary))continue;
-      const artifact=summary as {protocolVersion?:number;signals?:ICausalSignalCandidateRecord[];promptVersion?:string};
+      const artifact=summary as {protocolVersion?:number;signals?:ICausalSignalCandidateRecord[];promptVersion?:string;modelVersion?:string};
       if(artifact.protocolVersion!==2 || !Array.isArray(artifact.signals) || artifact.promptVersion!==durablePromptVersion(this.extractor))continue;
       for(const news of matching) {
-        const signals=artifact.signals.map(candidate=>validateCausalSignalCandidate({...candidate,traceId:input.traceId,asOf:input.asOf,clusterKey:input.clusterKey,newsId:news.id},newsById));
+        const signals=artifact.signals.map(candidate=>validateCausalSignalCandidate({...candidate,extractorType:this.extractor.extractorType,modelVersion:artifact.modelVersion ?? this.extractor.modelVersion,promptVersion:durablePromptVersion(this.extractor),traceId:input.traceId,asOf:input.asOf,clusterKey:input.clusterKey,newsId:news.id},newsById));
         if(signals.length)await tx.causalSignalCandidate.createMany({data:signals.map(candidate=>({...candidate,confidence:new Prisma.Decimal(candidate.confidence),inputFingerprint:createCausalSignalInputFingerprint(news)})),skipDuplicates:true});
         completed.add(news.id);
       }
@@ -225,6 +225,8 @@ export class DurableCausalExtractionService {
             await tx.$executeRawUnsafe('UPDATE "AiWorkItem" SET input=$2::jsonb WHERE id=$1',row.id,JSON.stringify(row.input));
           }
           const plan=planAiBatch(row.input,this.config,samples);row.outputBudget=plan.outputBudget;
+          row.minimumOutputTokens=Math.min(plan.outputBudget,Math.ceil(plan.outputTokens*1.25));
+          row.preferredCandidate=JSON.stringify([plan.providerId,plan.model]);
           await tx.$executeRawUnsafe('UPDATE "AiWorkItem" SET status=\'RUNNING\',owner=$2,"leaseUntil"=now()+interval \'60 seconds\',"updatedAt"=now() WHERE id=$1',row.id,this.session.owner);
           return row;
         },{timeout:15000});
@@ -232,7 +234,7 @@ export class DurableCausalExtractionService {
         const started=Date.now();
         console.log(`[ai-batch] news=${task.input.length} outputBudget=${task.outputBudget} task=${task.id}`);
         try {
-          const fresh=await aiRequestContext.run({rootId:task.rootId,taskId:task.id,owner:this.session.owner,deadline:this.session.deadline,maxAttempts:this.config.scheduling?.maxAttempts ?? 24,signal:this.session.controller.signal,outputTokenBudget:task.outputBudget},()=>this.extractor.extract({...input,news:task.input.map(news=>({...news,publishedAt:new Date(news.publishedAt)}))}));
+          const fresh=await aiRequestContext.run({rootId:task.rootId,taskId:task.id,owner:this.session.owner,deadline:this.session.deadline,maxAttempts:this.config.scheduling?.maxAttempts ?? 24,signal:this.session.controller.signal,outputTokenBudget:task.outputBudget,minimumOutputTokens:task.minimumOutputTokens,preferredCandidate:task.preferredCandidate},()=>this.extractor.extract({...input,news:task.input.map(news=>({...news,publishedAt:new Date(news.publishedAt)}))}));
           this.session.controller.signal.throwIfAborted();
           if(this.extractor.extractorType==='llm' && (!fresh.completedNewsIds
             || fresh.completedNewsIds.length!==task.input.length

@@ -15,6 +15,7 @@ export class TraceManager {
     if (existing && (existing.clusterKey !== clusterKey || existing.kind !== kind || new Date(existing.asOf).getTime() !== asOf.getTime())) {
       throw new Error('Trace identity is immutable; use a new trace for changed asOf, cluster or kind');
     }
+    if (existing?.status === 'SUCCESS') return;
     // The same immutable trace ID is the resume key.  Clearing only terminal
     // run state lets callers replay unfinished stages while their individual
     // PipelineStepTrace rows decide which durable artifacts are reusable.

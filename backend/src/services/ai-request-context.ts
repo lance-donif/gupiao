@@ -7,5 +7,7 @@ export interface AiRequestContext {
   readonly maxAttempts: number;
   readonly signal: AbortSignal;
   readonly outputTokenBudget?: number;
+  readonly minimumOutputTokens?: number;
+  readonly preferredCandidate?: string;
 }
 export const aiRequestContext = new AsyncLocalStorage<AiRequestContext>();
