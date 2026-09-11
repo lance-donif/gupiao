@@ -9,10 +9,14 @@ loadBackendEnv();
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://gupiao:password@localhost:5432/gupiaodb';
 const AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
 const DEFAULT_START_DATE = '20260101';
-const DEFAULT_AKTOOLS_CONCURRENCY = 8;
-const DEFAULT_YAHOO_CONCURRENCY = 5;
+const DEFAULT_AKTOOLS_CONCURRENCY = 32;
+const DEFAULT_YAHOO_CONCURRENCY = 16;
 const DEFAULT_MAX_RETRIES = 2;
-const INSERT_BATCH_SIZE = 2000;
+const INSERT_BATCH_SIZE = 5000;
+const AKTOOLS_FETCH_TIMEOUT_MS = 20000;
+const AKTOOLS_SPOT_TIMEOUT_MS = 90000;
+// 交易日历探针：高流动性、极少停牌的基准股。任一返回即可确定区间内的真实交易日。
+const PROBE_SYMBOLS: readonly string[] = ['600519', '000001'];
 const FAILURE_SAMPLE_LIMIT = 100;
 
 type StockHistoryMode = 'incremental' | 'yahoo-backfill-missing';
@@ -25,6 +29,16 @@ interface IAkCandle {
   readonly 最低: number;
   readonly 收盘: number;
   readonly 成交量: number;
+}
+
+// stock_zh_a_spot_em 单行：字段可能为数字、字符串占位符（'-'）或 null，逐字段清洗。
+export interface IAkSpotRow {
+  readonly '代码': unknown;
+  readonly '今开': unknown;
+  readonly '最高': unknown;
+  readonly '最低': unknown;
+  readonly '最新价': unknown;
+  readonly '成交量': unknown;
 }
 
 export interface IStockHistoryStock {
@@ -179,7 +193,7 @@ const resolveOptions = (): ISyncOptions => {
     ),
     yahooFallback: parseBoolean(
       args['yahoo-fallback'] ?? process.env.STOCK_HISTORY_YAHOO_FALLBACK,
-      true,
+      false,
       'STOCK_HISTORY_YAHOO_FALLBACK',
     ),
   };
@@ -316,6 +330,87 @@ export const filterRowsToMissingTradingDays = (
   return rows.filter(row => !existingTradingDays.has(toYYYYMMDD(row.tradingDay)));
 };
 
+export const selectStocksNeedingSync = (
+  stocks: readonly IStockHistoryStock[],
+  existingDaysByStockId: ReadonlyMap<string, ReadonlySet<string>>,
+  startDate: string,
+  endDate: string,
+): IStockHistoryStock[] => {
+  // 单日区间（最常见的每日增量场景）：已持有该交易日的股票无需再请求上游。
+  // 多日区间时无法从本地推断交易日历，保持全量拉取后按缺失过滤。
+  if (startDate !== endDate) {
+    return [...stocks];
+  }
+  return stocks.filter(stock => !(existingDaysByStockId.get(stock.id)?.has(endDate) ?? false));
+};
+
+export const addDaysToYYYYMMDD = (value: string, deltaDays: number): string => {
+  const date = parseYYYYMMDD(value);
+  date.setUTCDate(date.getUTCDate() + deltaDays);
+  return toYYYYMMDD(date);
+};
+
+export const extractHistTradingDays = (
+  candles: readonly IAkCandle[],
+  startDate: string,
+  endDate: string,
+): string[] => {
+  const days = new Set<string>();
+  for (const item of candles) {
+    const compact = item['日期'].replace(/-/gu, '');
+    if (/^\d{8}$/u.test(compact) && compact >= startDate && compact <= endDate) {
+      days.add(compact);
+    }
+  }
+  return [...days].sort();
+};
+
+const toPositiveFiniteNumber = (value: unknown): number | null => {
+  const parsed = typeof value === 'string' && value.trim() === '' ? NaN : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+// 批量快照映射：与逐只 hist（adjust=qfq）语义对齐——前复权下最新交易日的
+// OHLC 等于原始值；成交量两侧单位均为手。停牌股（量为 0/缺失）会被剔除，
+// 交由逐只回补路径处理（hist 无该日行即不入库，与旧行为一致）。
+export const mapSpotPayloadToCandleRows = (
+  stocksBySymbol: ReadonlyMap<string, IStockHistoryStock>,
+  payload: readonly IAkSpotRow[],
+  tradingDay: Date,
+): ICandleWriteRow[] => {
+  const seen = new Set<string>();
+  const rows: ICandleWriteRow[] = [];
+  for (const item of payload) {
+    const symbol = typeof item['代码'] === 'string' ? item['代码'] : null;
+    if (symbol === null) {
+      continue;
+    }
+    const stock = stocksBySymbol.get(symbol);
+    if (!stock || seen.has(stock.id)) {
+      continue;
+    }
+    const open = toPositiveFiniteNumber(item['今开']);
+    const high = toPositiveFiniteNumber(item['最高']);
+    const low = toPositiveFiniteNumber(item['最低']);
+    const close = toPositiveFiniteNumber(item['最新价']);
+    const volume = toPositiveFiniteNumber(item['成交量']);
+    if (open === null || high === null || low === null || close === null || volume === null) {
+      continue;
+    }
+    seen.add(stock.id);
+    rows.push({
+      stockId: stock.id,
+      tradingDay,
+      open,
+      high,
+      low,
+      close,
+      volume: BigInt(Math.trunc(volume)),
+    });
+  }
+  return rows;
+};
+
 async function asyncPool<T, R>(
   concurrency: number,
   iterable: readonly T[],
@@ -360,9 +455,13 @@ const fetchWithRetries = async <T>(
   throw lastError;
 };
 
-const fetchAkToolsRows: StockHistoryFetcher = async (stock, startDate, endDate) => {
-  const url = `${AKTOOLS_BASE_URL}/api/public/stock_zh_a_hist?symbol=${stock.symbol}&start_date=${startDate}&end_date=${endDate}&adjust=qfq`;
-  const response = await fetch(url);
+const fetchAkToolsHistPayload = async (
+  symbol: string,
+  startDate: string,
+  endDate: string,
+): Promise<readonly IAkCandle[]> => {
+  const url = `${AKTOOLS_BASE_URL}/api/public/stock_zh_a_hist?symbol=${symbol}&start_date=${startDate}&end_date=${endDate}&adjust=qfq`;
+  const response = await fetch(url, { signal: AbortSignal.timeout(AKTOOLS_FETCH_TIMEOUT_MS) });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -370,7 +469,43 @@ const fetchAkToolsRows: StockHistoryFetcher = async (stock, startDate, endDate) 
   if (!Array.isArray(payload)) {
     throw new Error('invalid_array_payload');
   }
-  return mapAkToolsCandlesToRows(stock, payload as readonly IAkCandle[]);
+  return payload as readonly IAkCandle[];
+};
+
+const fetchAkToolsRows: StockHistoryFetcher = async (stock, startDate, endDate) => {
+  return mapAkToolsCandlesToRows(stock, await fetchAkToolsHistPayload(stock.symbol, startDate, endDate));
+};
+
+const fetchSpotPayload = async (): Promise<readonly IAkSpotRow[]> => {
+  const url = `${AKTOOLS_BASE_URL}/api/public/stock_zh_a_spot_em`;
+  const response = await fetch(url, { signal: AbortSignal.timeout(AKTOOLS_SPOT_TIMEOUT_MS) });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const payload = await response.json() as unknown;
+  if (!Array.isArray(payload)) {
+    throw new Error('invalid_array_payload');
+  }
+  return payload as readonly IAkSpotRow[];
+};
+
+const discoverTradingDays = async (startDate: string, endDate: string): Promise<string[]> => {
+  const days = new Set<string>();
+  await Promise.all(PROBE_SYMBOLS.map(async (symbol) => {
+    try {
+      const candles = await fetchAkToolsHistPayload(symbol, startDate, endDate);
+      for (const day of extractHistTradingDays(candles, startDate, endDate)) {
+        days.add(day);
+      }
+    }
+    catch {
+      // 单个探针失败不致命：任一基准股返回即可确定交易日历。
+    }
+  }));
+  if (days.size === 0) {
+    throw new Error('no_trading_days_discovered');
+  }
+  return [...days].sort();
 };
 
 let yahooClientPromise: Promise<IYahooFinanceClient> | null = null;
@@ -507,6 +642,12 @@ async function main(): Promise<void> {
     console.log(`并发: ${concurrency}, 重试: ${options.maxRetries}, Yahoo fallback: ${options.yahooFallback}`);
 
     const existingDaysByStockId = await loadExistingTradingDays(prisma, startDate, endDate);
+    const pendingStocks = selectStocksNeedingSync(stocks, existingDaysByStockId, startDate, endDate);
+    console.log(`待同步: ${pendingStocks.length}/${stocks.length} 只股票（其余本地已有，无需请求上游）。`);
+    if (pendingStocks.length === 0) {
+      console.log('\n行情同步完成：本地已是最新，无需拉取。');
+      return;
+    }
     let insertQueue: ICandleWriteRow[] = [];
     let totalCandlesInserted = 0;
 
@@ -536,19 +677,24 @@ async function main(): Promise<void> {
     console.log('开始同步行情...');
     const startTime = Date.now();
     let processed = 0;
+    let processedTotal = pendingStocks.length;
 
-    const results = await asyncPool(concurrency, stocks, async (stock): Promise<IStockSyncResult> => {
+    const syncOneStock = async (
+      stock: IStockHistoryStock,
+      rangeStart: string,
+      rangeEnd: string,
+    ): Promise<IStockSyncResult> => {
       const existingTradingDays = existingDaysByStockId.get(stock.id) ?? new Set<string>();
       try {
         const fetchResult = options.mode === 'yahoo-backfill-missing'
           ? {
               provider: 'yahoo' as const,
-              rows: await fetchYahooRows(stock, startDate, endDate),
+              rows: await fetchYahooRows(stock, rangeStart, rangeEnd),
             }
           : await fetchRowsWithFallback({
               stock,
-              startDate,
-              endDate,
+              startDate: rangeStart,
+              endDate: rangeEnd,
               enableYahooFallback: options.yahooFallback,
               maxRetries: options.maxRetries,
               aktoolsFetcher: fetchAkToolsRows,
@@ -594,10 +740,95 @@ async function main(): Promise<void> {
       finally {
         processed += 1;
         if (processed % 500 === 0) {
-          console.log(`  已处理 ${processed}/${stocks.length} 只股票...`);
+          console.log(`  已处理 ${processed}/${processedTotal} 只股票...`);
         }
       }
-    });
+    };
+
+    const runPerStockPool = async (
+      targets: readonly IStockHistoryStock[],
+      rangeStart: string,
+      rangeEnd: string,
+    ): Promise<IStockSyncResult[]> => {
+      processed = 0;
+      processedTotal = targets.length;
+      return asyncPool(concurrency, targets, async stock => syncOneStock(stock, rangeStart, rangeEnd));
+    };
+
+    // 增量快车道：最新交易日用 1 次全市场快照覆盖，历史缺口才逐只回补。
+    // 调度在收盘后运行，快照即当日定稿；前复权下最新日 OHLC 与 hist 一致。
+    const runIncrementalSpotPath = async (): Promise<IStockSyncResult[]> => {
+      const tradingDays = await discoverTradingDays(startDate, endDate);
+      const spotDay = tradingDays[tradingDays.length - 1] as string;
+      const histEnd = addDaysToYYYYMMDD(spotDay, -1);
+      const histDays = tradingDays.filter(day => day <= histEnd);
+      console.log(`交易日历: 区间内 ${tradingDays.length} 个交易日，快照覆盖 ${spotDay}。`);
+      const stockById = new Map(stocks.map(stock => [stock.id, stock]));
+      const out: IStockSyncResult[] = [];
+
+      if (histEnd >= startDate && histDays.length > 0) {
+        const gapTargets = stocks.filter(stock =>
+          histDays.some(day => !(existingDaysByStockId.get(stock.id)?.has(day) ?? false)),
+        );
+        console.log(`历史缺口: ${gapTargets.length}/${stocks.length} 只股票回补 [${startDate} -> ${histEnd}]。`);
+        out.push(...await runPerStockPool(gapTargets, startDate, histEnd));
+      }
+      else {
+        console.log('历史缺口: 无（仅需最新交易日快照）。');
+      }
+
+      console.log(`拉取全市场快照 stock_zh_a_spot_em（${spotDay}）...`);
+      const stocksBySymbol = new Map(stocks.map(stock => [stock.symbol, stock]));
+      const spotRows = mapSpotPayloadToCandleRows(
+        stocksBySymbol,
+        await fetchSpotPayload(),
+        parseYYYYMMDD(spotDay),
+      );
+      const spotRowByStockId = new Map(spotRows.map(row => [row.stockId, row]));
+      let spotInserted = 0;
+      for (const [stockId, row] of spotRowByStockId) {
+        const owned = existingDaysByStockId.get(stockId) ?? new Set<string>();
+        const already = owned.has(spotDay);
+        if (!already) {
+          owned.add(spotDay);
+          existingDaysByStockId.set(stockId, owned);
+          await enqueueRows([row]);
+          spotInserted += 1;
+        }
+        out.push({
+          symbol: stockById.get(stockId)?.symbol ?? stockId,
+          provider: 'aktools',
+          fetchedRows: 1,
+          insertedRows: already ? 0 : 1,
+          skippedExistingRows: already ? 1 : 0,
+        });
+      }
+      console.log(`快照命中: ${spotRows.length} 只，新增 ${spotInserted} 根 K 线。`);
+
+      // 快照未覆盖（停牌/退市等）：逐只补 spotDay，hist 无行即不入库，与旧行为一致。
+      const uncovered = stocks.filter(stock =>
+        !(existingDaysByStockId.get(stock.id)?.has(spotDay) ?? false) && !spotRowByStockId.has(stock.id),
+      );
+      if (uncovered.length > 0) {
+        console.log(`快照未覆盖: ${uncovered.length} 只股票逐只补 ${spotDay}。`);
+        out.push(...await runPerStockPool(uncovered, spotDay, spotDay));
+      }
+      return out;
+    };
+
+    let results: IStockSyncResult[];
+    if (options.mode === 'incremental') {
+      try {
+        results = await runIncrementalSpotPath();
+      }
+      catch (error) {
+        console.log(`批量快照路径失败，回退逐只同步: ${getErrorMessage(error)}`);
+        results = await runPerStockPool(pendingStocks, startDate, endDate);
+      }
+    }
+    else {
+      results = await runPerStockPool(pendingStocks, startDate, endDate);
+    }
 
     await flushQueue();
 

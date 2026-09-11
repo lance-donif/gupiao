@@ -1474,6 +1474,8 @@ const runRegistryDailyPipeline = async (input: {
         recommendationLimit: limit,
         maxPerIndustry,
         scoringProfile: 'short_news',
+        // registry reconciliation 阶段拥有 `reconciliation` 步骤名，legacy 直写会撞车
+        skipStepTraces: ['reconciliation'],
       });
       state.backtestResult = backtestResult as unknown as Record<string, any>;
       state.strategyResult = backtestResult.strategyResult as unknown as Record<string, any>;

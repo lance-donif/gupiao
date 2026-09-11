@@ -664,6 +664,42 @@ describe('backtest engine', () => {
     expect(Number(snapshot.yield5Day)).toBeCloseTo(0.20, 4);
   });
 
+  it('skipStepTraces 省略 reconciliation 直写（registry 阶段拥有该步骤名）', async () => {
+    const asOf = new Date('2026-05-24T12:00:00.000Z');
+    const clusterKey = 'friend-network-cluster';
+    const seed = (traceId: string) => {
+      const db = new MockBacktestPrismaClient();
+      seedRecommendationPath(db, {
+        traceId,
+        asOf,
+        clusterKey,
+        newsId: 'news-past',
+        symbol: '600000',
+        stockName: '浦发银行',
+        keyword: '信贷',
+      });
+      return db;
+    };
+
+    const defaultDb = seed('test-skip-steps-default');
+    await new BacktestEngine().runBacktest(defaultDb, {
+      traceId: 'test-skip-steps-default',
+      asOf,
+      clusterKey,
+    });
+    expect(defaultDb.pipelineStepTracesCreated.some(s => s.stepName === 'reconciliation')).toBe(true);
+
+    const skippedDb = seed('test-skip-steps-skipped');
+    const skippedResult = await new BacktestEngine().runBacktest(skippedDb, {
+      traceId: 'test-skip-steps-skipped',
+      asOf,
+      clusterKey,
+      skipStepTraces: ['reconciliation'],
+    });
+    expect(skippedResult.recommendationsCreated).toBe(1);
+    expect(skippedDb.pipelineStepTracesCreated.some(s => s.stepName === 'reconciliation')).toBe(false);
+  });
+
   it('persists StrategyPerformanceReport with win rate / profit ratio / max drawdown after reconciliation', async () => {
     const mockDb = new MockBacktestPrismaClient();
     const asOf = new Date('2026-05-24T12:00:00.000Z');

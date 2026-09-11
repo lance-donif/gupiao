@@ -28,6 +28,11 @@ export interface IBacktestRunInput {
   readonly asOf: Date;
   readonly clusterKey: string;
   readonly manageTrace?: boolean;
+  /**
+   * 跳过直写的 legacy 步骤名（默认全部写入）。registry 模式下步骤名归阶段执行器所有
+   * （如 `reconciliation`），legacy 重复直写会触发 SUCCESS -> RUNNING 非法迁移。
+   */
+  readonly skipStepTraces?: readonly string[];
   readonly newsWindowDays?: number;
   readonly recommendationLimit?: number;
   readonly maxPerIndustry?: number;
@@ -252,6 +257,7 @@ export class BacktestEngine {
     }
 
     const completedSteps = new Map(await TraceManager.getSuccessfulStepOutputs(prisma, traceId));
+    const skippedStepTraces = new Set(input.skipStepTraces ?? []);
     const facts = await Promise.all([
       artifactFingerprint(prisma,{clusterKey,status:'active',validFrom:{lte:asOf},OR:[{validTo:null},{validTo:{gte:asOf}}]},['stockExposureFact']),
       artifactFingerprint(prisma,{clusterKey,publishedAt:{lte:asOf,gte:new Date(asOf.getTime()-replaySummary.maxWindowDays*86400000)}},['normalizedNewsRecord']),
@@ -427,10 +433,12 @@ export class BacktestEngine {
     }
     else try {
       // 步骤 3：reconciliation
-      await TraceManager.startStepTrace(prisma, traceId, 'reconciliation', {
-        ...replaySummary,
-        recommendationsCount: recommendations.length,
-      });
+      if (!skippedStepTraces.has('reconciliation')) {
+        await TraceManager.startStepTrace(prisma, traceId, 'reconciliation', {
+          ...replaySummary,
+          recommendationsCount: recommendations.length,
+        });
+      }
 
       const symbols = recommendations.map((rec: any) => String(rec.symbol));
       if (symbols.length > 0) {
@@ -599,21 +607,25 @@ export class BacktestEngine {
         });
       }
 
-      await TraceManager.completeStepTrace(prisma, traceId, 'reconciliation', {
-        inputFingerprint: fingerprint,
-        reconciledCount,
-        strategyResult,
-        marketDataAdmission: {
-          mode: marketDataAdmission.mode,
-          checked: marketDataAdmission.checked,
-          unknownAdjTypeCount: marketDataAdmission.unknownAdjTypeCount,
-          datasetVersionId: marketDataAdmission.datasetVersionId,
-          reasons: marketDataAdmission.reasons,
-        },
-      });
+      if (!skippedStepTraces.has('reconciliation')) {
+        await TraceManager.completeStepTrace(prisma, traceId, 'reconciliation', {
+          inputFingerprint: fingerprint,
+          reconciledCount,
+          strategyResult,
+          marketDataAdmission: {
+            mode: marketDataAdmission.mode,
+            checked: marketDataAdmission.checked,
+            unknownAdjTypeCount: marketDataAdmission.unknownAdjTypeCount,
+            datasetVersionId: marketDataAdmission.datasetVersionId,
+            reasons: marketDataAdmission.reasons,
+          },
+        });
+      }
     }
     catch (err: any) {
-      await TraceManager.failStepTrace(prisma, traceId, 'reconciliation', err.message);
+      if (!skippedStepTraces.has('reconciliation')) {
+        await TraceManager.failStepTrace(prisma, traceId, 'reconciliation', err.message);
+      }
       if (manageTrace) {
         await TraceManager.failRunTrace(prisma, traceId, `reconciliation failed: ${err.message}`);
       }

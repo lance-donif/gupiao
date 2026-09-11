@@ -3,10 +3,14 @@ import { describe, expect, it } from 'vitest';
 import {
   buildYahooChartDateRange,
   convertToYahooSymbol,
+  extractHistTradingDays,
+  addDaysToYYYYMMDD,
   fetchRowsWithFallback,
   filterRowsToMissingTradingDays,
+  mapSpotPayloadToCandleRows,
   mapYahooChartQuotesToRows,
   parseYYYYMMDD,
+  selectStocksNeedingSync,
   type IStockHistoryStock,
 } from '../../../scripts/sync-stock-history.js';
 
@@ -155,5 +159,76 @@ describe('fetchRowsWithFallback', () => {
 
     expect(result.provider).toBe('yahoo');
     expect(result.aktoolsError).toBe('empty_result');
+  });
+});
+
+describe('selectStocksNeedingSync', () => {
+  const stocks: IStockHistoryStock[] = [
+    { id: 'stock-1', symbol: '000002' },
+    { id: 'stock-2', symbol: '600489' },
+  ];
+
+  it('skips stocks that already hold the single requested day', () => {
+    const existing = new Map<string, Set<string>>([
+      ['stock-1', new Set(['20260707'])],
+      ['stock-2', new Set(['20260706'])],
+    ]);
+    expect(selectStocksNeedingSync(stocks, existing, '20260707', '20260707'))
+      .toEqual([{ id: 'stock-2', symbol: '600489' }]);
+  });
+
+  it('returns an empty list when every stock is up to date', () => {
+    const existing = new Map<string, Set<string>>([
+      ['stock-1', new Set(['20260707'])],
+      ['stock-2', new Set(['20260707'])],
+    ]);
+    expect(selectStocksNeedingSync(stocks, existing, '20260707', '20260707')).toEqual([]);
+  });
+
+  it('keeps full fetch for multi-day ranges', () => {
+    const existing = new Map<string, Set<string>>([
+      ['stock-1', new Set(['20260706', '20260707'])],
+      ['stock-2', new Set(['20260707'])],
+    ]);
+    expect(selectStocksNeedingSync(stocks, existing, '20260706', '20260707')).toEqual(stocks);
+  });
+});
+
+describe('spot fast-path helpers', () => {
+  it('adds/subtracts days across month boundaries', () => {
+    expect(addDaysToYYYYMMDD('20260701', -1)).toBe('20260630');
+    expect(addDaysToYYYYMMDD('20260707', 1)).toBe('20260708');
+  });
+
+  it('extracts in-range trading days from hist candles', () => {
+    const days = extractHistTradingDays([
+      { 日期: '2026-07-06', 开盘: 1, 最高: 2, 最低: 1, 收盘: 2, 成交量: 10 },
+      { 日期: '2026-07-07', 开盘: 1, 最高: 2, 最低: 1, 收盘: 2, 成交量: 10 },
+      { 日期: '2026-07-07', 开盘: 1, 最高: 2, 最低: 1, 收盘: 2, 成交量: 10 },
+      { 日期: '2026-07-09', 开盘: 1, 最高: 2, 最低: 1, 收盘: 2, 成交量: 10 },
+    ], '20260706', '20260707');
+    expect(days).toEqual(['20260706', '20260707']);
+  });
+
+  it('maps spot rows and drops suspended/unknown symbols', () => {
+    const stocksBySymbol = new Map([
+      ['000002', { id: 'stock-1', symbol: '000002' }],
+      ['600489', { id: 'stock-2', symbol: '600489' }],
+    ]);
+    const rows = mapSpotPayloadToCandleRows(stocksBySymbol, [
+      { '代码': '000002', '今开': 10, '最高': 11, '最低': 9, '最新价': 10.5, '成交量': 1000 },
+      { '代码': '600489', '今开': '-', '最高': '-', '最低': '-', '最新价': 5, '成交量': 0 },
+      { '代码': '999999', '今开': 1, '最高': 2, '最低': 1, '最新价': 2, '成交量': 100 },
+    ], parseYYYYMMDD('20260707'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      stockId: 'stock-1',
+      open: 10,
+      high: 11,
+      low: 9,
+      close: 10.5,
+      volume: 1000n,
+    });
+    expect(rows[0]?.tradingDay.toISOString()).toBe('2026-07-07T00:00:00.000Z');
   });
 });
