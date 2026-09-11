@@ -31,7 +31,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       body = await resp.text().catch(() => '');
     }
-    throw new ApiError(resp.status, body as Parameters<typeof ApiError>[1]);
+    throw new ApiError(resp.status, body as ConstructorParameters<typeof ApiError>[1]);
   }
   return (await resp.json()) as T;
 }
