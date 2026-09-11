@@ -773,24 +773,29 @@ export interface RecommendationSnapshotYieldUpdate {
   readonly yield1DayVisibleAt: Date | null;
   readonly yield3DayVisibleAt: Date | null;
   readonly yield5DayVisibleAt: Date | null;
-  /** 5 日窗口已走完（draft 非 immature）即收口；未走完保持 false，留待后续对账补齐。 */
+  /** 任一窗口已有可见可用收益即收口，供基线惩罚读取“任一可用收益”；
+   *  可见性按 maturityAt <= 本次对账时间判定（与 YieldRecord mature 口径一致）；
+   *  5 日窗口未走完的行由对账脚本回访补齐（smooth 惩罚自带 yield5DayVisibleAt 可见性判定，不受收口时点影响）。 */
   readonly isReconciled: boolean;
 }
 
 /**
  * 生产对账用：把 YieldRecord 草稿映射为 RecommendationSnapshot 的收益回填（纯函数）。
  * 口径与回测 `calculateReconciliationData` 一致：p0 为 asOf 前最后收盘，退出价取最长可用窗口。
- *  - 1/3 日先成熟也回填（惩罚读“任一可用收益”），但 5 日窗口未收口时 isReconciled 保持 false；
- *  - p0 非法或尚无 asOf 后 K 线时返回 null，调用方不得收口（未来数据可能补齐）。
+ *  - 1/3 日先成熟也回填（惩罚读“任一可用收益”），任一窗口有可用值即收口；
+ *  - 全 immature（窗口未走完）或全 gap（无可用值）时 isReconciled 保持 false，留待后续对账；
+ *  - p0 非法或尚无 asOf 后 K 线时返回 null，调用方不得写入。
  */
 export const buildRecommendationSnapshotYieldUpdate = (input: {
   readonly p0: number;
   readonly futureCandles: readonly any[];
   readonly drafts: readonly YieldRecordDraft[];
+  readonly maturityReferenceTime: Date;
 }): RecommendationSnapshotYieldUpdate | null => {
   if (!Number.isFinite(input.p0) || input.p0 <= 0 || input.futureCandles.length === 0) {
     return null;
   }
+  const refTime = input.maturityReferenceTime.getTime();
   const byHorizon = new Map(input.drafts.map(draft => [draft.horizon, draft]));
   const exitClose = (idx: number): number | null => {
     if (input.futureCandles.length <= idx) return null;
@@ -807,7 +812,14 @@ export const buildRecommendationSnapshotYieldUpdate = (input: {
     yield1DayVisibleAt: byHorizon.get(1)?.maturityAt ?? null,
     yield3DayVisibleAt: byHorizon.get(3)?.maturityAt ?? null,
     yield5DayVisibleAt: byHorizon.get(5)?.maturityAt ?? null,
-    isReconciled: (byHorizon.get(5)?.status ?? 'immature') !== 'immature',
+    isReconciled: [1, 3, 5].some(horizon => {
+      const draft = byHorizon.get(horizon);
+      if (!draft || draft.value === null || draft.maturityAt === null) return false;
+      const visibleAt = draft.maturityAt instanceof Date
+        ? draft.maturityAt.getTime()
+        : new Date(draft.maturityAt).getTime();
+      return Number.isFinite(visibleAt) && visibleAt <= refTime;
+    }),
   };
 };
 

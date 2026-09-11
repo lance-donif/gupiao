@@ -40,7 +40,9 @@ const main = async (): Promise<void> => {
   const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
   try {
     const snapshots = await prisma.recommendationSnapshot.findMany({
-      where: { clusterKey, isReconciled: false },
+      // 未收口 + 5 日未走完的都要扫：前者首次回填，后者补齐 3/5 日收益；
+      // 5 日已可见的行不再碰（终态），全 gap 的行每次重扫（有界，旧行会滑出窗口）。
+      where: { clusterKey, OR: [{ isReconciled: false }, { yield5DayVisibleAt: null }] },
       orderBy: { asOf: 'desc' },
       take: limit,
     });
@@ -124,7 +126,7 @@ const main = async (): Promise<void> => {
 
       // 同步回填 RecommendationSnapshot：惩罚只读快照表，不读 YieldRecord，
       // 缺这一步则关键词惩罚永远看到 0 条已对账推荐。
-      const snapshotUpdate = buildRecommendationSnapshotYieldUpdate({ p0, futureCandles, drafts });
+      const snapshotUpdate = buildRecommendationSnapshotYieldUpdate({ p0, futureCandles, drafts, maturityReferenceTime });
       if (snapshotUpdate !== null) {
         await prisma.recommendationSnapshot.update({
           where: { id: snap.id },
