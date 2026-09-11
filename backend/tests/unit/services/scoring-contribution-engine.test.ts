@@ -4,6 +4,7 @@ import {
   calculateEvidenceComponentScore,
 } from '../../../src/services/scoring-contribution-engine.js';
 import { TempStockRecommendationService } from '../../../src/services/temp-stock-recommendation-service.js';
+import { stubKeywordDictionaryRows } from '../../helpers/keyword-dictionary-fixture.js';
 
 class MockPrismaClient {
   public normalizedNewsRecordList: any[] = [];
@@ -85,6 +86,10 @@ class MockPrismaClient {
       }
       return rows;
     },
+  };
+
+  public readonly keywordDictionary = {
+    findMany: async () => stubKeywordDictionaryRows,
   };
 
   public readonly keywordPerformancePenalty = {

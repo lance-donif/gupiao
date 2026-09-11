@@ -19,12 +19,14 @@ import { AkToolsStockExposureService } from '../src/services/aktools-stock-expos
 import { ExpectationGapService } from '../src/services/expectation-gap-service.js';
 import { ClusterUpgradeProposalService } from '../src/services/cluster-upgrade-proposal-service.js';
 import { createFriendNetworkEngine } from '../src/services/friend-network-engine.js';
+import { getKeywordDictionary } from '../src/services/keyword-dictionary.js';
 import { KeywordPerformancePenaltyService } from '../src/services/keyword-performance-penalty-service.js';
 import { ThemeForecastReconciliationService } from '../src/services/theme-forecast.js';
 import { ThemeForecastService } from '../src/services/theme-forecast.js';
 import {
   NewsIngestDeduplicationPipeline,
   NewsIngestNormalizationPipeline,
+  selectExtractionLeaders,
   type INormalizedNewsCandidate,
 } from '../src/services/news-ingest-pipeline.js';
 import { loadBackendEnv } from '../src/services/load-backend-env.js';
@@ -516,7 +518,7 @@ const persistGraphSnapshot = async (
       evidenceText: String(row.evidenceText ?? row.event ?? ''),
     }));
 
-  const engine = createFriendNetworkEngine();
+  const engine = createFriendNetworkEngine({ keywordDictionary: await getKeywordDictionary(prisma) });
   const result = await engine.run({
     cluster: clusterKey,
     sourceNewsFilePath: 'database:NormalizedNewsRecord',
@@ -1179,7 +1181,7 @@ const runRegistryDailyPipeline = async (input: {
         { asOf, clusterKey, version: 1 },
         async () => {
           const normalizationReport = new NewsIngestNormalizationPipeline().process(toCandidateArticles(articles));
-          const deduplicationReport = new NewsIngestDeduplicationPipeline().process(normalizationReport.processed);
+          const deduplicationReport = new NewsIngestDeduplicationPipeline({ blockingTerms: (await getKeywordDictionary(prisma)).blockingTerms }).process(normalizationReport.processed);
           const visibleCandidates = deduplicationReport.processed.filter(candidate => candidate.publishedAt <= asOf);
           if (visibleCandidates.length === 0) {
             throw new PipelineStopError('normalize', '新闻均不在 asOf 可见边界内，严格单向流程停止');
@@ -1283,7 +1285,7 @@ const runRegistryDailyPipeline = async (input: {
           'causal_extract 缺少 news_prepare 的可见新闻候选，无法复用上游状态；请从 news_prepare 或更早阶段重算',
         );
       }
-      const causalExtractionCandidates = filterCausalExtractionCandidates(visibleCandidates);
+      const causalExtractionCandidates = selectExtractionLeaders(filterCausalExtractionCandidates(visibleCandidates));
       if (causalExtractionCandidates.length === 0) {
         throw new PipelineStopError('causal_signal_extraction', '没有命中经营变量/资产主题关键词的新闻');
       }
@@ -2110,7 +2112,7 @@ async function executeMain(args: Record<string, string>, runLease: PipelineRunLe
     await TraceManager.startStepTrace(prisma, traceId, 'deduplicate', {
       inputCandidates: normalizationReport.processed.length,
     });
-    const deduplicationReport = new NewsIngestDeduplicationPipeline().process(normalizationReport.processed);
+    const deduplicationReport = new NewsIngestDeduplicationPipeline({ blockingTerms: (await getKeywordDictionary(prisma)).blockingTerms }).process(normalizationReport.processed);
     const visibleCandidates = deduplicationReport.processed.filter(candidate => candidate.publishedAt <= asOf);
     markStepEnd('deduplicate', stepStartedAt);
     if (visibleCandidates.length === 0) {
@@ -2258,7 +2260,7 @@ async function executeMain(args: Record<string, string>, runLease: PipelineRunLe
     Object.assign(stepTimings, checkpoint.stepTimings);
     const {newsInput,newsQualityResult,aktoolsExposureResult,tickflowExposureResult,exposureResult}=checkpoint;
     const visibleCandidates = checkpoint.visibleCandidates.map(candidate=>({...candidate,publishedAt:new Date(candidate.publishedAt)})) as INormalizedNewsCandidate[];
-    const causalExtractionCandidates=filterCausalExtractionCandidates(visibleCandidates);
+    const causalExtractionCandidates=selectExtractionLeaders(filterCausalExtractionCandidates(visibleCandidates));
     if (!causalExtractionCandidates.length) throw new PipelineStopError('causal_signal_extraction','没有命中经营变量/资产主题关键词的新闻');
     let causalSignalResult: Record<string, any>;
     {

@@ -7,6 +7,7 @@ import type {
   IFriendNetworkPersistInput,
 } from '../../../src/index.js';
 import { createFriendNetworkEngine } from '../../../src/services/friend-network-engine.js';
+import { stubKeywordDictionary } from '../../helpers/keyword-dictionary-fixture.js';
 
 class FakeAiAdapter implements IFriendNetworkAiAdapter {
   public async judge(candidates: readonly { sourceKeyword: string; targetKeyword: string; evidence: readonly string[] }[]) {
@@ -45,6 +46,7 @@ describe('friend-network engine persistence', () => {
     const engine = createFriendNetworkEngine({
       aiAdapter: new FakeAiAdapter(),
       graphRepository,
+      keywordDictionary: stubKeywordDictionary,
     });
 
     const result = await engine.run({

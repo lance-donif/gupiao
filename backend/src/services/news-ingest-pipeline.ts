@@ -37,7 +37,25 @@ const normalizeWhitespace = (value: string): string => {
 };
 
 const normalizeForDedup = (value: string): string => {
-  return normalizeWhitespace(value).replace(/\s+/gu, '').toLowerCase();
+  return normalizeTitleForMatch(value).replace(/\s+/gu, '').toLowerCase();
+};
+
+/** 全角转半角（FF01–FF5E）；U+3000 已被 \s 覆盖。 */
+const toHalfwidth = (value: string): string => {
+  return value.replace(/[\uFF01-\uFF5E]/gu, char =>
+    String.fromCharCode(char.charCodeAt(0) - 0xFEE0),
+  );
+};
+
+/** 转载站点后缀：分隔符 + 站点/频道词结尾，命中则截断。 */
+const SITE_SUFFIX_PATTERN = /[-_—–|｜:：·\s]+((新浪|腾讯|网易|搜狐|凤凰|东方财富|同花顺|雪球|财联社|第一财经|证券时报|上海证券报|中国证券报|证券日报|每日经济新闻|界面|澎湃)(网|版|端|频道|专区|\.com|\.cn)?(财经|证券)?|财经|证券|股票|基金|期货|外汇|理财|股吧|论坛|博客|视频|直播|评论(网|版)?)$/u;
+
+/**
+ * 匹配用标题归一化：全角转半角 + 去转载站点后缀。
+ * 同时用于 dedupKey（经 normalizeForDedup）、blocking 前缀桶与 bigram 相似度输入。
+ */
+export const normalizeTitleForMatch = (value: string): string => {
+  return toHalfwidth(value).replace(SITE_SUFFIX_PATTERN, '');
 };
 
 const resolveCandidateId = (article: INewsSourceArticle): string => {
@@ -97,55 +115,20 @@ const normalizeBucketText = (value: string): string => {
     .replace(/[^\u4E00-\u9FA5a-z0-9]/gi, '');
 };
 
-const titlePrefixBucket = (title: string): string => normalizeBucketText(title).slice(0, 12);
+const titlePrefixBucket = (title: string): string => normalizeBucketText(normalizeTitleForMatch(title)).slice(0, 12);
 
 const dateBucket = (date: Date): string => date.toISOString().slice(0, 10);
 
-const keywordBucketTerms = [
-  '白银',
-  '黄金',
-  '铜',
-  '铝',
-  '锂',
-  '镍',
-  '稀土',
-  '煤炭',
-  '石油',
-  '天然气',
-  '电力',
-  '光伏',
-  '新能源',
-  '储能',
-  '电池',
-  '芯片',
-  '半导体',
-  '机器人',
-  '算力',
-  '医药',
-  '创新药',
-  '化工',
-  '航运',
-  '航空',
-  '军工',
-  '原奶',
-  '玻纤',
-  '氢氟酸',
-  '化肥',
-  'LNG',
-  '油轮',
-  '原油',
-  'DRAM',
-  'MLCC',
-  '白酒',
-  '证券',
-  '铁矿',
-] as const;
+/* keywordBucketTerms 已外置到 DB KeywordDictionary（category='blocking'），经构造函数注入。 */
 
 const businessVariablePattern = /(需求|订单|销量|销售|消费|装机|采购|交付|出口|中标|库存|产量|产能|供应|供给|不足|下降|减少|紧张|短缺|瓶颈|受限|价格|报价|现货|期货|上涨|涨价|大涨|突破|新高|资金|成交|融资|增持|回购|政策|补贴|支持|推进|促进|审批|准入|许可)/u;
 
 const stockNameMentionPattern = /(?:^|[^\u4E00-\u9FA5])(?:ST|[*＊]ST|[\u4E00-\u9FA5]{2,6}(?:股份|科技|集团|银行|证券|有色|能源|药业|医药|电子|化工|电力|汽车|材料))(?:$|[^\u4E00-\u9FA5])/u;
 
-const createBlockingKeys = (candidate: INormalizedNewsCandidate): readonly string[] => {
+const createBlockingKeys = (
+  candidate: INormalizedNewsCandidate,
+  blockingTerms: readonly string[],
+): readonly string[] => {
   const keys = new Set<string>();
   const source = candidate.source || 'unknown';
   const date = dateBucket(candidate.publishedAt);
@@ -156,7 +139,7 @@ const createBlockingKeys = (candidate: INormalizedNewsCandidate): readonly strin
   keys.add(`source:${source}:${date}`);
 
   const keywordText = `${candidate.title} ${candidate.content}`.toLocaleLowerCase('zh-CN');
-  const keywords = new Set(keywordBucketTerms
+  const keywords = new Set(blockingTerms
     .filter(term => keywordText.includes(term.toLocaleLowerCase('zh-CN')))
     .map(term => term.toLocaleLowerCase('zh-CN')));
   for (const keyword of keywords) {
@@ -204,7 +187,10 @@ const calculateNewsQualitySignal = (candidate: INormalizedNewsCandidate): INewsQ
   };
 };
 
-const calculateCosineSimilarity = (textA: string, textB: string): number => {
+export const REPRINT_TITLE_SIMILARITY_THRESHOLD = 0.60;
+export const REPRINT_CONTENT_SIMILARITY_THRESHOLD = 0.85;
+
+export const calculateCosineSimilarity = (textA: string, textB: string): number => {
   const gramsA = getBiGrams(textA);
   const gramsB = getBiGrams(textB);
   if (gramsA.length === 0 || gramsB.length === 0) { return 0; }
@@ -233,10 +219,68 @@ const calculateCosineSimilarity = (textA: string, textB: string): number => {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 };
 
+const isLeaderWeight = (candidate: INormalizedNewsCandidate): boolean => {
+  return (candidate.reprintWeight ?? 1.0) === 1.0;
+};
+
+const isBetterLeader = (
+  next: INormalizedNewsCandidate,
+  current: INormalizedNewsCandidate,
+): boolean => {
+  if (isLeaderWeight(next) !== isLeaderWeight(current)) {
+    return isLeaderWeight(next);
+  }
+  const nextTime = next.publishedAt instanceof Date ? next.publishedAt.getTime() : NaN;
+  const currentTime = current.publishedAt instanceof Date ? current.publishedAt.getTime() : NaN;
+  if (Number.isNaN(nextTime) || Number.isNaN(currentTime)) {
+    return false;
+  }
+  return nextTime < currentTime;
+};
+
+/**
+ * 转载组仅首条进 LLM：组内保留 reprintWeight==1.0 且 publishedAt 最早者
+ * （组内无权重 1.0 则退回最早者）；其余保留分组/权重但不进入抽取输入。
+ * 未分组行原样通过，原有相对顺序不变。
+ */
+export const selectExtractionLeaders = (
+  candidates: readonly INormalizedNewsCandidate[],
+): INormalizedNewsCandidate[] => {
+  const bestByGroup = new Map<string, INormalizedNewsCandidate>();
+  for (const candidate of candidates) {
+    const groupId = candidate.reprintGroupId;
+    if (!groupId) {
+      continue;
+    }
+    const current = bestByGroup.get(groupId);
+    if (!current || isBetterLeader(candidate, current)) {
+      bestByGroup.set(groupId, candidate);
+    }
+  }
+  const leaders = new Set<INormalizedNewsCandidate>(bestByGroup.values());
+  return candidates.filter(candidate => !candidate.reprintGroupId || leaders.has(candidate));
+};
+
+export interface INewsIngestDeduplicationPipelineOptions {
+  /**
+   * 转载分桶词（DB KeywordDictionary category='blocking'）。缺失时退化为空：
+   * 分桶只是候选对预筛（召回优化），标题/来源桶仍工作，不影响正确性。
+   * DB 加载失败仍由 getKeywordDictionary 启动期抛错，配置错误不会静默。
+   */
+  readonly blockingTerms?: readonly string[];
+}
+
 export class NewsIngestDeduplicationPipeline {
+  public constructor(private readonly options: INewsIngestDeduplicationPipelineOptions = {}) {}
+
+  private resolveBlockingTerms(): readonly string[] {
+    return this.options.blockingTerms ?? [];
+  }
+
   public process(
     input: readonly INormalizedNewsCandidate[],
   ): IServicePipelineReport<readonly INormalizedNewsCandidate[], readonly INormalizedNewsCandidate[]> {
+    const blockingTerms = this.resolveBlockingTerms();
     const steps = ['deduplicate:begin', 'deduplicate:drop-duplicates'];
     const seenKeys = new Set<string>();
     const uniqueCandidates: INormalizedNewsCandidate[] = [];
@@ -254,7 +298,7 @@ export class NewsIngestDeduplicationPipeline {
 
     const blockIndex = new Map<string, number[]>();
     for (let i = 0; i < uniqueCandidates.length; i++) {
-      const keys = createBlockingKeys(uniqueCandidates[i]);
+      const keys = createBlockingKeys(uniqueCandidates[i], blockingTerms);
       for (const key of keys) {
         const list = blockIndex.get(key) ?? [];
         list.push(i);
@@ -274,7 +318,7 @@ export class NewsIngestDeduplicationPipeline {
       current.reprintWeight = 1.0;
 
       const candidateIndexes = new Set<number>();
-      for (const key of createBlockingKeys(current)) {
+      for (const key of createBlockingKeys(current, blockingTerms)) {
         for (const index of blockIndex.get(key) ?? []) {
           if (index > i) {
             candidateIndexes.add(index);
@@ -288,10 +332,16 @@ export class NewsIngestDeduplicationPipeline {
           continue;
         }
 
-        const titleSim = calculateCosineSimilarity(current.title, other.title);
-        const contentSim = calculateCosineSimilarity(current.content, other.content);
+        const titleSim = calculateCosineSimilarity(
+          normalizeTitleForMatch(current.title),
+          normalizeTitleForMatch(other.title),
+        );
+        const contentSim = calculateCosineSimilarity(
+          normalizeTitleForMatch(current.content),
+          normalizeTitleForMatch(other.content),
+        );
 
-        if (titleSim > 0.60 || contentSim > 0.85) {
+        if (titleSim > REPRINT_TITLE_SIMILARITY_THRESHOLD || contentSim > REPRINT_CONTENT_SIMILARITY_THRESHOLD) {
           other.reprintGroupId = current.reprintGroupId;
           other.reprintWeight = 0.15;
         }

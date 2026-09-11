@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   NewsIngestDeduplicationPipeline,
+  normalizeTitleForMatch,
+  selectExtractionLeaders,
   type INormalizedNewsCandidate,
 } from '../../../src/services/news-ingest-pipeline.js';
+import { stubKeywordDictionary } from '../../helpers/keyword-dictionary-fixture.js';
 
 describe('News Ingest Reprint Deduplication Pipeline', () => {
-  const pipeline = new NewsIngestDeduplicationPipeline();
+  const pipeline = new NewsIngestDeduplicationPipeline({ blockingTerms: stubKeywordDictionary.blockingTerms });
 
   it('should pass normal distinct articles without penalty', () => {
     const candidates: INormalizedNewsCandidate[] = [
@@ -116,5 +119,88 @@ describe('News Ingest Reprint Deduplication Pipeline', () => {
       hasBusinessVariable: true,
       contentQuality: expect.any(String),
     }));
+  });
+});
+
+describe('normalizeTitleForMatch', () => {
+  it('strips reprint site suffixes', () => {
+    expect(normalizeTitleForMatch('白银价格突破新高-新浪财经')).toBe('白银价格突破新高');
+    expect(normalizeTitleForMatch('光伏装机爆发_东方财富网')).toBe('光伏装机爆发');
+    expect(normalizeTitleForMatch('券商并购加速｜财联社')).toBe('券商并购加速');
+    expect(normalizeTitleForMatch('白银价格突破新高')).toBe('白银价格突破新高');
+  });
+
+  it('converts fullwidth characters to halfwidth', () => {
+    expect(normalizeTitleForMatch('Ａ股放量上涨１２３')).toBe('A股放量上涨123');
+  });
+});
+
+describe('selectExtractionLeaders', () => {
+  const row = (
+    id: string,
+    overrides: Partial<INormalizedNewsCandidate> = {},
+  ): INormalizedNewsCandidate => ({
+    id,
+    title: `title-${id}`,
+    content: `content-${id}`,
+    source: 'Sina',
+    url: `http://example.com/${id}`,
+    publishedAt: new Date('2026-05-24T00:00:00Z'),
+    dedupKey: `key-${id}`,
+    ...overrides,
+  });
+
+  it('keeps the earliest weight-1.0 row per reprint group', () => {
+    const candidates = [
+      row('late-reprint', { reprintGroupId: 'g1', reprintWeight: 0.15, publishedAt: new Date('2026-05-24T02:00:00Z') }),
+      row('leader', { reprintGroupId: 'g1', reprintWeight: 1.0, publishedAt: new Date('2026-05-24T00:00:00Z') }),
+      row('early-reprint', { reprintGroupId: 'g1', reprintWeight: 0.15, publishedAt: new Date('2026-05-23T00:00:00Z') }),
+      row('solo', { reprintGroupId: 'solo', reprintWeight: 1.0 }),
+    ];
+    expect(selectExtractionLeaders(candidates).map(item => item.id)).toEqual(['leader', 'solo']);
+  });
+
+  it('falls back to the earliest row when no weight-1.0 exists in a group', () => {
+    const candidates = [
+      row('b', { reprintGroupId: 'g2', reprintWeight: 0.15, publishedAt: new Date('2026-05-24T02:00:00Z') }),
+      row('a', { reprintGroupId: 'g2', reprintWeight: 0.15, publishedAt: new Date('2026-05-24T01:00:00Z') }),
+    ];
+    expect(selectExtractionLeaders(candidates).map(item => item.id)).toEqual(['a']);
+  });
+
+  it('passes ungrouped rows through untouched', () => {
+    const candidates = [row('x'), row('y')];
+    expect(selectExtractionLeaders(candidates).map(item => item.id)).toEqual(['x', 'y']);
+  });
+});
+
+describe('NewsIngestDeduplicationPipeline site-suffix reprints', () => {
+  const pipeline = new NewsIngestDeduplicationPipeline({ blockingTerms: stubKeywordDictionary.blockingTerms });
+
+  it('groups a reprint pair differing only by site suffix', () => {
+    const candidates: INormalizedNewsCandidate[] = [
+      {
+        id: 'orig',
+        title: '白银价格盘中拉升突破五年新高引发市场关注后续走势分析解读',
+        content: '今日盘中白银价格强势拉升突破五年新高，分析师指出工业属性与金融属性共振，后续走势值得重点跟踪观察。',
+        source: 'Sina',
+        url: 'http://example.com/orig',
+        publishedAt: new Date('2026-05-24T00:00:00Z'),
+        dedupKey: 'orig-key',
+      },
+      {
+        id: 'reprint',
+        title: '白银价格盘中拉升突破五年新高引发市场关注后续走势分析解读-新浪财经',
+        content: '白银盘中大涨创五年新高，多空博弈加剧，机构观点分歧加大，短期波动或进一步放大需谨慎参与。',
+        source: 'EastMoney',
+        url: 'http://example.com/reprint',
+        publishedAt: new Date('2026-05-24T00:05:00Z'),
+        dedupKey: 'reprint-key',
+      },
+    ];
+    const result = pipeline.process(candidates);
+    const reprint = result.processed.find(item => item.id === 'reprint');
+    expect(reprint?.reprintGroupId).toBe('orig');
+    expect(reprint?.reprintWeight).toBe(0.15);
   });
 });

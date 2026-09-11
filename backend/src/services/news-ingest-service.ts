@@ -1,3 +1,4 @@
+import type { ICrossBatchNewsRecord } from '../repositories/interfaces/i-news-repository.js';
 import type { IUnitOfWork } from '../repositories/unit-of-work.js';
 import type { INewsSource } from '../sources/contracts.js';
 import type { NewsItem } from '../types/entities/news-item.js';
@@ -6,9 +7,11 @@ import type { INormalizedNewsCandidate } from './news-ingest-pipeline.js';
 import type { INewsIngestExecutionRequest, INewsIngestFailureResult, INewsIngestResult, INewsIngestStageReport, INewsIngestSuccessResult } from './news-ingest-types.js';
 import crypto from 'node:crypto';
 import {
-
+  calculateCosineSimilarity,
   NewsIngestDeduplicationPipeline,
   NewsIngestNormalizationPipeline,
+  REPRINT_CONTENT_SIMILARITY_THRESHOLD,
+  REPRINT_TITLE_SIMILARITY_THRESHOLD,
   toNewsItems,
 } from './news-ingest-pipeline.js';
 import {
@@ -24,6 +27,8 @@ import {
 interface INewsIngestServiceDependencies {
   readonly source: INewsSource;
   readonly unitOfWork: IUnitOfWork;
+  /** 转载分桶词（DB KeywordDictionary category='blocking'）；缺失时去重阶段直接抛错。 */
+  readonly keywordBlockingTerms?: readonly string[];
 }
 
 const createFetchStageReport = (
@@ -52,10 +57,49 @@ const createStageReport = (
   };
 };
 
+export const CROSS_BATCH_MERGE_LOOKBACK_MS = 72 * 3600_000;
+export const CROSS_BATCH_MERGE_REPRINT_WEIGHT = 0.15;
+
+/**
+ * 跨批转载归并：仅批内首条（reprintWeight==1.0）与库内近 72h 记录比对，
+ * 命中（标题>0.6 或正文>0.85，与批内阈值一致）则并入已有分组并降权 0.15。
+ * 批内已归并的非首条保持原分组语义不动；同 id（幂等重放）跳过。
+ * 返回归并条数。
+ */
+export const applyCrossBatchReprintMerge = (
+  candidates: readonly INormalizedNewsCandidate[],
+  existing: readonly ICrossBatchNewsRecord[],
+): number => {
+  let merged = 0;
+  for (const candidate of candidates) {
+    if ((candidate.reprintWeight ?? 1.0) !== 1.0) {
+      continue;
+    }
+    for (const record of existing) {
+      if (record.id === candidate.id) {
+        continue;
+      }
+      const titleSim = calculateCosineSimilarity(candidate.title, record.title);
+      const isReprint = titleSim > REPRINT_TITLE_SIMILARITY_THRESHOLD
+        || calculateCosineSimilarity(candidate.content, record.content) > REPRINT_CONTENT_SIMILARITY_THRESHOLD;
+      if (!isReprint) {
+        continue;
+      }
+      candidate.reprintGroupId = record.reprintGroupId ?? record.id;
+      candidate.reprintWeight = CROSS_BATCH_MERGE_REPRINT_WEIGHT;
+      merged += 1;
+      break;
+    }
+  }
+  return merged;
+};
+
 export class NewsIngestService {
   private readonly normalizationPipeline = new NewsIngestNormalizationPipeline();
 
-  private readonly deduplicationPipeline = new NewsIngestDeduplicationPipeline();
+  private get deduplicationPipeline(): NewsIngestDeduplicationPipeline {
+    return new NewsIngestDeduplicationPipeline({ blockingTerms: this.dependencies.keywordBlockingTerms });
+  }
 
   public constructor(private readonly dependencies: INewsIngestServiceDependencies) {}
 
@@ -128,6 +172,27 @@ export class NewsIngestService {
 
     if (idempotentCandidates.length !== runtimeScopedCandidates.length) {
       deduplicationSteps.push('deduplicate:drop-already-persisted-items');
+    }
+
+    // N3 跨批转载归并：单次查询库内近 72h 同 cluster 记录（publishedAt<=asOf，
+    // 回测不穿越未来数据），内存复用批内余弦阈值比对。查询失败则跳过归并、
+    // 保持原有行为，不阻塞新鲜新闻入库。
+    const crossBatchAsOf = request.asOf ?? new Date();
+    try {
+      const recentRecords = await this.dependencies.unitOfWork.newsRepository.findRecentNormalizedRecords(
+        request.cluster,
+        new Date(crossBatchAsOf.getTime() - CROSS_BATCH_MERGE_LOOKBACK_MS),
+        crossBatchAsOf,
+      );
+      const mergedCount = applyCrossBatchReprintMerge(idempotentCandidates, recentRecords);
+      if (mergedCount > 0) {
+        deduplicationSteps.push(`deduplicate:cross-batch-merge:${mergedCount}`);
+      }
+    }
+    catch (error) {
+      deduplicationSteps.push(
+        `deduplicate:cross-batch-merge-skipped:${error instanceof Error ? error.message : 'unknown'}`,
+      );
     }
 
     stageReports.push(

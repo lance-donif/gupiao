@@ -48,6 +48,7 @@ import {
   loadRecentCandlesRawSql,
   loadRecentCandlesPrismaFallback,
 } from './scoring/market-signal-loader.js';
+import { getKeywordDictionary } from './keyword-dictionary.js';
 
 
 
@@ -767,11 +768,23 @@ export const calculateMarketSignalScore = (
   };
 };
 
-const classifyMovementDirection = (text: string): IStockMovementEvidence['direction'] => {
-  if (/(加速下跌|高台跳水|大笔卖出|封跌停板|打开涨停板|有大卖盘|竞价下跌|低开5日线|向下缺口|60日新低|60日大幅下跌)/u.test(text)) {
+export interface IMovementBuzzDictionary {
+  readonly positive: readonly string[];
+  readonly negative: readonly string[];
+}
+
+const matchesAnyBuzzTerm = (text: string, terms: readonly string[]): boolean => {
+  return terms.some(term => term.length > 0 && text.includes(term));
+}
+
+const classifyMovementDirection = (
+  text: string,
+  buzz: IMovementBuzzDictionary,
+): IStockMovementEvidence['direction'] => {
+  if (matchesAnyBuzzTerm(text, buzz.negative)) {
     return 'negative';
   }
-  if (/(火箭发射|快速反弹|大笔买入|封涨停板|打开跌停板|有大买盘|竞价上涨|高开5日线|向上缺口|60日新高|60日大幅上涨|拉升|净流入)/u.test(text)) {
+  if (matchesAnyBuzzTerm(text, buzz.positive)) {
     return 'positive';
   }
   return 'neutral';
@@ -788,7 +801,7 @@ const movementDirectionLabel = (direction: IStockMovementEvidence['direction']):
   }
 };
 
-const movementEvidenceFromRow = (row: any): IStockMovementEvidence | null => {
+const movementEvidenceFromRow = (row: any, buzz: IMovementBuzzDictionary): IStockMovementEvidence | null => {
   if (String(row.exposureType ?? '') !== 'movement_evidence') {
     return null;
   }
@@ -809,7 +822,7 @@ const movementEvidenceFromRow = (row: any): IStockMovementEvidence | null => {
     readStringField(rawFields, ['异动类型', '板块异动最频繁个股及所属类型-买卖方向']),
     readStringField(rawFields, ['相关信息', '板块名称', '板块具体异动类型列表及出现次数']),
   ].filter(Boolean).join(' ');
-  const direction = classifyMovementDirection(movementText);
+  const direction = classifyMovementDirection(movementText, buzz);
   const directionWeight = direction === 'positive' ? 1 : direction === 'negative' ? -1 : 0;
   const scoreAdjustment = Number((directionWeight * confidence * MOVEMENT_CONFIRMATION_UNIT_SCORE).toFixed(4));
   const evidenceText = readStringField(evidence, ['confidenceReason', 'description'])
@@ -856,9 +869,19 @@ const loadMovementEvidence = async (
     ],
   });
 
+  // 无异动事实时无需加载词表：单测 mock prisma 与回测空路径直接短路，
+  // 生产有数据时仍走 getKeywordDictionary（未 migrate 即抛错）。
+  if (rows.length === 0) {
+    return new Map();
+  }
+  const keywordDictionary = await getKeywordDictionary(prisma);
+  const buzz: IMovementBuzzDictionary = {
+    positive: keywordDictionary.buzzPositive,
+    negative: keywordDictionary.buzzNegative,
+  };
   const bySymbol = new Map<string, IStockMovementEvidence[]>();
   for (const row of rows) {
-    const evidence = movementEvidenceFromRow(row);
+    const evidence = movementEvidenceFromRow(row, buzz);
     if (!evidence) {
       continue;
     }

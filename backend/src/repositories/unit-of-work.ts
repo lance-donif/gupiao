@@ -1,6 +1,6 @@
 import type { NewsItem } from '../types/entities/news-item.js';
 import type { Stock } from '../types/entities/stock.js';
-import type { INewsRepository } from './interfaces/i-news-repository.js';
+import type { ICrossBatchNewsRecord, INewsRepository } from './interfaces/i-news-repository.js';
 import type { IStockRepository } from './interfaces/i-stock-repository.js';
 
 import type { IPrismaClient, IPrismaTransactionalClient } from './prisma-types.js';
@@ -90,6 +90,14 @@ class DeferredNewsRepository implements INewsRepository {
 
   public findAll(): Promise<readonly NewsItem[]> {
     return this.repository.findAll();
+  }
+
+  public findRecentNormalizedRecords(
+    clusterKey: string,
+    since: Date,
+    asOf: Date,
+  ): Promise<readonly ICrossBatchNewsRecord[]> {
+    return this.repository.findRecentNormalizedRecords(clusterKey, since, asOf);
   }
 }
 

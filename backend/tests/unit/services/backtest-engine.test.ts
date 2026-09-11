@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { BacktestEngine } from '../../../src/services/backtest-engine.js';
 import { ScoringContributionEngine } from '../../../src/services/scoring-contribution-engine.js';
 import { TempStockRecommendationService } from '../../../src/services/temp-stock-recommendation-service.js';
+import { stubKeywordDictionaryRows } from '../../helpers/keyword-dictionary-fixture.js';
 
 class MockBacktestPrismaClient {
   public normalizedNewsRecordList: any[] = [];
@@ -238,6 +239,10 @@ class MockBacktestPrismaClient {
 
       return args?.take ? filtered.slice(0, args.take) : filtered;
     },
+  };
+
+  public readonly keywordDictionary = {
+    findMany: async () => stubKeywordDictionaryRows,
   };
 
   public readonly runTrace = {

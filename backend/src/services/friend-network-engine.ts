@@ -12,17 +12,23 @@ import type {
 import { createStubFriendNetworkAiAdapter } from './friend-network-ai-adapter.js';
 import { buildFriendNetworkGraph, buildCausalGraphEdges, mergeCausalAndCoOccurrenceGraphs } from './friend-network-builder.js';
 import { extractSignalEntities } from './friend-network-entity-extractor.js';
+import { KeywordDictionaryError, type IKeywordDictionarySnapshot } from './keyword-dictionary.js';
 import { projectFriendNetworkTree } from './friend-network-tree-projection.js';
 
 export interface IFriendNetworkEngineDependencies {
   readonly aiAdapter?: IFriendNetworkAiAdapter;
   readonly graphRepository?: IFriendNetworkGraphRepository;
+  readonly keywordDictionary?: IKeywordDictionarySnapshot;
 }
 
 class FriendNetworkEngine {
   public constructor(private readonly dependencies: IFriendNetworkEngineDependencies = {}) {}
 
   public async run(input: IFriendNetworkEngineInput): Promise<IFriendNetworkEngineResult> {
+    const keywordDictionary = this.dependencies.keywordDictionary;
+    if (!keywordDictionary) {
+      throw new KeywordDictionaryError('FriendNetworkEngine 缺少 keywordDictionary 注入：调用方须先 loadKeywordDictionary 再 createFriendNetworkEngine({ keywordDictionary })');
+    }
     const hasCausalSignals = input.causalSignals && input.causalSignals.length > 0;
 
     if (hasCausalSignals) {
@@ -34,12 +40,15 @@ class FriendNetworkEngine {
       if (input.newsItems.length > 0) {
         const builderInput = input.newsItems.map(item => ({
           id: item.id,
-          entities: extractSignalEntities([
-            {
-              title: item.title,
-              summary: item.summary,
-            },
-          ]),
+          entities: extractSignalEntities(
+            [
+              {
+                title: item.title,
+                summary: item.summary,
+              },
+            ],
+            keywordDictionary,
+          ),
           reason: item.title,
         }));
         const coOccurrenceGraph = buildFriendNetworkGraph(builderInput);
@@ -97,12 +106,15 @@ class FriendNetworkEngine {
     // ---- 共现路径：无 causal signal 时回退现有逻辑（保证旧 trace/回测兼容） ----
     const builderInput = input.newsItems.map(item => ({
       id: item.id,
-      entities: extractSignalEntities([
-        {
-          title: item.title,
-          summary: item.summary,
-        },
-      ]),
+      entities: extractSignalEntities(
+        [
+          {
+            title: item.title,
+            summary: item.summary,
+          },
+        ],
+        keywordDictionary,
+      ),
       reason: item.title,
     }));
 

@@ -83,6 +83,14 @@ export interface IPrismaRawNewsDelegate {
 
 export interface IPrismaNormalizedNewsDelegate {
   create: (args: { data: IPrismaNormalizedNewsRecord }) => Promise<IPrismaNormalizedNewsRecord>;
+  findMany?: (args: {
+    where?: {
+      clusterKey?: string;
+      publishedAt?: { gte?: Date; lte?: Date };
+    };
+    select?: Record<string, boolean>;
+    orderBy?: Record<string, 'asc' | 'desc'>;
+  }) => Promise<readonly IPrismaNormalizedNewsRecord[]>;
   createMany: (
     args: { data: readonly IPrismaNormalizedNewsRecord[] },
   ) => Promise<{ count: number }>;

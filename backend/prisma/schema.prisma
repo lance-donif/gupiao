@@ -612,6 +612,23 @@ model KeywordAlias {
   @@index([clusterKey, validFrom, validTo])
 }
 
+/// 全局关键词词典：替代散落在代码里的硬编码词表（实体抽取停用词/高信号词/
+/// 归一化、异动方向词、转载分桶词）。状态机：active/candidate/disabled。
+model KeywordDictionary {
+  id            String   @id @default(cuid())
+  term          String
+  category      String
+  canonicalTerm String?
+  weight        Float?
+  status        String   @default("active")
+  source        String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([term, category])
+  @@index([category, status])
+}
+
 model FactSnapshot {
   id                  String   @id @default(cuid())
   traceId             String   @unique

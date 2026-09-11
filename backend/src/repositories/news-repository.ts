@@ -1,4 +1,4 @@
-import type { INewsRepository } from './interfaces/i-news-repository.js';
+import type { ICrossBatchNewsRecord, INewsRepository } from './interfaces/i-news-repository.js';
 import type { IPrismaNewsRecord, IPrismaNormalizedNewsRecord, IPrismaRawNewsRecord, IPrismaTransactionalClient } from './prisma-types.js';
 
 import { NewsItem } from '../types/entities/news-item.js';
@@ -113,5 +113,37 @@ export class PrismaNewsRepository implements INewsRepository {
     const records = await this.prisma.newsItem.findMany();
 
     return records.map(mapRecordToNewsItem);
+  }
+
+  public async findRecentNormalizedRecords(
+    clusterKey: string,
+    since: Date,
+    asOf: Date,
+  ): Promise<readonly ICrossBatchNewsRecord[]> {
+    const findMany = this.prisma.normalizedNewsRecord.findMany;
+    if (!findMany) {
+      return [];
+    }
+    const records = await findMany({
+      where: {
+        clusterKey,
+        publishedAt: { gte: since, lte: asOf },
+      },
+      select: {
+        id: true,
+        title: true,
+        content: true,
+        reprintGroupId: true,
+        publishedAt: true,
+      },
+      orderBy: { publishedAt: 'desc' },
+    });
+    return records.map(record => ({
+      id: record.id,
+      title: record.title,
+      content: record.content,
+      reprintGroupId: record.reprintGroupId ?? null,
+      publishedAt: record.publishedAt,
+    }));
   }
 }

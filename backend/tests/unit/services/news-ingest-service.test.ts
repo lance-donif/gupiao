@@ -9,6 +9,7 @@ import {
   type INewsSourceArticle,
   type INewsSourceRequest,
   type INewsSourceResult,
+  type ICrossBatchNewsRecord,
   type IPrismaClient,
   type IPrismaNewsRecord,
   type IPrismaStockRecord,
@@ -210,6 +211,7 @@ class FailingUnitOfWork implements IUnitOfWork {
       remove: (id: string): Promise<void> => this.base.newsRepository.remove(id),
       findById: (id: string): Promise<NewsItem | null> => this.base.newsRepository.findById(id),
       findAll: (): Promise<readonly NewsItem[]> => this.base.newsRepository.findAll(),
+      findRecentNormalizedRecords: (): Promise<readonly ICrossBatchNewsRecord[]> => Promise.resolve([]),
     };
 
     this.stockRepository = base.stockRepository;

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { IFriendNetworkEngineInput } from '../../../src/index.js';
 import { createStubFriendNetworkAiAdapter } from '../../../src/services/friend-network-ai-adapter.js';
 import { createFriendNetworkEngine } from '../../../src/services/friend-network-engine.js';
+import { stubKeywordDictionary } from '../../helpers/keyword-dictionary-fixture.js';
 
 describe('friend-network engine', () => {
   it('exports engine input/output types from the public barrel', () => {
@@ -19,6 +20,7 @@ describe('friend-network engine', () => {
   it('runs the full news -> entity -> graph -> ai -> snapshot pipeline as one system', async () => {
     const engine = createFriendNetworkEngine({
       aiAdapter: createStubFriendNetworkAiAdapter(),
+      keywordDictionary: stubKeywordDictionary,
     });
 
     const result = await engine.run({
