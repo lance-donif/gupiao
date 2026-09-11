@@ -764,6 +764,53 @@ export const buildYieldRecordDrafts = (input: {
   return drafts;
 };
 
+export interface RecommendationSnapshotYieldUpdate {
+  readonly realizedPrice: number;
+  readonly realizedPriceTarget: number;
+  readonly yield1Day: number | null;
+  readonly yield3Day: number | null;
+  readonly yield5Day: number | null;
+  readonly yield1DayVisibleAt: Date | null;
+  readonly yield3DayVisibleAt: Date | null;
+  readonly yield5DayVisibleAt: Date | null;
+  /** 5 日窗口已走完（draft 非 immature）即收口；未走完保持 false，留待后续对账补齐。 */
+  readonly isReconciled: boolean;
+}
+
+/**
+ * 生产对账用：把 YieldRecord 草稿映射为 RecommendationSnapshot 的收益回填（纯函数）。
+ * 口径与回测 `calculateReconciliationData` 一致：p0 为 asOf 前最后收盘，退出价取最长可用窗口。
+ *  - 1/3 日先成熟也回填（惩罚读“任一可用收益”），但 5 日窗口未收口时 isReconciled 保持 false；
+ *  - p0 非法或尚无 asOf 后 K 线时返回 null，调用方不得收口（未来数据可能补齐）。
+ */
+export const buildRecommendationSnapshotYieldUpdate = (input: {
+  readonly p0: number;
+  readonly futureCandles: readonly any[];
+  readonly drafts: readonly YieldRecordDraft[];
+}): RecommendationSnapshotYieldUpdate | null => {
+  if (!Number.isFinite(input.p0) || input.p0 <= 0 || input.futureCandles.length === 0) {
+    return null;
+  }
+  const byHorizon = new Map(input.drafts.map(draft => [draft.horizon, draft]));
+  const exitClose = (idx: number): number | null => {
+    if (input.futureCandles.length <= idx) return null;
+    const close = Number(input.futureCandles[idx]?.close);
+    return Number.isFinite(close) && close > 0 ? close : null;
+  };
+  const realizedPriceTarget = exitClose(4) ?? exitClose(2) ?? exitClose(0) ?? input.p0;
+  return {
+    realizedPrice: input.p0,
+    realizedPriceTarget,
+    yield1Day: byHorizon.get(1)?.value ?? null,
+    yield3Day: byHorizon.get(3)?.value ?? null,
+    yield5Day: byHorizon.get(5)?.value ?? null,
+    yield1DayVisibleAt: byHorizon.get(1)?.maturityAt ?? null,
+    yield3DayVisibleAt: byHorizon.get(3)?.maturityAt ?? null,
+    yield5DayVisibleAt: byHorizon.get(5)?.maturityAt ?? null,
+    isReconciled: (byHorizon.get(5)?.status ?? 'immature') !== 'immature',
+  };
+};
+
 /**
  * 生成对账数据（纯函数）。行业来源按 asOf 从 StockStatusHistory 解析；
  * coverageGapSymbols 中的标的属于数据缺口，行业保持 null，绝不回退到当前名单行业。

@@ -14,7 +14,7 @@
 - 开始较大任务前，先看哪些 Skill 能用。
 - 后端改动后优先跑 `cd backend && bun run check:fix`。
 - 不要回滚用户已有改动，除非用户明确要求。
-- 运行服务前需要看看有没有已经在运行的服务，避免重复运行
+- 运行服务前需要看看有没有已经在运行的服务，避免重复运行。
 ## Architecture
 
 ```text
@@ -52,8 +52,9 @@ gupiao/
 
 ## Recommendation Pipeline
 
-每日推荐主链路：
+每日推荐主链路（调度顺序：`sync-stock-history --mode incremental` → `backfill-yield-records` → `run-daily-recommendation`）：
 
+0. 收益对账：`backfill-yield-records` 回填未对账快照的 1/3/5 日收益并置 `isReconciled`，惩罚只读快照表，不读 `YieldRecord`。
 1. 抓取新闻：AKTools + NewsNow
 2. 清洗、去重、转载降权
 3. LLM 因果抽取：生成 `CausalSignalCandidate`
@@ -136,11 +137,12 @@ cd backend && bun run scripts/audit-recommendation-quality.ts --trace-id <traceI
 
 ```bash
 cd web && bun run dev
-cd web && bun run build
-cd web && bun test
-cd web && bun run lint
-cd web && bun run check:all
+cd web && bun run build  # 内含 tsc --noEmit
+cd web && bun run test   # vitest run，禁止 bun test
+cd web && bun run check:all  # 仅 lint:style + check:deps，不含 typecheck/test
 ```
+
+注意：web 没有 `lint` 脚本，不要跑 `bun run lint`。
 
 基础设施：
 
@@ -154,19 +156,19 @@ docker compose down
 - Backend：TypeScript 6, Bun 1.3, Prisma 7, Vitest 4
 - Frontend：React 19, Vite 8, TypeScript 6, Radix UI, ECharts, AntV G6
 - Database：PostgreSQL, Redis, Apache AGE 图扩展
-- AI：LangChain, deepagents
+- AI：自研客户端直调模型 provider（`backend/src/services/ai-transport.ts`、`ai-chat-client.ts`），无 LangChain 依赖
 
 ## Testing
 
 - 单元测试：纯逻辑，无外部依赖。
 - 集成测试：真实外部服务，必须明确依赖。
-- 后端测试用 `bun run test`（Vitest）；当前基线 401 通过 / 0 失败 / 17 跳过（65 文件：63 通过、2 跳过），以实测为准。
+- 后端测试用 `bun run test`（Vitest）；当前基线 534 通过 / 0 失败 / 75 跳过（81 文件：76 通过、5 跳过），2026-09-11 实测（无 `AI_TEST_DATABASE_URL` 时集成测试跳过）。
 - 前端变更：需要浏览器页面验证。
 - 后端交接：禁止带 lint error；跳过的测试必须单列，不得计为通过。
 
 ## Rewrite Status
 
-- M0–M7 开发已落地，完成情况见 `M0_M7_COMPLETION_REPORT_2026-09-10.md`（`PLAN_M0_M7_VERIFY_2026-09-10.md` 是实施前的过时复核）。
+- M0–M7 开发已落地，完成情况见 `M0_M7_COMPLETION_REPORT_2026-09-10.md`。
 - 生产默认：`SCORING_RECIPE=event-v2`、`PIPELINE_STAGE_EXECUTOR=registry`、`CAUSAL_PROTOCOL_MODE=items`。
 - 验收基线：`cd backend && bun run check:fix` 全绿；带 `AI_TEST_DATABASE_URL` 时 80 文件 / 605 用例全部通过（0 跳过）；后端与前端构建通过。
 - 评测门槛是"报告"而非"开关"：M7 报告会输出 bootstrap 置信区间与回撤对比，未达门槛时标记 `overrideForced=true` 并保留 `event-v2`。
@@ -177,32 +179,4 @@ docker compose down
 - 工作台堆叠布局规范：若侧边栏或主栏底部组件为带滚动条的弹性区域（如带有 `ScrollArea` 且设为 `flex-1 min-h-0`），则其上方所有普通卡片组件必须设为 `h-auto shrink-0` 弹性高度，使其根据内容自动撑开，严禁设死固定高度。
 - 动态文本应具备折行容错性。如果对行数有限制，请显式采用 `line-clamp-x` 或 `truncate` 进行防御性限高截断，避免超出父容器边界。
 
-<!-- ASTRYX:START -->
-Astryx v0.1.3 · 90+ components
-CLI: run every command as `pnpm exec astryx <cmd>` (shown below as `astryx ...`).
 
-SETUP (once, in your app entry e.g. main.tsx) — without these, components render unstyled:
-  import "@astryxdesign/core/reset.css";
-  import "@astryxdesign/core/astryx.css";
-
-WORKFLOW — discover, don't guess. Before writing UI:
-1. `astryx build "<idea>"` — START HERE: returns a kit (closest [page] + [block]s + [component]s). No args = full playbook.
-2. `astryx template <name> [--skeleton]` — scaffold the [page]/[block]s it named, or study their layout. Templates are reference code.
-3. `astryx component <Name>` — props + examples for every component you use.
-
-RULES:
-- No <div> — components do all layout/spacing. Full page → AppShell; sidebar nav → SideNav.
-- Frame first: pick the shell (AppShell / Layout+LayoutPanel) and budget regions in px BEFORE writing content (`astryx docs layout`).
-- Dense data = rows (Table, List/Item) edge-to-edge — never Card-wrapped list items. Card = dashboard widgets, galleries, settings groups only.
-- Status → StatusDot/Token; Badge only for counts and enumerated states, never decoration.
-- Custom styling: component props first; else style/className with tokens — var(--color-*|--spacing-*|--radius-*). No raw hex/px. (No StyleX/Tailwind compiler here — don't use xstyle/utility classes.)
-- Tokens for every value (`astryx docs tokens`). Brand/accent via `astryx theme` — never override --color-* in :root.
-
-MORE CLI:
-  search "<query>"   find any component / hook / doc / template / block
-  component --list   90+ components by category
-  template --list    page + block recipes
-  docs <topic>       color, elevation, icons, illustrations, layout, migration, motion, principles, shape, spacing, styling, theme, tokens, typography
-  swizzle <Name>     eject component source for deep customization
-  upgrade --apply    run after any @astryxdesign/core bump
-<!-- ASTRYX:END -->

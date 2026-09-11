@@ -9,9 +9,13 @@
  * 用法：
  *   DATABASE_URL=... bun dist/scripts/backfill-yield-records.js [--cluster global] [--limit 2000]
  */
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
-import { buildYieldRecordDrafts, YIELD_COMPUTE_VERSION } from '../src/services/backtest-engine.js';
+import {
+  buildRecommendationSnapshotYieldUpdate,
+  buildYieldRecordDrafts,
+  YIELD_COMPUTE_VERSION,
+} from '../src/services/backtest-engine.js';
 
 const parseArgs = (): Record<string, string> => {
   const out: Record<string, string> = {};
@@ -36,7 +40,7 @@ const main = async (): Promise<void> => {
   const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
   try {
     const snapshots = await prisma.recommendationSnapshot.findMany({
-      where: { clusterKey },
+      where: { clusterKey, isReconciled: false },
       orderBy: { asOf: 'desc' },
       take: limit,
     });
@@ -45,6 +49,8 @@ const main = async (): Promise<void> => {
     let upserted = 0;
     let immature = 0;
     let coverageGap = 0;
+    let snapshotsUpdated = 0;
+    let snapshotsReconciled = 0;
 
     for (const snap of snapshots) {
       scanned += 1;
@@ -115,6 +121,28 @@ const main = async (): Promise<void> => {
         });
         upserted += 1;
       }
+
+      // 同步回填 RecommendationSnapshot：惩罚只读快照表，不读 YieldRecord，
+      // 缺这一步则关键词惩罚永远看到 0 条已对账推荐。
+      const snapshotUpdate = buildRecommendationSnapshotYieldUpdate({ p0, futureCandles, drafts });
+      if (snapshotUpdate !== null) {
+        await prisma.recommendationSnapshot.update({
+          where: { id: snap.id },
+          data: {
+            realizedPrice: new Prisma.Decimal(snapshotUpdate.realizedPrice),
+            realizedPriceTarget: new Prisma.Decimal(snapshotUpdate.realizedPriceTarget),
+            yield1Day: snapshotUpdate.yield1Day !== null ? new Prisma.Decimal(snapshotUpdate.yield1Day) : null,
+            yield3Day: snapshotUpdate.yield3Day !== null ? new Prisma.Decimal(snapshotUpdate.yield3Day) : null,
+            yield5Day: snapshotUpdate.yield5Day !== null ? new Prisma.Decimal(snapshotUpdate.yield5Day) : null,
+            yield1DayVisibleAt: snapshotUpdate.yield1DayVisibleAt,
+            yield3DayVisibleAt: snapshotUpdate.yield3DayVisibleAt,
+            yield5DayVisibleAt: snapshotUpdate.yield5DayVisibleAt,
+            isReconciled: snapshotUpdate.isReconciled,
+          },
+        });
+        snapshotsUpdated += 1;
+        if (snapshotUpdate.isReconciled) snapshotsReconciled += 1;
+      }
     }
 
     console.log(JSON.stringify({
@@ -124,6 +152,8 @@ const main = async (): Promise<void> => {
       upserted,
       immature,
       coverageGap,
+      snapshotsUpdated,
+      snapshotsReconciled,
     }, null, 2));
   } finally {
     await prisma.$disconnect();
