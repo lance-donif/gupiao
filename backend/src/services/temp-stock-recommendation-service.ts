@@ -78,7 +78,7 @@ export interface ITempRecommendationSelectionDiagnostics {
   readonly supplementalCandidateCount: number;
   readonly supplementalSelectedCount: number;
   readonly distinctIndustryCount: number;
-  readonly minIndustriesTarget: number;
+  readonly eligibleIndustryCount: number;
   readonly shortfallReasons: readonly string[];
 }
 
@@ -113,14 +113,9 @@ const INDUSTRY_MOMENTUM_PENALTY_THRESHOLD = -0.05;
 const INDUSTRY_MOMENTUM_PENALTY_MIN_FACTOR = 0.3;
 // ponytail: 前 N 名按 industry 强制去重，避免单一行业占满榜单顶部。升级路径：若需要按更细粒度（概念板块）去重，可改为接受 key resolver。
 const DEFAULT_TOP_DIVERSITY_COUNT = 5;
-/** 行业下限：每次推荐至少覆盖的不同行业数（可用候选不足时输出原因，不硬凑）。 */
-const DEFAULT_MIN_INDUSTRIES = 10;
 const FALLBACK_INDUSTRY = '未归类';
 const MARKET_BREADTH_BEAR_THRESHOLD = 0.25;
 const MARKET_BREADTH_BULL_THRESHOLD = 0.40;
-const MARKET_BREADTH_BEAR_LIMIT_FACTOR = 0.5;
-const MARKET_BREADTH_NEUTRAL_LIMIT_FACTOR = 0.7;
-const MARKET_REGIME_MIN_RECOMMENDATIONS = 10;
 const LONG_TERM_DOWNTREND_THRESHOLD = -0.30;
 
 /**
@@ -259,9 +254,9 @@ const buildShortfallReasons = (input: {
   readonly supplementalCandidateCount: number;
   readonly supplementalSelectedCount: number;
   readonly distinctIndustryCount: number;
-  readonly minIndustriesTarget: number;
+  readonly eligibleIndustryCount: number;
 }): readonly string[] => {
-  if (input.selectedCount >= input.limit && input.distinctIndustryCount >= input.minIndustriesTarget) {
+  if (input.selectedCount >= input.limit && input.distinctIndustryCount >= Math.min(input.eligibleIndustryCount, input.limit)) {
     return [];
   }
 
@@ -289,8 +284,8 @@ const buildShortfallReasons = (input: {
     reasons.push(`推荐不足：前 ${input.topDiversityCount} 名行业多样化规则跳过 ${input.skippedByTopDiversity} 只同行业候选，未用无证据股票硬凑`);
   }
 
-  if (input.selectedCount > 0 && input.distinctIndustryCount < input.minIndustriesTarget) {
-    reasons.push(`行业覆盖不足：选中只有 ${input.distinctIndustryCount} 个行业，少于下限 ${input.minIndustriesTarget} 个，未用无证据股票硬凑`);
+  if (input.selectedCount > 0 && input.distinctIndustryCount < Math.min(input.eligibleIndustryCount, input.limit)) {
+    reasons.push(`行业覆盖不足：只覆盖 ${input.distinctIndustryCount}/${input.eligibleIndustryCount} 个行业，未用无证据股票硬凑`);
   }
 
   if (input.excludedByStockFilter > 0) {
@@ -725,7 +720,6 @@ export class TempStockRecommendationService {
     // 3.6 市场宽度计算：优先使用全市场实时涨跌数据（stock_zh_a_spot_em），
     // 仅当接口不可用时 fallback 到候选股历史 5 日动量代理。
     let marketRegime: 'bull' | 'neutral' | 'bear' = 'neutral';
-    let effectiveLimit = limit;
     let marketBreadthSource = 'candidate_momentum_fallback';
 
     // 主要：查数据库最新两个交易日的全市场收盘价涵跌幅
@@ -744,13 +738,12 @@ export class TempStockRecommendationService {
       marketBreadthSource = 'full_market_spot';
     }
 
+    // 市场状态只记录透明度，不再降载：每次凑满 limit。
     if (marketBreadth !== null) {
       if (marketBreadth < MARKET_BREADTH_BEAR_THRESHOLD) {
         marketRegime = 'bear';
-        effectiveLimit = Math.max(MARKET_REGIME_MIN_RECOMMENDATIONS, Math.round(limit * MARKET_BREADTH_BEAR_LIMIT_FACTOR));
       } else if (marketBreadth < MARKET_BREADTH_BULL_THRESHOLD) {
         marketRegime = 'neutral';
-        effectiveLimit = Math.max(MARKET_REGIME_MIN_RECOMMENDATIONS, Math.round(limit * MARKET_BREADTH_NEUTRAL_LIMIT_FACTOR));
       } else {
         marketRegime = 'bull';
       }
@@ -763,7 +756,7 @@ export class TempStockRecommendationService {
     const selector = new TempRecommendationSelector();
     const initialSelection = selector.selectTopRecommendationsWithDiagnostics(
       candidates as unknown as readonly ITempStockRecommendation[],
-      effectiveLimit,
+      limit,
       maxPerIndustry,
       cooldownExclusions,
     );
@@ -774,9 +767,7 @@ export class TempStockRecommendationService {
 
     // 5. 组装 RecommendationSnapshot 快照数据
     const breadthPct = marketBreadth !== null ? `${(marketBreadth * 100).toFixed(1)}%` : '未知';
-    const marketRegimeReason = effectiveLimit !== limit
-      ? `市场状态 [${marketRegime}]：全市场上涨占比 ${breadthPct}（来源: ${marketBreadthSource}），推荐数量从 ${limit} 调整为 ${effectiveLimit}`
-      : `市场状态 [${marketRegime}]：全市场上涨占比 ${breadthPct}（来源: ${marketBreadthSource}），推荐数量保持 ${limit}`;
+    const marketRegimeReason = `市场状态 [${marketRegime}]：全市场上涨占比 ${breadthPct}（来源: ${marketBreadthSource}），推荐数量保持 ${limit}`;
     const snapshotData = selected.map((item: any, index: number) => {
       return {
         traceId,
@@ -1102,7 +1093,6 @@ export class TempRecommendationSelector {
     maxPerIndustry: number,
     _cooldownExclusions: IRecommendationCooldownExclusions = createEmptyCooldownExclusions(),
     topDiversityCount: number = DEFAULT_TOP_DIVERSITY_COUNT,
-    minIndustries: number = DEFAULT_MIN_INDUSTRIES,
   ): {
     readonly recommendations: readonly ITempStockRecommendation[];
     readonly diagnostics: Omit<ITempRecommendationSelectionDiagnostics, 'featureSnapshotCount'>;
@@ -1133,8 +1123,14 @@ export class TempRecommendationSelector {
     const signalTypeCounts = new Map<string, number>();
     const topDiversityIndustries = new Set<string>();
     const effectiveTopDiversity = Math.max(0, Math.min(topDiversityCount, limit));
-    // 行业下限目标：不超过 limit；名额不足 10 时有多少保几个
-    const industryFloorTarget = Math.max(0, Math.min(Math.trunc(minIndustries), limit));
+    // 每行业保底 1 个：先统计可用行业，全覆盖后才放开同行业补位
+    const eligibleIndustryKeys = new Set<string>();
+    for (const recommendation of eligibleRecommendations) {
+      const industryKey = resolveTopDiversityIndustryKey(recommendation);
+      if (industryKey !== null) {
+        eligibleIndustryKeys.add(industryKey);
+      }
+    }
     const selected: ITempStockRecommendation[] = [];
     const postponed: ITempStockRecommendation[] = [];
     let skippedBySignalTypeCap = 0;
@@ -1148,16 +1144,16 @@ export class TempRecommendationSelector {
         continue;
       }
 
-      // 前 N 名强制行业多样化 + 行业下限：覆盖 industryFloorTarget 个不同行业之前，同行业候选暂存让路
-      if (selected.length < effectiveTopDiversity || topDiversityIndustries.size < industryFloorTarget) {
-        const industryKey = resolveTopDiversityIndustryKey(recommendation);
-        if (industryKey !== null && topDiversityIndustries.has(industryKey)) {
-          postponed.push(recommendation);
-          continue;
-        }
-        if (industryKey !== null) {
-          topDiversityIndustries.add(industryKey);
-        }
+      // 前 N 名强制行业多样化 + 每行业保底 1 个：还有未覆盖行业时，同行业候选暂存让路
+      const industryKey = resolveTopDiversityIndustryKey(recommendation);
+      const hasUncoveredIndustry = topDiversityIndustries.size < eligibleIndustryKeys.size;
+      if (industryKey !== null && topDiversityIndustries.has(industryKey)
+        && (selected.length < effectiveTopDiversity || hasUncoveredIndustry)) {
+        postponed.push(recommendation);
+        continue;
+      }
+      if (industryKey !== null) {
+        topDiversityIndustries.add(industryKey);
       }
 
       selected.push(recommendation);
@@ -1198,6 +1194,7 @@ export class TempRecommendationSelector {
         .map(resolveTopDiversityIndustryKey)
         .filter((key): key is string => key !== null),
     ).size;
+    const eligibleIndustryCount = eligibleIndustryKeys.size;
     const supplementalCandidateCount = 0;
     const supplementalSelectedCount = 0;
     const evidenceCandidateCount = eligibleRecommendations.length;
@@ -1220,7 +1217,7 @@ export class TempRecommendationSelector {
       skippedByTopDiversity,
       topDiversityCount: effectiveTopDiversity,
       distinctIndustryCount,
-      minIndustriesTarget: industryFloorTarget,
+      eligibleIndustryCount,
       supplementalCandidateCount,
       supplementalSelectedCount,
       shortfallReasons: buildShortfallReasons({
@@ -1241,7 +1238,7 @@ export class TempRecommendationSelector {
         skippedByTopDiversity,
         topDiversityCount: effectiveTopDiversity,
         distinctIndustryCount,
-        minIndustriesTarget: industryFloorTarget,
+        eligibleIndustryCount,
         supplementalCandidateCount,
         supplementalSelectedCount,
       }),
