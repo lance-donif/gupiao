@@ -45,21 +45,31 @@ const distinctIndustries = (items: readonly ITempStockRecommendation[]): number 
   new Set(items.map(item => item.industry)).size;
 
 describe('TempRecommendationSelector industry guarantee', () => {
-  it('银行扎堆时每个行业保底 1 只，凑满 15 只', () => {
-    const candidates: ITempStockRecommendation[] = [];
-    for (let i = 0; i < 12; i += 1) candidates.push(buildRec('银行', 70 - i));
-    const others = ['商贸零售', '交通运输', '食品农业', '化工材料', '机器人设备', '资源能源', '家电消费', '算力通信', '国防军工'];
-    others.forEach((industry, i) => candidates.push(buildRec(industry, 58 - i)));
+  it('高分同行业挤占名额时保底让低分新行业先进', () => {
+    // 前 5 名占满后，银行 A2-A4（65~63 分）仍高于机器人 F1（50 分）：
+    // 无保底时 A2-A4 吃掉剩余名额，F 行业出局；有保底时 A2-A4 让路，F 先进再回填。
+    const candidates = [
+      buildRec('银行', 70),
+      buildRec('商贸零售', 69),
+      buildRec('交通运输', 68),
+      buildRec('食品农业', 67),
+      buildRec('化工材料', 66),
+      buildRec('银行', 65),
+      buildRec('银行', 64),
+      buildRec('银行', 63),
+      buildRec('机器人设备', 50),
+    ];
 
-    const result = new TempRecommendationSelector().selectTopRecommendationsWithDiagnostics(candidates, 15, 30);
+    const result = new TempRecommendationSelector().selectTopRecommendationsWithDiagnostics(candidates, 8, 30);
 
-    expect(result.recommendations).toHaveLength(15);
-    // 10 个可用行业全覆盖
-    expect(distinctIndustries(result.recommendations)).toBe(10);
-    expect(result.diagnostics.distinctIndustryCount).toBe(10);
-    expect(result.diagnostics.eligibleIndustryCount).toBe(10);
-    // 银行只留 6 只（1 首选 + 5 回填），不再占 10 只
-    expect(result.recommendations.filter(item => item.industry === '银行')).toHaveLength(6);
+    expect(result.recommendations).toHaveLength(8);
+    // 6 个可用行业全覆盖（含 50 分的机器人设备）
+    expect(distinctIndustries(result.recommendations)).toBe(6);
+    expect(result.diagnostics.distinctIndustryCount).toBe(6);
+    expect(result.diagnostics.eligibleIndustryCount).toBe(6);
+    expect(result.recommendations.map(item => item.industry)).toContain('机器人设备');
+    // 银行只留 3 只（A1 首选 + A2/A3 回填），A4 被名额挡掉
+    expect(result.recommendations.filter(item => item.industry === '银行')).toHaveLength(3);
     expect(result.diagnostics.shortfallReasons.join()).not.toContain('行业覆盖不足');
   });
 
