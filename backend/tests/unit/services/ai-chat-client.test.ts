@@ -1,6 +1,3 @@
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AiChatClient, AiCandidatesExhaustedError, AiInputError, AiRequestTooLargeError } from '../../../src/services/ai-chat-client.js';
 import { aiConfigFingerprint, loadAiProviderConfig, validateAiConfig, type IAiProviderConfig } from '../../../src/services/ai-provider-config.js';
@@ -14,11 +11,9 @@ const request = {
   label: 'Test AI', messages: [{ role: 'user' as const, content: 'input' }], temperature: 0.2, timeoutMs: 1000,
   validate: (value: unknown) => { if ((value as { ok?: unknown })?.ok !== true) throw new Error('schema'); return value; },
 };
-const dirs: string[] = [];
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
-  dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true }));
 });
 
 describe('ordered Chat Completions client', () => {
@@ -159,7 +154,20 @@ describe('ordered Chat Completions client', () => {
   });
 });
 
-describe('single AI configuration file', () => {
+describe('single AI env configuration', () => {
+  const toEnv = (cfg: IAiProviderConfig): NodeJS.ProcessEnv => {
+    const env: NodeJS.ProcessEnv = {
+      AI_PROVIDER_IDS: cfg.providers.map(provider => provider.id).join(','),
+      LLM_SMART_API_KEY: 'ignored',
+    };
+    for (const provider of cfg.providers) {
+      const key = provider.id.toUpperCase();
+      env[`AI_PROVIDER_${key}_BASE_URL`] = provider.baseUrl;
+      env[`AI_PROVIDER_${key}_API_KEY`] = provider.apiKey;
+      env[`AI_PROVIDER_${key}_MODELS`] = provider.models.map(model => model.id).join(',');
+    }
+    return env;
+  };
   it.each([{}, { providers: [] }, { providers: [{}] }, { providers: [{ ...config().providers[0], models: [] }] },
     { providers: [config().providers[0], config().providers[0]] },
     { providers: [{ ...config().providers[0], models: [{ id: 'a', parameters: { model: 'override' } }] }] },
@@ -169,17 +177,13 @@ describe('single AI configuration file', () => {
     expect(() => validateAiConfig(value)).toThrow();
   });
 
-  it('loads only the file, caches a process snapshot, and does not use old environment keys', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'gupiao-ai-config-')); dirs.push(dir);
-    const file = path.join(dir, 'ai.json');
-    writeFileSync(file, JSON.stringify(config()));
-    const env = { AI_CONFIG_FILE: file, LLM_SMART_API_KEY: 'ignored', OPENAI_MODEL: 'ignored' };
+  it('只读环境变量、缓存进程快照、忽略旧键', () => {
+    const env = toEnv(config());
     expect(loadAiProviderConfig(env)).toEqual(config());
-    writeFileSync(file, 'invalid JSON with private key');
-    expect(loadAiProviderConfig(env)).toEqual(config());
-    expect(() => loadAiProviderConfig({ AI_CONFIG_FILE: path.join(dir, 'missing.json'), LLM_SMART_API_KEY: 'ignored' })).toThrow('Cannot read AI_CONFIG_FILE');
-    const invalidFile = path.join(dir, 'invalid.json'); writeFileSync(invalidFile, 'invalid private key');
-    expect(() => loadAiProviderConfig({ AI_CONFIG_FILE: invalidFile })).toThrow('must contain valid JSON');
+    expect(loadAiProviderConfig({ ...env, AI_PROVIDER_P1_API_KEY: 'rotated' }).providers[0]?.apiKey).toBe('rotated');
+    expect(() => loadAiProviderConfig({})).toThrow('AI_PROVIDER_IDS');
+    expect(() => loadAiProviderConfig({ AI_PROVIDER_IDS: 'p1' })).toThrow('BASE_URL');
+    expect(() => loadAiProviderConfig({ ...env, AI_PROVIDER_P1_MODELS: '' })).toThrow('MODELS');
   });
 
   it('changes cache identity on routes/parameters but not credential rotation', () => {

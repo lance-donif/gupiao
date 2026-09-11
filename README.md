@@ -26,9 +26,9 @@
 
 复制 `.env.example` 为 `.env`。所有 AI 功能只使用一份配置，无需分别配置主模型和廉价模型：
 
-1. 将 `backend/ai-config.example.json` 复制为 `backend/tmp/ai-config.json`（先创建 `tmp` 目录）。
-2. 填写供应商的 `id`、`baseUrl`、`apiKey` 和 `models`。至少保留一家供应商、一个模型即可运行。
-3. 从 `backend` 目录启动后端。默认读取 `tmp/ai-config.json`，也可用 `AI_CONFIG_FILE` 指定绝对路径或相对进程工作目录的路径。修改配置后重启相关进程。
+1. 在 `.env` 里填写 `AI_PROVIDER_IDS`（逗号分隔，顺序即优先级）。
+2. 每个提供商填写 `AI_PROVIDER_<ID大写>_BASE_URL`、`_API_KEY` 和 `_MODELS`（逗号分隔的模型 id）。至少保留一家供应商、一个模型即可运行。
+3. 从仓库根目录启动后端（配置只读根目录 `.env`）。修改配置后重启相关进程。
 
 配置 `DATABASE_URL` 后，所有 AI 入口共用 PostgreSQL 中的限额和健康状态，按有效响应率、耗时和空闲容量分流。每家供应商初始共享 2 个并发，稳定至少 2 分钟且成功 10 次后逐步增加，默认最高 5；全局最高 10。多个模型共享供应商额度。遇到 429 并发减半并冷却，网络连续失败时熔断，恢复阶段仅放行一个探测请求。配置顺序只用于初始同等条件下的排序。
 
@@ -36,26 +36,24 @@
 
 只要求供应商支持 Chat Completions；无需安装 CPA。`baseUrl` 填接口前缀，例如 `https://example.com/v1`，程序追加 `/chat/completions`。模型 ID 按供应商要求原样填写，同一模型可出现在不同供应商下。
 
-模型可选参数示例：
+模型可选参数示例（`AI_PROVIDER_<ID大写>_MODEL_<序号>_*`，序号对应 MODELS 列表顺序）：
 
-```json
-{
-  "id": "your-model-id",
-  "timeoutMs": 120000,
-  "parameters": {
-    "stream": true,
-    "reasoning_effort": "high",
-    "response_format": null,
-    "max_completion_tokens": 8192
-  }
-}
+```sh
+AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_STREAM=true
+AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_REASONING_EFFORT=high
+AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_RESPONSE_FORMAT=json_object  # 不支持时填 null
+AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_MAX_COMPLETION_TOKENS=8192   # 与 MAX_TOKENS 二选一
+AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_FIRST_RESPONSE_MS=45000
+AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_IDLE_MS=45000
+AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_TOTAL_MS=180000
+AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_CONTEXT_TOKENS=128000
 ```
 
-仅填写供应商支持的参数。默认使用非流式、`response_format: {"type":"json_object"}`；不支持该参数时设为 `null`，仍会严格校验返回 JSON。设置 `reasoning_effort` 时默认不发送温度；可显式配置 `temperature`，设为 `null` 则不发送。输出长度使用 `max_tokens` 或 `max_completion_tokens`，二选一。自适应调用默认首响应 45 秒、流式无进展 45 秒、总耗时 180 秒，分别由模型 `timeouts.firstResponseMs/idleMs/totalMs` 覆盖；旧 `timeoutMs` 保留为总超时兼容字段。心跳不重置无进展计时，正文和推理增量会重置。
+仅填写供应商支持的参数。默认使用非流式、`response_format: {"type":"json_object"}`；不支持该参数时设为 `null`，仍会严格校验返回 JSON。设置 `reasoning_effort` 时默认不发送温度；可显式配置 `temperature`，设为 `null` 则不发送。输出长度使用 `max_tokens` 或 `max_completion_tokens`，二选一。自适应调用默认首响应 45 秒、流式无进展 45 秒、总耗时 180 秒，分别由模型 `FIRST_RESPONSE_MS/IDLE_MS/TOTAL_MS` 覆盖；`TIMEOUT_MS` 为总超时兼容字段。心跳不重置无进展计时，正文和推理增量会重置。
 
 请求提示词和完整请求体不得超过 240000 字符。新闻从每批 3 条开始，稳定完成后最多合并为 5 条；长度超限、截断或重复结构错误会拆批，最小一条，单条仍不合法时需要处理。限流不会触发拆批。结构合法但证据不合格的结果仍按原有业务规则拒绝，不通过换模型绕过证据门槛。
 
-供应商和模型的 `limits` 可设置 `initialConcurrency/maxConcurrency/rpm/tpm/dailyRequests/dailyTokens/minSpacingMs/contextTokens`。仅填写已知的硬上限；RPM/TPM 响应头用于保守学习，Token 预估使用请求 UTF-8 字节数加输出预算，有实际 usage 时对账，预估不等于服务端计费量。每日额度按 UTC 零点重置。多个入口共用额度时，配置顶层 `quotaGroups: {"account": {"maxConcurrency": 2}}`，并给这些供应商设置 `quotaGroup: "account"`。
+供应商和模型的限流字段为 `INITIAL_CONCURRENCY/MAX_CONCURRENCY/RPM/TPM/DAILY_REQUESTS/DAILY_TOKENS/MIN_SPACING_MS/CONTEXT_TOKENS`（提供商级直接加前缀，模型级加 `MODEL_<序号>_` 中缀）。仅填写已知的硬上限；RPM/TPM 响应头用于保守学习，Token 预估使用请求 UTF-8 字节数加输出预算，有实际 usage 时对账，预估不等于服务端计费量。每日额度按 UTC 零点重置。多个入口共用额度时，用 `AI_QUOTA_GROUPS=account` 定义组、`AI_QUOTA_GROUP_ACCOUNT_MAX_CONCURRENCY=2` 配额，并给这些供应商设置 `AI_PROVIDER_<ID大写>_QUOTA_GROUP=account`。
 
 429 优先遵守 `Retry-After`；401、明确余额耗尽或模型不存在会停用对应凭证或模型。未知原因的 403 冷却 15 分钟后再试。配置变更和凭证轮换后重启进程；凭证不写入任务或调用日志。
 

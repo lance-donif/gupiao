@@ -1,6 +1,4 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
 
 export interface IAiModelParameters {
   readonly stream?: boolean;
@@ -139,20 +137,192 @@ export function validateAiConfig(value: unknown): IAiProviderConfig {
   return value as unknown as IAiProviderConfig;
 }
 
-// Never mix credentials from different environment variable families. One file is the source of truth.
+// AI 配置唯一来源：根目录 .env（模板与说明见 .env.example）。
+// 子目录不再存放任何配置文件；缺配直接抛错，不降级（见 AGENTS.md Core Rules）。
 const loadedConfigs = new Map<string, IAiProviderConfig>();
-export function loadAiProviderConfig(environment: NodeJS.ProcessEnv = process.env): IAiProviderConfig {
-  const filePath = path.resolve(environment.AI_CONFIG_FILE ?? 'tmp/ai-config.json');
-  const existing = loadedConfigs.get(filePath);
-  if (existing) return existing;
-  let raw: string;
-  try { raw = readFileSync(filePath, 'utf8'); } catch {
-    throw new Error('Cannot read AI_CONFIG_FILE (default: tmp/ai-config.json). Configure providers before running AI.');
+
+/** 提供商/分组 id 规范化为环境变量键段：大写，非字母数字统一转下划线。 */
+const normalizeEnvKey = (id: string): string => id.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+
+const readEnvText = (environment: NodeJS.ProcessEnv, key: string): string | undefined => {
+  const raw = environment[key];
+  if (raw === undefined) return undefined;
+  const text = String(raw).trim();
+  return text.length > 0 ? text : undefined;
+};
+
+const readEnvInt = (environment: NodeJS.ProcessEnv, key: string, max = Number.MAX_SAFE_INTEGER): number | undefined => {
+  const text = readEnvText(environment, key);
+  if (text === undefined) return undefined;
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) {
+    throw new Error(`AI 配置 ${key} 必须是 1~${max} 的整数`);
   }
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { throw new Error('AI_CONFIG_FILE must contain valid JSON'); }
-  const config = validateAiConfig(parsed);
-  loadedConfigs.set(filePath, config);
+  return value;
+};
+
+const readEnvBool = (environment: NodeJS.ProcessEnv, key: string): boolean | undefined => {
+  const text = readEnvText(environment, key);
+  if (text === undefined) return undefined;
+  if (/^(true|1)$/iu.test(text)) return true;
+  if (/^(false|0)$/iu.test(text)) return false;
+  throw new Error(`AI 配置 ${key} 必须是 true/false`);
+};
+
+const readEnvList = (environment: NodeJS.ProcessEnv, key: string): string[] => {
+  const text = readEnvText(environment, key);
+  if (text === undefined) return [];
+  return text.split(',').map(item => item.trim()).filter(item => item.length > 0);
+};
+
+const LIMIT_SUFFIXES = [
+  ['INITIAL_CONCURRENCY', 'initialConcurrency'],
+  ['MAX_CONCURRENCY', 'maxConcurrency'],
+  ['RPM', 'rpm'],
+  ['TPM', 'tpm'],
+  ['DAILY_REQUESTS', 'dailyRequests'],
+  ['DAILY_TOKENS', 'dailyTokens'],
+  ['MIN_SPACING_MS', 'minSpacingMs'],
+  ['CONTEXT_TOKENS', 'contextTokens'],
+] as const;
+
+const readEnvLimits = (environment: NodeJS.ProcessEnv, prefix: string): IAiLimits | undefined => {
+  const limits: Record<string, number> = {};
+  for (const [suffix, field] of LIMIT_SUFFIXES) {
+    const value = readEnvInt(environment, `${prefix}_${suffix}`);
+    if (value !== undefined) limits[field] = value;
+  }
+  return Object.keys(limits).length > 0 ? (limits as IAiLimits) : undefined;
+};
+
+const SCHEDULING_FIELDS = [
+  ['AI_SCHEDULING_GLOBAL_CONCURRENCY', 'globalConcurrency'],
+  ['AI_SCHEDULING_RUN_TIMEOUT_MS', 'runTimeoutMs'],
+  ['AI_SCHEDULING_MAX_ATTEMPTS', 'maxAttempts'],
+  ['AI_SCHEDULING_INITIAL_BATCH_SIZE', 'initialBatchSize'],
+  ['AI_SCHEDULING_MAX_BATCH_SIZE', 'maxBatchSize'],
+] as const;
+
+const BATCHING_FIELDS = [
+  ['AI_BATCHING_TARGET_INPUT_TOKENS', 'targetInputTokens'],
+  ['AI_BATCHING_MAX_INPUT_TOKENS', 'maxInputTokens'],
+  ['AI_BATCHING_OUTPUT_TOKENS', 'outputTokens'],
+  ['AI_BATCHING_ESTIMATED_OUTPUT_TOKENS_PER_NEWS', 'estimatedOutputTokensPerNews'],
+  ['AI_BATCHING_TARGET_LATENCY_MS', 'targetLatencyMs'],
+  ['AI_BATCHING_MAX_NEWS', 'maxNews'],
+] as const;
+
+const readEnvSection = (
+  environment: NodeJS.ProcessEnv,
+  fields: readonly (readonly [string, string])[],
+): Record<string, number> | undefined => {
+  const section: Record<string, number> = {};
+  for (const [key, field] of fields) {
+    const value = readEnvInt(environment, key);
+    if (value !== undefined) section[field] = value;
+  }
+  return Object.keys(section).length > 0 ? section : undefined;
+};
+
+type AiModelConfig = IAiProvider['models'][number];
+
+const buildEnvModel = (environment: NodeJS.ProcessEnv, providerKey: string, modelId: string, index: number): AiModelConfig => {
+  const prefix = `AI_PROVIDER_${providerKey}_MODEL_${index + 1}`;
+  const firstResponseMs = readEnvInt(environment, `${prefix}_FIRST_RESPONSE_MS`, 2147483647);
+  const idleMs = readEnvInt(environment, `${prefix}_IDLE_MS`, 2147483647);
+  const totalMs = readEnvInt(environment, `${prefix}_TOTAL_MS`, 2147483647);
+  const timeouts = firstResponseMs === undefined && idleMs === undefined && totalMs === undefined
+    ? undefined
+    : {
+      ...(firstResponseMs !== undefined ? { firstResponseMs } : {}),
+      ...(idleMs !== undefined ? { idleMs } : {}),
+      ...(totalMs !== undefined ? { totalMs } : {}),
+    };
+  const stream = readEnvBool(environment, `${prefix}_STREAM`);
+  const formatText = readEnvText(environment, `${prefix}_RESPONSE_FORMAT`);
+  const reasoningEffort = readEnvText(environment, `${prefix}_REASONING_EFFORT`);
+  const temperatureText = readEnvText(environment, `${prefix}_TEMPERATURE`);
+  let temperature: number | null | undefined;
+  if (temperatureText !== undefined) {
+    temperature = temperatureText.toLowerCase() === 'null' ? null : Number(temperatureText);
+    if (temperature !== null && (typeof temperature !== 'number' || !Number.isFinite(temperature))) {
+      throw new Error(`AI 配置 ${prefix}_TEMPERATURE 必须是数字或 null`);
+    }
+  }
+  const maxTokens = readEnvInt(environment, `${prefix}_MAX_TOKENS`);
+  const maxCompletionTokens = readEnvInt(environment, `${prefix}_MAX_COMPLETION_TOKENS`);
+  const parameters = stream === undefined && formatText === undefined && reasoningEffort === undefined
+    && temperature === undefined && maxTokens === undefined && maxCompletionTokens === undefined
+    ? undefined
+    : {
+      ...(stream !== undefined ? { stream } : {}),
+      ...(formatText !== undefined ? { response_format: formatText.toLowerCase() === 'null' ? null : { type: formatText } } : {}),
+      ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+      ...(maxCompletionTokens !== undefined ? { max_completion_tokens: maxCompletionTokens } : {}),
+    };
+  const timeoutMs = readEnvInt(environment, `${prefix}_TIMEOUT_MS`, 2147483647);
+  const modelLimits = readEnvLimits(environment, prefix);
+  return {
+    id: modelId,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(parameters !== undefined ? { parameters: parameters as AiModelConfig['parameters'] } : {}),
+    ...(modelLimits !== undefined ? { limits: modelLimits } : {}),
+    ...(timeouts !== undefined ? { timeouts } : {}),
+  };
+};
+
+export function loadAiProviderConfig(environment: NodeJS.ProcessEnv = process.env): IAiProviderConfig {
+  const cacheKey = JSON.stringify(
+    Object.keys(environment).filter(key => key.startsWith('AI_')).sort().map(key => [key, environment[key]]),
+  );
+  const existing = loadedConfigs.get(cacheKey);
+  if (existing) return existing;
+  const providerIds = readEnvList(environment, 'AI_PROVIDER_IDS');
+  if (providerIds.length === 0) {
+    throw new Error('AI 未配置：请在根目录 .env 设置 AI_PROVIDER_IDS（逗号分隔，顺序即优先级），完整说明见 .env.example');
+  }
+  const seenKeys = new Set<string>();
+  const providers: IAiProvider[] = providerIds.map(rawId => {
+    const providerKey = normalizeEnvKey(rawId);
+    if (providerKey.length === 0 || seenKeys.has(providerKey)) {
+      throw new Error(`AI 提供商 id 非法或规范化后重名：${rawId}`);
+    }
+    seenKeys.add(providerKey);
+    const baseUrl = readEnvText(environment, `AI_PROVIDER_${providerKey}_BASE_URL`);
+    if (!baseUrl) throw new Error(`AI 提供商 ${rawId} 缺少 AI_PROVIDER_${providerKey}_BASE_URL`);
+    const apiKey = readEnvText(environment, `AI_PROVIDER_${providerKey}_API_KEY`);
+    if (!apiKey) throw new Error(`AI 提供商 ${rawId} 缺少 AI_PROVIDER_${providerKey}_API_KEY`);
+    const modelIds = readEnvList(environment, `AI_PROVIDER_${providerKey}_MODELS`);
+    if (modelIds.length === 0) throw new Error(`AI 提供商 ${rawId} 缺少 AI_PROVIDER_${providerKey}_MODELS（逗号分隔的模型 id）`);
+    const quotaGroup = readEnvText(environment, `AI_PROVIDER_${providerKey}_QUOTA_GROUP`);
+    const providerLimits = readEnvLimits(environment, `AI_PROVIDER_${providerKey}`);
+    return {
+      id: rawId,
+      baseUrl,
+      apiKey,
+      ...(quotaGroup !== undefined ? { quotaGroup } : {}),
+      ...(providerLimits !== undefined ? { limits: providerLimits } : {}),
+      models: modelIds.map((modelId, index) => buildEnvModel(environment, providerKey, modelId, index)),
+    };
+  });
+  const quotaGroupIds = readEnvList(environment, 'AI_QUOTA_GROUPS');
+  const quotaGroups = quotaGroupIds.length === 0
+    ? undefined
+    : Object.fromEntries(quotaGroupIds.map(rawId => {
+      const groupKey = normalizeEnvKey(rawId);
+      return [rawId, readEnvLimits(environment, `AI_QUOTA_GROUP_${groupKey}`) ?? {}];
+    }));
+  const scheduling = readEnvSection(environment, SCHEDULING_FIELDS);
+  const batching = readEnvSection(environment, BATCHING_FIELDS);
+  const config = validateAiConfig({
+    providers,
+    ...(scheduling !== undefined ? { scheduling } : {}),
+    ...(quotaGroups !== undefined ? { quotaGroups } : {}),
+    ...(batching !== undefined ? { batching } : {}),
+  });
+  loadedConfigs.set(cacheKey, config);
   return config;
 }
 

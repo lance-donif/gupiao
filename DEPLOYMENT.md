@@ -65,19 +65,23 @@ The additional service is enabled at boot; its source is in `scripts/`.
 
 ## AI configuration
 
-Copy `backend/ai-config.example.json` to `backend/tmp/ai-config.json` and fill
-in the providers' API prefixes, keys, and ordered model lists. The existing
-`backend/tmp:/app/tmp` mount exposes it to the API container. Set
-`AI_CONFIG_FILE=tmp/ai-config.json` in the VPS `.env`, then recreate the API
-container. Subsequent JSON edits require restarting the API process. Every AI
-function shares this list and moves to the next model on a request/output
-failure; exhaustion stops the workflow. Old `LLM_SMART_*` / `OPENAI_*` AI
-credentials are no longer read. Keep the real JSON file private and out of Git.
+AI 只读根目录 `.env`（模板与字段说明见 `.env.example`，注释为中文）。
+提供商用 `AI_PROVIDER_IDS` 列出（逗号分隔，顺序即优先级），每个提供商按
+`AI_PROVIDER_<ID大写>_BASE_URL/_API_KEY/_MODELS` 填写，模型级超时/参数/限流用
+`AI_PROVIDER_<ID大写>_MODEL_<序号>_*` 覆盖，全局调度用 `AI_SCHEDULING_*`，批量打包用
+`AI_BATCHING_*`，配额组用 `AI_QUOTA_GROUPS` + `AI_QUOTA_GROUP_<组名>_*`。子目录不再存放
+任何配置文件（`backend/ai-config.*.json` / `backend/.env` 已删除，`AI_CONFIG_FILE` 不再读取）。
+改完 `.env` 后重建 API 容器。Every AI function shares this list and moves to the next
+model on a request/output failure; exhaustion stops the workflow. Old `LLM_SMART_*` /
+`OPENAI_*` AI credentials are no longer read. Keep the real `.env` private and out of Git.
 
-AI 环境变量（VPS `.env`）：
+AI 环境变量（VPS `.env`，完整字段见 `.env.example`）：
 
 ```sh
-AI_CONFIG_FILE=tmp/ai-config.json
+AI_PROVIDER_IDS=deepseek-official,grok-heavy
+AI_PROVIDER_DEEPSEEK_OFFICIAL_BASE_URL=https://api.deepseek.com
+AI_PROVIDER_DEEPSEEK_OFFICIAL_API_KEY=<secret>
+AI_PROVIDER_DEEPSEEK_OFFICIAL_MODELS=deepseek-flash
 CAUSAL_SIGNAL_EXTRACTOR=llm
 CAUSAL_PROTOCOL_MODE=items
 SCORING_RECIPE=event-v2

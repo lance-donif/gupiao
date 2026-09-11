@@ -1,21 +1,24 @@
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CausalSignalExtractionService, createCausalSignalExtractorFromEnv } from '../../../src/services/causal-signal-extraction-service.js';
 import { AiStockKeywordGenerationService, createAiStockKeywordRequesterFromEnv } from '../../../src/services/ai-stock-keyword-generation-service.js';
 import { createFriendNetworkLlmAiAdapterFromEnv } from '../../../src/services/friend-network-llm-ai-adapter.js';
 import { createExposureCandidateExtractorFromEnv } from '../../../src/services/limitup-evidence-initialization.js';
 
-const dirs: string[] = [];
-const providers = [1, 2, 3].map(i => ({ id: `p${i}`, baseUrl: `https://p${i}.example/v1`, apiKey: `test-secret-${i}`, models: [{ id: 'm1' }, { id: 'm2' }] }));
 function environment(reverse = false): NodeJS.ProcessEnv {
-  const dir = mkdtempSync(path.join(tmpdir(), 'gupiao-ai-routing-')); dirs.push(dir);
-  const file = path.join(dir, 'ai.json');
-  writeFileSync(file, JSON.stringify({ providers: reverse ? [...providers].reverse() : providers }));
-  return { AI_CONFIG_FILE: file, CAUSAL_SIGNAL_EXTRACTOR: 'llm', LLM_SMART_MODEL: 'ignored', LLM_SMART_API_KEY: 'ignored', OPENAI_MODEL: 'ignored', OPENAI_API_KEY: 'ignored' };
+  const order = reverse ? [3, 2, 1] : [1, 2, 3];
+  const env: NodeJS.ProcessEnv = {
+    AI_PROVIDER_IDS: order.map(i => `p${i}`).join(','),
+    CAUSAL_SIGNAL_EXTRACTOR: 'llm',
+    LLM_SMART_API_KEY: 'ignored',
+  };
+  for (const i of [1, 2, 3]) {
+    env[`AI_PROVIDER_P${i}_BASE_URL`] = `https://p${i}.example/v1`;
+    env[`AI_PROVIDER_P${i}_API_KEY`] = `test-secret-${i}`;
+    env[`AI_PROVIDER_P${i}_MODELS`] = 'm1,m2';
+  }
+  return env;
 }
-afterEach(() => { vi.unstubAllGlobals(); dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true })); });
+afterEach(() => { vi.unstubAllGlobals(); });
 const asOf = new Date('2026-06-01T12:00:00Z');
 const news = { id: 'n1', title: '白银库存下降', content: '白银库存下降，供给不足。', source: 'test', publishedAt: new Date('2026-06-01T08:00:00Z') };
 const input = { traceId: 'trace-1', asOf, clusterKey: 'global', news: [news] };
