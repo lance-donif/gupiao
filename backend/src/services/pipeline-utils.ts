@@ -222,6 +222,19 @@ export const getOptionalPositiveInteger = (
   return parsed;
 };
 
+export const isAktoolsNewsEnabled = (
+  args: Readonly<Record<string, string>>,
+): boolean => {
+  const raw = args['news-aktools'] ?? process.env.NEWS_ENABLE_AKTOOLS ?? 'true';
+  if (raw === 'true') {
+    return true;
+  }
+  if (raw === 'false') {
+    return false;
+  }
+  throw new Error(`Invalid --news-aktools/NEWS_ENABLE_AKTOOLS: ${raw}. Supported values: true, false`);
+};
+
 export const getNewsSourceMode = (
   args: Readonly<Record<string, string>>,
 ): PublicNewsSourceMode => {
@@ -533,15 +546,24 @@ export const resolveNewsInput = async (
 
   try {
     const bucketKey = buildBeijingMinuteBucketKey(asOf, NEWS_FETCH_CACHE_BUCKET_MINUTES);
+    // AKTools 新闻源尽力而为：挂掉/为空只记 summary，不中断链路（主源仍是 newsnow）。
+    const aktoolsPromise = isAktoolsNewsEnabled(args)
+      ? resolveAkToolsNewsWithCache(prisma, traceId, clusterKey, asOf, bucketKey).catch((error: unknown) => ({
+        articles: [] as readonly IDailyArticle[],
+        summary: { unavailable: error instanceof Error ? error.message : String(error) },
+        cacheHit: false,
+      }))
+      : Promise.resolve({
+        articles: [] as readonly IDailyArticle[],
+        summary: { disabled: true },
+        cacheHit: false,
+      });
     const [aktoolsResult, newsNowResult, publicNewsResult] = await Promise.all([
-      resolveAkToolsNewsWithCache(prisma, traceId, clusterKey, asOf, bucketKey),
+      aktoolsPromise,
       resolveNewsNowWithCache(prisma, traceId, clusterKey, asOf, bucketKey),
       resolvePublicNewsWithCache(prisma, args, traceId, clusterKey, asOf, bucketKey),
     ]);
 
-    if (aktoolsResult.articles.length === 0) {
-      throw new Error('AKTools 获取结果为空');
-    }
     if (newsNowResult.articles.length === 0) {
       throw new Error('NewsNow 获取结果为空');
     }
@@ -553,8 +575,8 @@ export const resolveNewsInput = async (
         cachePolicy: {
           bucketKey,
           ttlMinutes: NEWS_FETCH_CACHE_BUCKET_MINUTES,
-          requiredSources: ['aktools', 'newsnow'],
-          optionalSources: ['sina-finance-roll', 'sina-rss', 'google-news-rss'],
+          requiredSources: ['newsnow'],
+          optionalSources: ['aktools', 'sina-finance-roll', 'sina-rss', 'google-news-rss'],
           newsSourceMode: getNewsSourceMode(args),
         },
         aktools: aktoolsResult.summary,

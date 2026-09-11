@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildYahooChartDateRange,
+  convertToSinaSymbol,
   convertToYahooSymbol,
   createConsecutiveFailureBreaker,
   extractHistTradingDays,
@@ -9,8 +10,10 @@ import {
   fetchRowsWithFallback,
   filterRowsToMissingTradingDays,
   isTransportErrorMessage,
+  mapSinaSpotRowsToCandleRows,
   mapSpotPayloadToCandleRows,
   mapYahooChartQuotesToRows,
+  parseSinaSpotLine,
   parseYYYYMMDD,
   selectStocksNeedingSync,
   withFetchTimeout,
@@ -267,5 +270,46 @@ describe('provider breaker', () => {
   it('withFetchTimeout resolves fast tasks and rejects hanging ones', async () => {
     await expect(withFetchTimeout(async () => 42, 1000)).resolves.toBe(42);
     await expect(withFetchTimeout(() => new Promise<number>(() => {}), 20)).rejects.toThrow(/fetch_timeout_after_20ms/);
+  });
+});
+
+describe('sina spot helpers', () => {
+  it('maps A-share symbols to sina format', () => {
+    expect(convertToSinaSymbol('600519')).toBe('sh600519');
+    expect(convertToSinaSymbol('688001')).toBe('sh688001');
+    expect(convertToSinaSymbol('000001')).toBe('sz000001');
+    expect(convertToSinaSymbol('300750')).toBe('sz300750');
+    expect(convertToSinaSymbol('920193')).toBeNull();
+  });
+
+  it('parses sina quote lines and rejects suspended/garbage lines', () => {
+    const row = parseSinaSpotLine('var hq_str_sh600519="贵州茅台,1820.00,1815.00,1825.50,1830.00,1818.00,1825.40,1825.60,12345,224567890.00,100,1825.00,200,1824.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-09-11,15:00:00,00";');
+    expect(row).toMatchObject({
+      symbol: 'sh600519', open: 1820, close: 1825.5, high: 1830, low: 1818, volumeHands: 12345,
+    });
+    expect(parseSinaSpotLine('var hq_str_sz000001="平安银行,0.00,12.00,0.00,0.00,0.00,0,0,0,0.00,,,,,,,,,,,,,,,,,,,,2026-09-11,15:00:00,00";')).toBeNull();
+    expect(parseSinaSpotLine('garbage')).toBeNull();
+    expect(parseSinaSpotLine('var hq_str_sh600519="short";')).toBeNull();
+  });
+
+  it('maps sina rows to candles with volume converted from hands to shares', () => {
+    const stocksBySymbol = new Map([
+      ['600519', { id: 'stock-1', symbol: '600519' }],
+    ]);
+    const rows = mapSinaSpotRowsToCandleRows(stocksBySymbol, [
+      {
+        symbol: 'sh600519', open: 1820, high: 1830, low: 1818, close: 1825.5,
+        prevClose: 1815, volumeHands: 12345, date: '2026-09-11', time: '15:00:00',
+      },
+      {
+        symbol: 'sz999999', open: 1, high: 2, low: 1, close: 2,
+        prevClose: 1, volumeHands: 100, date: '2026-09-11', time: '15:00:00',
+      },
+    ], parseYYYYMMDD('20260911'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      stockId: 'stock-1', open: 1820, high: 1830, low: 1818, close: 1825.5, volume: 1234500n,
+    });
+    expect(rows[0]?.tradingDay.toISOString()).toBe('2026-09-11T00:00:00.000Z');
   });
 });

@@ -197,7 +197,9 @@ const resolveOptions = (): ISyncOptions => {
     ),
     yahooFallback: parseBoolean(
       args['yahoo-fallback'] ?? process.env.STOCK_HISTORY_YAHOO_FALLBACK,
-      false,
+      // 默认开启：AKTools 不可用时逐只回退 Yahoo，保证链路不被单一行情源卡死；
+      // 行情部分缺失可接受（只影响覆盖率），与 LLM 零降级红线无关。
+      true,
       'STOCK_HISTORY_YAHOO_FALLBACK',
     ),
     breakerThreshold: parsePositiveInteger(
@@ -389,6 +391,147 @@ const toPositiveFiniteNumber = (value: unknown): number | null => {
 // 批量快照映射：与逐只 hist（adjust=qfq）语义对齐——前复权下最新交易日的
 // OHLC 等于原始值；成交量两侧单位均为手。停牌股（量为 0/缺失）会被剔除，
 // 交由逐只回补路径处理（hist 无该日行即不入库，与旧行为一致）。
+export const convertToSinaSymbol = (symbol: string): string | null => {
+  if (/^(60|68|90)\d{4}$/.test(symbol)) {
+    return `sh${symbol}`;
+  }
+  if (/^(00|30|20)\d{4}$/.test(symbol)) {
+    return `sz${symbol}`;
+  }
+  return null;
+};
+
+export interface ISinaSpotRow {
+  readonly symbol: string;
+  readonly open: number;
+  readonly high: number;
+  readonly low: number;
+  readonly close: number;
+  readonly prevClose: number;
+  readonly volumeHands: number;
+  readonly date: string;
+  readonly time: string;
+}
+
+const SINA_BATCH_SIZE = 100;
+const SINA_CONCURRENCY = 8;
+const SINA_FETCH_TIMEOUT_MS = 20000;
+
+/** 解析单行 hq.sinajs.cn 返回：var hq_str_sh600519="名字,今开,昨收,最新价,最高,最低,...,成交量(手),成交额,...,日期,时间"; */
+export const parseSinaSpotLine = (line: string): ISinaSpotRow | null => {
+  const match = line.match(/^var hq_str_([a-z]{2}\d{6})="([^"]*)";?\s*$/);
+  if (!match?.[1] || match[2] === undefined) {
+    return null;
+  }
+  const fields = match[2].split(',');
+  if (fields.length < 32) {
+    return null;
+  }
+  const open = Number(fields[1]);
+  const prevClose = Number(fields[2]);
+  const close = Number(fields[3]);
+  const high = Number(fields[4]);
+  const low = Number(fields[5]);
+  const volumeHands = Number(fields[8]);
+  if (![open, high, low, close].every(value => Number.isFinite(value) && value > 0)) {
+    return null;
+  }
+  if (!Number.isFinite(volumeHands) || volumeHands < 0) {
+    return null;
+  }
+  return {
+    symbol: match[1],
+    open,
+    high,
+    low,
+    close,
+    prevClose,
+    volumeHands,
+    date: fields[30] ?? '',
+    time: fields[31] ?? '',
+  };
+};
+
+export const mapSinaSpotRowsToCandleRows = (
+  stocksBySymbol: ReadonlyMap<string, IStockHistoryStock>,
+  rows: readonly ISinaSpotRow[],
+  tradingDay: Date,
+): ICandleWriteRow[] => {
+  const sinaToStock = new Map<string, IStockHistoryStock>();
+  for (const stock of stocksBySymbol.values()) {
+    const sinaSymbol = convertToSinaSymbol(stock.symbol);
+    if (sinaSymbol !== null) {
+      sinaToStock.set(sinaSymbol, stock);
+    }
+  }
+  const seen = new Set<string>();
+  const out: ICandleWriteRow[] = [];
+  for (const row of rows) {
+    const stock = sinaToStock.get(row.symbol);
+    if (!stock || seen.has(stock.id)) {
+      continue;
+    }
+    seen.add(stock.id);
+    out.push({
+      stockId: stock.id,
+      tradingDay,
+      open: row.open,
+      high: row.high,
+      low: row.low,
+      close: row.close,
+      // 新浪成交量单位为手，统一换算为股。
+      volume: BigInt(Math.trunc(row.volumeHands * 100)),
+    });
+  }
+  return out;
+};
+
+const chunkArray = <T>(items: readonly T[], size: number): T[][] => {
+  const out: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    out.push(items.slice(index, index + size));
+  }
+  return out;
+};
+
+const fetchSinaSpotBatch = async (symbols: readonly string[]): Promise<readonly ISinaSpotRow[]> => {
+  const url = `https://hq.sinajs.cn/list=${symbols.join(',')}`;
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(SINA_FETCH_TIMEOUT_MS),
+    headers: { Referer: 'https://finance.sina.com.cn' },
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const buffer = await response.arrayBuffer();
+  let text: string;
+  try {
+    text = new TextDecoder('gbk').decode(buffer);
+  }
+  catch {
+    text = new TextDecoder().decode(buffer);
+  }
+  return text.split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .map(parseSinaSpotLine)
+    .filter((row): row is ISinaSpotRow => row !== null);
+};
+
+const fetchSinaSpotPayload = async (
+  stocks: readonly IStockHistoryStock[],
+): Promise<readonly ISinaSpotRow[]> => {
+  const symbols = stocks
+    .map(stock => convertToSinaSymbol(stock.symbol))
+    .filter((symbol): symbol is string => symbol !== null);
+  if (symbols.length === 0) {
+    throw new Error('empty_result');
+  }
+  const batches = chunkArray(symbols, SINA_BATCH_SIZE);
+  const results = await asyncPool(SINA_CONCURRENCY, batches, fetchSinaSpotBatch);
+  return results.flat();
+};
+
 export const mapSpotPayloadToCandleRows = (
   stocksBySymbol: ReadonlyMap<string, IStockHistoryStock>,
   payload: readonly IAkSpotRow[],
@@ -852,13 +995,26 @@ async function main(): Promise<void> {
         console.log('历史缺口: 无（仅需最新交易日快照）。');
       }
 
-      console.log(`拉取全市场快照 stock_zh_a_spot_em（${spotDay}）...`);
+      console.log(`拉取全市场快照（${spotDay}）：新浪优先，失败回退 AKTools spot_em...`);
       const stocksBySymbol = new Map(stocks.map(stock => [stock.symbol, stock]));
-      const spotRows = mapSpotPayloadToCandleRows(
-        stocksBySymbol,
-        await fetchSpotPayload(),
-        parseYYYYMMDD(spotDay),
-      );
+      let spotRows: ICandleWriteRow[];
+      try {
+        const sinaRows = await fetchSinaSpotPayload(stocks);
+        spotRows = mapSinaSpotRowsToCandleRows(stocksBySymbol, sinaRows, parseYYYYMMDD(spotDay));
+        if (spotRows.length === 0) {
+          throw new Error('empty_result');
+        }
+        console.log(`快照来源: 新浪 ${spotRows.length} 只。`);
+      }
+      catch (error) {
+        console.log(`新浪快照失败，回退 AKTools spot_em: ${getErrorMessage(error)}`);
+        spotRows = mapSpotPayloadToCandleRows(
+          stocksBySymbol,
+          await fetchSpotPayload(),
+          parseYYYYMMDD(spotDay),
+        );
+        console.log(`快照来源: AKTools ${spotRows.length} 只。`);
+      }
       const spotRowByStockId = new Map(spotRows.map(row => [row.stockId, row]));
       let spotInserted = 0;
       for (const [stockId, row] of spotRowByStockId) {
