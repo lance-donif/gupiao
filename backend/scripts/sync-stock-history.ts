@@ -23,7 +23,7 @@ const PROBE_SYMBOLS: readonly string[] = ['600519', '000001'];
 const FAILURE_SAMPLE_LIMIT = 100;
 
 type StockHistoryMode = 'incremental' | 'yahoo-backfill-missing';
-type CandleProvider = 'aktools' | 'yahoo' | 'none';
+type CandleProvider = 'aktools' | 'yahoo' | 'sina' | 'none';
 
 interface IAkCandle {
   readonly 日期: string;
@@ -1070,6 +1070,7 @@ async function main(): Promise<void> {
       console.log(`拉取全市场快照（${spotDay}）：新浪优先，失败回退 AKTools spot_em...`);
       const stocksBySymbol = new Map(stocks.map(stock => [stock.symbol, stock]));
       let spotRows: ICandleWriteRow[];
+      let spotProvider: CandleProvider = 'aktools';
       try {
         // 分批内部已自带重试+容错，这里直接拉一次即可。
         const sinaRows = await fetchSinaSpotPayload(stocks);
@@ -1077,6 +1078,7 @@ async function main(): Promise<void> {
         if (spotRows.length === 0) {
           throw new Error('empty_result');
         }
+        spotProvider = 'sina';
         console.log(`快照来源: 新浪 ${spotRows.length} 只。`);
       }
       catch (error) {
@@ -1105,7 +1107,7 @@ async function main(): Promise<void> {
         }
         out.push({
           symbol: stockById.get(stockId)?.symbol ?? stockId,
-          provider: 'aktools',
+          provider: spotProvider,
           fetchedRows: 1,
           insertedRows: already ? 0 : 1,
           skippedExistingRows: already ? 1 : 0,
@@ -1147,7 +1149,7 @@ async function main(): Promise<void> {
     const providerCounts = results.reduce<Record<CandleProvider, number>>((counts, result) => {
       counts[result.provider] += 1;
       return counts;
-    }, { aktools: 0, yahoo: 0, none: 0 });
+    }, { aktools: 0, yahoo: 0, sina: 0, none: 0 });
     const failed = results.filter(result => result.provider === 'none');
     const skippedExistingRows = results.reduce((sum, result) => sum + result.skippedExistingRows, 0);
     const fetchedRows = results.reduce((sum, result) => sum + result.fetchedRows, 0);
@@ -1156,6 +1158,7 @@ async function main(): Promise<void> {
     console.log('\n行情同步完成：');
     console.log(`  AKTools 成功: ${providerCounts.aktools} 只股票`);
     console.log(`  Yahoo 成功: ${providerCounts.yahoo} 只股票`);
+    console.log(`  新浪成功: ${providerCounts.sina} 只股票`);
     console.log(`  失败: ${failed.length} 只股票`);
     console.log(`  拉取 K 线数: ${fetchedRows}`);
     console.log(`  跳过已存在 K 线数: ${skippedExistingRows}`);
