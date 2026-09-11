@@ -94,6 +94,8 @@ export interface IFetchRowsWithFallbackInput {
   readonly startDate: string;
   readonly endDate: string;
   readonly enableYahooFallback: boolean;
+  /** false=本轮已确认 AKTools 不可用，直接走 Yahoo，不浪费重试时间。缺省 true（老行为）。 */
+  readonly enableAktools?: boolean;
   readonly maxRetries: number;
   readonly aktoolsFetcher: StockHistoryFetcher;
   readonly yahooFetcher: StockHistoryFetcher;
@@ -692,6 +694,40 @@ const fetchSpotPayload = async (): Promise<readonly IAkSpotRow[]> => {
   return payload as readonly IAkSpotRow[];
 };
 
+/** 新浪快照日期推导交易日：AKTools 探针全挂时的日历兜底（只取最新一个交易日）。 */
+export const pickSinaSpotDay = (
+  rows: readonly ISinaSpotRow[],
+  startDate: string,
+  endDate: string,
+): string => {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const key = row.date.replaceAll('-', '');
+    if (!/^\d{8}$/.test(key)) {
+      continue;
+    }
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let best = '';
+  let bestCount = 0;
+  for (const [day, count] of counts) {
+    if (count > bestCount) {
+      best = day;
+      bestCount = count;
+    }
+  }
+  if (!best || best < startDate || best > endDate) {
+    throw new Error(`sina_spot_day_out_of_range: ${best || 'none'}`);
+  }
+  return best;
+};
+
+const discoverSinaTradingDay = async (startDate: string, endDate: string): Promise<string[]> => {
+  const symbols = PROBE_SYMBOLS.map(convertToSinaSymbol).filter((symbol): symbol is string => symbol !== null);
+  const rows = await fetchSinaSpotBatch(symbols);
+  return [pickSinaSpotDay(rows, startDate, endDate)];
+};
+
 const discoverTradingDays = async (startDate: string, endDate: string): Promise<string[]> => {
   const days = new Set<string>();
   await Promise.all(PROBE_SYMBOLS.map(async (symbol) => {
@@ -739,18 +775,23 @@ export const fetchRowsWithFallback = async (
   input: IFetchRowsWithFallbackInput,
 ): Promise<IFetchRowsWithFallbackResult> => {
   let aktoolsError: string | undefined;
-  try {
-    const rows = await fetchWithRetries(async () => {
-      const fetchedRows = await input.aktoolsFetcher(input.stock, input.startDate, input.endDate);
-      if (fetchedRows.length === 0) {
-        throw new Error('empty_result');
-      }
-      return fetchedRows;
-    }, input.maxRetries);
-    return { provider: 'aktools', rows };
+  if (input.enableAktools !== false) {
+    try {
+      const rows = await fetchWithRetries(async () => {
+        const fetchedRows = await input.aktoolsFetcher(input.stock, input.startDate, input.endDate);
+        if (fetchedRows.length === 0) {
+          throw new Error('empty_result');
+        }
+        return fetchedRows;
+      }, input.maxRetries);
+      return { provider: 'aktools', rows };
+    }
+    catch (error) {
+      aktoolsError = getErrorMessage(error);
+    }
   }
-  catch (error) {
-    aktoolsError = getErrorMessage(error);
+  else {
+    aktoolsError = 'skipped_dead_provider';
   }
 
   if (!input.enableYahooFallback) {
@@ -879,6 +920,19 @@ async function main(): Promise<void> {
 
     console.log('开始同步行情...');
     const startTime = Date.now();
+    // 单次存活探针：AKTools 已死则本轮跳过所有 AKTools 请求（省掉逐只重试的数小时空转）。
+    const aktoolsAlive = options.mode === 'incremental'
+      ? await (async (): Promise<boolean> => {
+        try {
+          await fetchAkToolsHistPayload(PROBE_SYMBOLS[0] ?? '600519', endDate, endDate);
+          return true;
+        }
+        catch {
+          return false;
+        }
+      })()
+      : true;
+    console.log(`AKTools 可用性: ${aktoolsAlive ? 'alive' : 'dead（本轮跳过 AKTools 请求）'}。`);
     let processed = 0;
     let processedTotal = pendingStocks.length;
     const breaker = createConsecutiveFailureBreaker(options.breakerThreshold);
@@ -900,6 +954,7 @@ async function main(): Promise<void> {
               startDate: rangeStart,
               endDate: rangeEnd,
               enableYahooFallback: options.yahooFallback,
+              enableAktools: aktoolsAlive,
               maxRetries: options.maxRetries,
               aktoolsFetcher: fetchAkToolsRows,
               yahooFetcher: fetchYahooRows,
@@ -976,7 +1031,14 @@ async function main(): Promise<void> {
     // 增量快车道：最新交易日用 1 次全市场快照覆盖，历史缺口才逐只回补。
     // 调度在收盘后运行，快照即当日定稿；前复权下最新日 OHLC 与 hist 一致。
     const runIncrementalSpotPath = async (): Promise<IStockSyncResult[]> => {
-      const tradingDays = await discoverTradingDays(startDate, endDate);
+      let tradingDays: string[];
+      try {
+        tradingDays = await discoverTradingDays(startDate, endDate);
+      }
+      catch (error) {
+        console.log(`AKTools 日历失败，改用新浪快照日期: ${getErrorMessage(error)}`);
+        tradingDays = await discoverSinaTradingDay(startDate, endDate);
+      }
       const spotDay = tradingDays[tradingDays.length - 1] as string;
       const histEnd = addDaysToYYYYMMDD(spotDay, -1);
       const histDays = tradingDays.filter(day => day <= histEnd);
@@ -1007,6 +1069,10 @@ async function main(): Promise<void> {
         console.log(`快照来源: 新浪 ${spotRows.length} 只。`);
       }
       catch (error) {
+        // AKTools 已确认死亡时不再回退 AKTools spot：直接抛给逐只 Yahoo 回补。
+        if (!aktoolsAlive) {
+          throw error;
+        }
         console.log(`新浪快照失败，回退 AKTools spot_em: ${getErrorMessage(error)}`);
         spotRows = mapSpotPayloadToCandleRows(
           stocksBySymbol,

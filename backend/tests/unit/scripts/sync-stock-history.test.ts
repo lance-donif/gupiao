@@ -15,6 +15,7 @@ import {
   mapYahooChartQuotesToRows,
   parseSinaSpotLine,
   parseYYYYMMDD,
+  pickSinaSpotDay,
   selectStocksNeedingSync,
   withFetchTimeout,
   type IStockHistoryStock,
@@ -142,6 +143,40 @@ describe('fetchRowsWithFallback', () => {
     expect(result.aktoolsError).toContain('HTTP 502');
   });
 
+  it('skips AKTools entirely when enableAktools is false', async () => {
+    const calls: string[] = [];
+    const result = await fetchRowsWithFallback({
+      stock,
+      startDate: '20260707',
+      endDate: '20260707',
+      enableYahooFallback: true,
+      enableAktools: false,
+      maxRetries: 0,
+      aktoolsFetcher: async () => {
+        calls.push('aktools');
+        throw new Error('should not be called');
+      },
+      yahooFetcher: async () => {
+        calls.push('yahoo');
+        return [
+          {
+            stockId: 'stock-1',
+            tradingDay: parseYYYYMMDD('20260707'),
+            open: 10,
+            high: 11,
+            low: 9,
+            close: 10.5,
+            volume: 1000n,
+          },
+        ];
+      },
+    });
+
+    expect(calls).toEqual(['yahoo']);
+    expect(result.provider).toBe('yahoo');
+    expect(result.aktoolsError).toBe('skipped_dead_provider');
+  });
+
   it('falls back to Yahoo when AKTools returns an empty array', async () => {
     const result = await fetchRowsWithFallback({
       stock,
@@ -165,6 +200,30 @@ describe('fetchRowsWithFallback', () => {
 
     expect(result.provider).toBe('yahoo');
     expect(result.aktoolsError).toBe('empty_result');
+  });
+});
+
+describe('pickSinaSpotDay', () => {
+  const row = (date: string) => ({
+    symbol: 'sh600519', open: 10, high: 11, low: 9, close: 10.5,
+    prevClose: 10, volumeHands: 100, date, time: '15:00:00',
+  });
+
+  it('picks the majority date within range', () => {
+    expect(pickSinaSpotDay(
+      [row('2026-09-11'), row('2026-09-11'), row('2026-09-10')],
+      '20260901',
+      '20260911',
+    )).toBe('20260911');
+  });
+
+  it('rejects out-of-range or garbage dates', () => {
+    expect(() => pickSinaSpotDay([row('2026-09-10')], '20260911', '20260911'))
+      .toThrow(/sina_spot_day_out_of_range/);
+    expect(() => pickSinaSpotDay([row('nodate')], '20260901', '20260911'))
+      .toThrow(/sina_spot_day_out_of_range/);
+    expect(() => pickSinaSpotDay([], '20260901', '20260911'))
+      .toThrow(/sina_spot_day_out_of_range/);
   });
 });
 
