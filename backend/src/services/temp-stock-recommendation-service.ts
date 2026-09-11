@@ -77,6 +77,8 @@ export interface ITempRecommendationSelectionDiagnostics {
   readonly topDiversityCount: number;
   readonly supplementalCandidateCount: number;
   readonly supplementalSelectedCount: number;
+  readonly distinctIndustryCount: number;
+  readonly minIndustriesTarget: number;
   readonly shortfallReasons: readonly string[];
 }
 
@@ -111,6 +113,8 @@ const INDUSTRY_MOMENTUM_PENALTY_THRESHOLD = -0.05;
 const INDUSTRY_MOMENTUM_PENALTY_MIN_FACTOR = 0.3;
 // ponytail: 前 N 名按 industry 强制去重，避免单一行业占满榜单顶部。升级路径：若需要按更细粒度（概念板块）去重，可改为接受 key resolver。
 const DEFAULT_TOP_DIVERSITY_COUNT = 5;
+/** 行业下限：每次推荐至少覆盖的不同行业数（可用候选不足时输出原因，不硬凑）。 */
+const DEFAULT_MIN_INDUSTRIES = 10;
 const FALLBACK_INDUSTRY = '未归类';
 const MARKET_BREADTH_BEAR_THRESHOLD = 0.25;
 const MARKET_BREADTH_BULL_THRESHOLD = 0.40;
@@ -254,8 +258,10 @@ const buildShortfallReasons = (input: {
   readonly topDiversityCount: number;
   readonly supplementalCandidateCount: number;
   readonly supplementalSelectedCount: number;
+  readonly distinctIndustryCount: number;
+  readonly minIndustriesTarget: number;
 }): readonly string[] => {
-  if (input.selectedCount >= input.limit) {
+  if (input.selectedCount >= input.limit && input.distinctIndustryCount >= input.minIndustriesTarget) {
     return [];
   }
 
@@ -281,6 +287,10 @@ const buildShortfallReasons = (input: {
 
   if (input.skippedByTopDiversity > 0) {
     reasons.push(`推荐不足：前 ${input.topDiversityCount} 名行业多样化规则跳过 ${input.skippedByTopDiversity} 只同行业候选，未用无证据股票硬凑`);
+  }
+
+  if (input.selectedCount > 0 && input.distinctIndustryCount < input.minIndustriesTarget) {
+    reasons.push(`行业覆盖不足：选中只有 ${input.distinctIndustryCount} 个行业，少于下限 ${input.minIndustriesTarget} 个，未用无证据股票硬凑`);
   }
 
   if (input.excludedByStockFilter > 0) {
@@ -1092,6 +1102,7 @@ export class TempRecommendationSelector {
     maxPerIndustry: number,
     _cooldownExclusions: IRecommendationCooldownExclusions = createEmptyCooldownExclusions(),
     topDiversityCount: number = DEFAULT_TOP_DIVERSITY_COUNT,
+    minIndustries: number = DEFAULT_MIN_INDUSTRIES,
   ): {
     readonly recommendations: readonly ITempStockRecommendation[];
     readonly diagnostics: Omit<ITempRecommendationSelectionDiagnostics, 'featureSnapshotCount'>;
@@ -1122,6 +1133,8 @@ export class TempRecommendationSelector {
     const signalTypeCounts = new Map<string, number>();
     const topDiversityIndustries = new Set<string>();
     const effectiveTopDiversity = Math.max(0, Math.min(topDiversityCount, limit));
+    // 行业下限目标：不超过 limit；名额不足 10 时有多少保几个
+    const industryFloorTarget = Math.max(0, Math.min(Math.trunc(minIndustries), limit));
     const selected: ITempStockRecommendation[] = [];
     const postponed: ITempStockRecommendation[] = [];
     let skippedBySignalTypeCap = 0;
@@ -1135,8 +1148,8 @@ export class TempRecommendationSelector {
         continue;
       }
 
-      // 前 N 名强制行业多样化：同行业的低分候选暂存，让位给后续不同行业候选
-      if (selected.length < effectiveTopDiversity) {
+      // 前 N 名强制行业多样化 + 行业下限：覆盖 industryFloorTarget 个不同行业之前，同行业候选暂存让路
+      if (selected.length < effectiveTopDiversity || topDiversityIndustries.size < industryFloorTarget) {
         const industryKey = resolveTopDiversityIndustryKey(recommendation);
         if (industryKey !== null && topDiversityIndustries.has(industryKey)) {
           postponed.push(recommendation);
@@ -1180,6 +1193,11 @@ export class TempRecommendationSelector {
     const uniqueSignalTypes = new Set(
       eligibleRecommendations.map(resolveRecommendationSignalType),
     ).size;
+    const distinctIndustryCount = new Set(
+      selected
+        .map(resolveTopDiversityIndustryKey)
+        .filter((key): key is string => key !== null),
+    ).size;
     const supplementalCandidateCount = 0;
     const supplementalSelectedCount = 0;
     const evidenceCandidateCount = eligibleRecommendations.length;
@@ -1201,6 +1219,8 @@ export class TempRecommendationSelector {
       skippedBySignalTypeCap,
       skippedByTopDiversity,
       topDiversityCount: effectiveTopDiversity,
+      distinctIndustryCount,
+      minIndustriesTarget: industryFloorTarget,
       supplementalCandidateCount,
       supplementalSelectedCount,
       shortfallReasons: buildShortfallReasons({
@@ -1220,6 +1240,8 @@ export class TempRecommendationSelector {
         skippedBySignalTypeCap,
         skippedByTopDiversity,
         topDiversityCount: effectiveTopDiversity,
+        distinctIndustryCount,
+        minIndustriesTarget: industryFloorTarget,
         supplementalCandidateCount,
         supplementalSelectedCount,
       }),
