@@ -529,8 +529,17 @@ const fetchSinaSpotPayload = async (
   if (symbols.length === 0) {
     throw new Error('empty_result');
   }
+  // 分批容错：单批失败（限流/TLS 抖动）只跳过该批，不丢整轮已拿到的行。
   const batches = chunkArray(symbols, SINA_BATCH_SIZE);
-  const results = await asyncPool(SINA_CONCURRENCY, batches, fetchSinaSpotBatch);
+  const results = await asyncPool(SINA_CONCURRENCY, batches, async (batch): Promise<readonly ISinaSpotRow[]> => {
+    try {
+      return await fetchWithRetries(() => fetchSinaSpotBatch(batch), 2);
+    }
+    catch (error) {
+      console.log(`新浪快照分批失败，已跳过 ${batch.length} 只: ${getErrorMessage(error)}`);
+      return [];
+    }
+  });
   return results.flat();
 };
 
@@ -1062,8 +1071,8 @@ async function main(): Promise<void> {
       const stocksBySymbol = new Map(stocks.map(stock => [stock.symbol, stock]));
       let spotRows: ICandleWriteRow[];
       try {
-        // 新浪偶发 TLS 握手失败，重试 2 次再回退。
-        const sinaRows = await fetchWithRetries(() => fetchSinaSpotPayload(stocks), 2);
+        // 分批内部已自带重试+容错，这里直接拉一次即可。
+        const sinaRows = await fetchSinaSpotPayload(stocks);
         spotRows = mapSinaSpotRowsToCandleRows(stocksBySymbol, sinaRows, parseYYYYMMDD(spotDay));
         if (spotRows.length === 0) {
           throw new Error('empty_result');
