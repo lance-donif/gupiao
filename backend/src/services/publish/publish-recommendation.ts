@@ -97,6 +97,18 @@ export async function publishRecommendation(
       });
     }
 
+    // 同 cluster + 同 asOf 只保留一条有效发布：不同 trace 重发同日结果时，
+    // 把之前所有未被取代的同口径记录一并指向新版本，避免双活快照。
+    await tx.recommendationPublish.updateMany({
+      where: {
+        clusterKey: input.clusterKey,
+        asOf: input.asOf,
+        supersededBy: null,
+        id: { not: created.id },
+      },
+      data: { supersededBy: created.id },
+    });
+
     // 兼容读路径：置 isPublished=true。
     await tx.recommendationSnapshot.updateMany({
       where: { traceId: input.traceId },

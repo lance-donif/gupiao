@@ -15,6 +15,9 @@ const DEFAULT_MAX_RETRIES = 2;
 const INSERT_BATCH_SIZE = 5000;
 const AKTOOLS_FETCH_TIMEOUT_MS = 20000;
 const AKTOOLS_SPOT_TIMEOUT_MS = 90000;
+// 传输层熔断阈值：连续 N 次传输错误（HTTP/超时/建连失败）直接整轮抛错退出，
+// 避免上游挂掉时数千只股票逐只空转数小时。empty_result 等业务性失败不计入。
+const DEFAULT_BREAKER_THRESHOLD = 20;
 // 交易日历探针：高流动性、极少停牌的基准股。任一返回即可确定区间内的真实交易日。
 const PROBE_SYMBOLS: readonly string[] = ['600519', '000001'];
 const FAILURE_SAMPLE_LIMIT = 100;
@@ -120,6 +123,7 @@ interface ISyncOptions {
   readonly yahooConcurrency: number;
   readonly maxRetries: number;
   readonly yahooFallback: boolean;
+  readonly breakerThreshold: number;
 }
 
 const parseArgs = (): Record<string, string> => {
@@ -196,8 +200,20 @@ const resolveOptions = (): ISyncOptions => {
       false,
       'STOCK_HISTORY_YAHOO_FALLBACK',
     ),
+    breakerThreshold: parsePositiveInteger(
+      args['breaker-threshold'] ?? process.env.STOCK_HISTORY_BREAKER_THRESHOLD,
+      DEFAULT_BREAKER_THRESHOLD,
+      'STOCK_HISTORY_BREAKER_THRESHOLD',
+    ),
   };
 };
+
+// Yahoo 单次 chart 请求超时：限流时 Yahoo 会挂起连接不返回，无超时会卡死整个 worker。
+const YAHOO_FETCH_TIMEOUT_MS = parsePositiveInteger(
+  process.env.STOCK_HISTORY_YAHOO_TIMEOUT_MS,
+  30000,
+  'STOCK_HISTORY_YAHOO_TIMEOUT_MS',
+);
 
 export const parseYYYYMMDD = (value: string): Date => {
   if (!/^\d{8}$/u.test(value)) {
@@ -432,6 +448,50 @@ async function asyncPool<T, R>(
   return Promise.all(ret);
 }
 
+export const AKTOOLS_BREAKER_TRIPPED = 'aktools_unavailable_fail_fast';
+
+/** 传输层错误（上游挂掉/限流掐连接）vs 业务性失败（停牌空结果等）的分类。 */
+export const isTransportErrorMessage = (message: string): boolean => {
+  return /HTTP \d{3}|timeout|fetch failed|socket|ECONN|EAI_AGAIN|certificate|TLS|network|closed unexpectedly|429|502|503|504/i.test(message);
+};
+
+export interface IConsecutiveFailureBreaker {
+  recordFailure: (transportError: boolean) => void;
+  recordSuccess: () => void;
+  shouldTrip: () => boolean;
+}
+
+/** 连续传输失败计数器：成功或业务性失败即清零，连续超阈值则整轮熔断。 */
+export const createConsecutiveFailureBreaker = (threshold: number): IConsecutiveFailureBreaker => {
+  let consecutiveTransportFailures = 0;
+  return {
+    recordFailure: (transportError: boolean): void => {
+      consecutiveTransportFailures = transportError ? consecutiveTransportFailures + 1 : 0;
+    },
+    recordSuccess: (): void => {
+      consecutiveTransportFailures = 0;
+    },
+    shouldTrip: (): boolean => consecutiveTransportFailures >= threshold,
+  };
+};
+
+export const withFetchTimeout = async <T>(task: () => Promise<T>, timeoutMs: number): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      task(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`fetch_timeout_after_${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  }
+  finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+};
+
 const getErrorMessage = (error: unknown): string => {
   return error instanceof Error ? error.message : String(error);
 };
@@ -525,10 +585,10 @@ const fetchYahooRows: StockHistoryFetcher = async (stock, startDate, endDate) =>
     throw new Error('unsupported_yahoo_symbol');
   }
   const client = await getYahooClient();
-  const result = await client.chart(yahooSymbol, {
+  const result = await withFetchTimeout(() => client.chart(yahooSymbol, {
     ...buildYahooChartDateRange(startDate, endDate),
     interval: '1d',
-  });
+  }), YAHOO_FETCH_TIMEOUT_MS);
   return mapYahooChartQuotesToRows(stock, result.quotes);
 };
 
@@ -639,7 +699,7 @@ async function main(): Promise<void> {
       : options.aktoolsConcurrency;
     console.log(`同步模式: ${options.mode}`);
     console.log(`同步区间: [${startDate} -> ${endDate}]`);
-    console.log(`并发: ${concurrency}, 重试: ${options.maxRetries}, Yahoo fallback: ${options.yahooFallback}`);
+    console.log(`并发: ${concurrency}, 重试: ${options.maxRetries}, Yahoo fallback: ${options.yahooFallback}, 熔断阈值: ${options.breakerThreshold}`);
 
     const existingDaysByStockId = await loadExistingTradingDays(prisma, startDate, endDate);
     const pendingStocks = selectStocksNeedingSync(stocks, existingDaysByStockId, startDate, endDate);
@@ -678,6 +738,7 @@ async function main(): Promise<void> {
     const startTime = Date.now();
     let processed = 0;
     let processedTotal = pendingStocks.length;
+    const breaker = createConsecutiveFailureBreaker(options.breakerThreshold);
 
     const syncOneStock = async (
       stock: IStockHistoryStock,
@@ -702,6 +763,11 @@ async function main(): Promise<void> {
             });
 
         if (fetchResult.provider === 'none') {
+          const failureMessage = `aktools=${fetchResult.aktoolsError ?? 'none'}; yahoo=${fetchResult.yahooError ?? 'none'}`;
+          breaker.recordFailure(isTransportErrorMessage(failureMessage));
+          if (breaker.shouldTrip()) {
+            throw new Error(`${AKTOOLS_BREAKER_TRIPPED}: consecutive transport failures >= ${options.breakerThreshold}, last=${failureMessage}`);
+          }
           return {
             symbol: stock.symbol,
             provider: 'none',
@@ -711,6 +777,7 @@ async function main(): Promise<void> {
             error: `aktools=${fetchResult.aktoolsError ?? 'none'}; yahoo=${fetchResult.yahooError ?? 'none'}`,
           };
         }
+        breaker.recordSuccess();
 
         const rowsToInsert = filterRowsToMissingTradingDays(fetchResult.rows, existingTradingDays);
         for (const row of rowsToInsert) {
@@ -728,6 +795,14 @@ async function main(): Promise<void> {
         };
       }
       catch (error) {
+        const message = getErrorMessage(error);
+        if (message.includes(AKTOOLS_BREAKER_TRIPPED)) {
+          throw error;
+        }
+        breaker.recordFailure(isTransportErrorMessage(message));
+        if (breaker.shouldTrip()) {
+          throw new Error(`${AKTOOLS_BREAKER_TRIPPED}: consecutive transport failures >= ${options.breakerThreshold}, last=${message}`);
+        }
         return {
           symbol: stock.symbol,
           provider: 'none',
@@ -822,6 +897,10 @@ async function main(): Promise<void> {
         results = await runIncrementalSpotPath();
       }
       catch (error) {
+        // 熔断意味着上游整体不可用：逐只回退只会重复撞墙，直接抛错让链路按契约中断。
+        if (getErrorMessage(error).includes(AKTOOLS_BREAKER_TRIPPED)) {
+          throw error;
+        }
         console.log(`批量快照路径失败，回退逐只同步: ${getErrorMessage(error)}`);
         results = await runPerStockPool(pendingStocks, startDate, endDate);
       }

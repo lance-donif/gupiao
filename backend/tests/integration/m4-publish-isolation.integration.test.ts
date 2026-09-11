@@ -285,6 +285,20 @@ describe.skipIf(!connection)('M4 原子发布 / 读取隔离 / 后处理拆分',
       const oldRow = await prisma.recommendationPublish.findFirst({ where: { publishVersion: v1?.publishVersion ?? 0 } });
       expect(oldRow?.supersededBy).not.toBeNull();
     });
+
+    it('同 asOf 不同 trace 重发会取代旧发布（不双活）', async () => {
+      await seedPublished('trace-old', '600001', 1);
+      const created = await publishRecommendation(prisma, {
+        traceId: 'trace-new', clusterKey: CLUSTER_KEY, asOf: AS_OF, auditStatus: 'pass', reason: 'rerun',
+      });
+      expect(created.reused).toBe(false);
+      const live = await prisma.recommendationPublish.findMany({
+        where: { clusterKey: CLUSTER_KEY, asOf: AS_OF, supersededBy: null },
+      });
+      expect(live.map(r => r.traceId)).toEqual(['trace-new']);
+      const latest = await getLatestPublish(prisma, { clusterKey: CLUSTER_KEY, asOf: AS_OF });
+      expect(latest?.traceId).toBe('trace-new');
+    });
   });
 
   // ============ 4. 重复发布幂等 ============

@@ -3,14 +3,17 @@ import { describe, expect, it } from 'vitest';
 import {
   buildYahooChartDateRange,
   convertToYahooSymbol,
+  createConsecutiveFailureBreaker,
   extractHistTradingDays,
   addDaysToYYYYMMDD,
   fetchRowsWithFallback,
   filterRowsToMissingTradingDays,
+  isTransportErrorMessage,
   mapSpotPayloadToCandleRows,
   mapYahooChartQuotesToRows,
   parseYYYYMMDD,
   selectStocksNeedingSync,
+  withFetchTimeout,
   type IStockHistoryStock,
 } from '../../../scripts/sync-stock-history.js';
 
@@ -230,5 +233,39 @@ describe('spot fast-path helpers', () => {
       volume: 1000n,
     });
     expect(rows[0]?.tradingDay.toISOString()).toBe('2026-07-07T00:00:00.000Z');
+  });
+});
+
+describe('provider breaker', () => {
+  it('classifies transport errors vs business failures', () => {
+    expect(isTransportErrorMessage('HTTP 500')).toBe(true);
+    expect(isTransportErrorMessage('fetch failed')).toBe(true);
+    expect(isTransportErrorMessage('The socket connection was closed unexpectedly')).toBe(true);
+    expect(isTransportErrorMessage('unknown certificate verification error')).toBe(true);
+    expect(isTransportErrorMessage('fetch_timeout_after_30000ms')).toBe(true);
+    expect(isTransportErrorMessage('empty_result')).toBe(false);
+    expect(isTransportErrorMessage('unsupported_yahoo_symbol')).toBe(false);
+    expect(isTransportErrorMessage('invalid_array_payload')).toBe(false);
+  });
+
+  it('trips after N consecutive transport failures and resets on success', () => {
+    const breaker = createConsecutiveFailureBreaker(3);
+    expect(breaker.shouldTrip()).toBe(false);
+    breaker.recordFailure(true);
+    breaker.recordFailure(true);
+    expect(breaker.shouldTrip()).toBe(false);
+    breaker.recordFailure(false);
+    expect(breaker.shouldTrip()).toBe(false);
+    breaker.recordFailure(true);
+    breaker.recordFailure(true);
+    breaker.recordFailure(true);
+    expect(breaker.shouldTrip()).toBe(true);
+    breaker.recordSuccess();
+    expect(breaker.shouldTrip()).toBe(false);
+  });
+
+  it('withFetchTimeout resolves fast tasks and rejects hanging ones', async () => {
+    await expect(withFetchTimeout(async () => 42, 1000)).resolves.toBe(42);
+    await expect(withFetchTimeout(() => new Promise<number>(() => {}), 20)).rejects.toThrow(/fetch_timeout_after_20ms/);
   });
 });
