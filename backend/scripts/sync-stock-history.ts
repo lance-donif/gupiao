@@ -724,7 +724,8 @@ export const pickSinaSpotDay = (
 
 const discoverSinaTradingDay = async (startDate: string, endDate: string): Promise<string[]> => {
   const symbols = PROBE_SYMBOLS.map(convertToSinaSymbol).filter((symbol): symbol is string => symbol !== null);
-  const rows = await fetchSinaSpotBatch(symbols);
+  // 新浪偶发 TLS 握手失败，重试 2 次再放弃。
+  const rows = await fetchWithRetries(() => fetchSinaSpotBatch(symbols), 2);
   return [pickSinaSpotDay(rows, startDate, endDate)];
 };
 
@@ -1061,7 +1062,8 @@ async function main(): Promise<void> {
       const stocksBySymbol = new Map(stocks.map(stock => [stock.symbol, stock]));
       let spotRows: ICandleWriteRow[];
       try {
-        const sinaRows = await fetchSinaSpotPayload(stocks);
+        // 新浪偶发 TLS 握手失败，重试 2 次再回退。
+        const sinaRows = await fetchWithRetries(() => fetchSinaSpotPayload(stocks), 2);
         spotRows = mapSinaSpotRowsToCandleRows(stocksBySymbol, sinaRows, parseYYYYMMDD(spotDay));
         if (spotRows.length === 0) {
           throw new Error('empty_result');
