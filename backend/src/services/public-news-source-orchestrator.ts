@@ -388,7 +388,7 @@ class RssNewsSourceAdapter implements IPublicNewsSourceAdapter {
 
     return {
       articles: articles
-        .filter(article => article.publishedAt <= input.asOf)
+        .filter(article => article.publishedAt.getTime() <= input.asOf.getTime())
         .slice(0, input.limit),
       summary: {
         feedCount: this.options.feeds.length,
@@ -439,7 +439,7 @@ class SinaFinanceRollSourceAdapter implements IPublicNewsSourceAdapter {
       });
       return {
         articles: articles
-          .filter(article => article.publishedAt <= input.asOf)
+          .filter(article => article.publishedAt.getTime() <= input.asOf.getTime())
           .slice(0, input.limit),
         summary: {
           pageUrl: this.pageUrl,
@@ -489,7 +489,7 @@ export class PublicNewsSourceOrchestrator {
           limit: this.options.perSourceLimit,
         });
         const visibleArticles = result.articles
-          .filter(article => article.publishedAt <= input.asOf)
+          .filter(article => article.publishedAt.getTime() <= input.asOf.getTime())
           .slice(0, this.options.perSourceLimit);
         articles.push(...visibleArticles);
         sourceStatuses[adapter.name] = {

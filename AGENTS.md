@@ -28,8 +28,8 @@ gupiao/
 
 - `backend/src/services/`：业务服务和流水线
 - `backend/src/http/`：本地 HTTP shell
-- `backend/src/repositories/`：仓储层
-- `backend/src/algorithms/`：text、graph、series 算法
+- `backend/src/repositories/`：仓储层（当前仅 `News`/`Stock`/`FriendNetworkGraph`/覆盖率初始化走仓储；其余领域表由 service 直连 Prisma，为已知现状）
+- 算法散落于：`backend/src/services/scoring/`（评分）、`services/event-scoring/`（事件惩罚）、`services/market-data/`（行情读取）、`services/friend-network-*`（图谱）、`services/backtest-engine.ts`（series 回测）
 - `backend/prisma/schema.prisma`：数据库模型
 - `backend/scripts/run-daily-recommendation.ts`：每日推荐主入口
 

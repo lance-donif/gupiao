@@ -20,8 +20,8 @@ import { ExpectationGapService } from '../src/services/expectation-gap-service.j
 import { ClusterUpgradeProposalService } from '../src/services/cluster-upgrade-proposal-service.js';
 import { createFriendNetworkEngine } from '../src/services/friend-network-engine.js';
 import { KeywordPerformancePenaltyService } from '../src/services/keyword-performance-penalty-service.js';
-import { ThemeForecastReconciliationService } from '../src/services/theme-forecast-reconciliation-service.js';
-import { ThemeForecastService } from '../src/services/theme-forecast-service.js';
+import { ThemeForecastReconciliationService } from '../src/services/theme-forecast.js';
+import { ThemeForecastService } from '../src/services/theme-forecast.js';
 import {
   NewsIngestDeduplicationPipeline,
   NewsIngestNormalizationPipeline,

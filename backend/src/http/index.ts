@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { FileBackedConfigStore } from './config-store.js';
 import { createContributionDetailReader } from './contribution-reader.js';
 import { createDailyReportSnapshotReader } from './daily-report-reader.js';
-import { writeJson } from './http-utils.js';
+import { sendError } from './http-utils.js';
 import { handleBackendRoute } from './routes.js';
 import { BackendRuntimeStore } from './runtime-store.js';
 
@@ -46,11 +46,11 @@ export const startBackendHttpServer = async (
         const result = await handleBackendRoute(request, response, runtimeStore, host);
         ok = result.ok;
         if (!result.handled) {
-          writeJson(response, 404, { detail: 'not found' });
+          sendError(response, 404, 'NOT_FOUND', 'not found');
         }
       }
       catch (error) {
-        writeJson(response, 500, { detail: error instanceof Error ? error.message : String(error) });
+        sendError(response, 500, 'INTERNAL_ERROR', error instanceof Error ? error.message : String(error));
       }
       finally {
         const url = new URL(request.url ?? '/', `http://${host}`);

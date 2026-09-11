@@ -1,5 +1,6 @@
 import type { IDailyReportSnapshotQuery, IDailyReportSnapshotReader } from './types.js';
 import { nowBeijingDateTime } from './beijing-time.js';
+import { readShortfallReasonsByTrace } from './shortfall-reasons.js';
 import { toNumberOrNull } from '../lib/number-utils.js';
 
 interface IMinimalPgClient {
@@ -281,6 +282,10 @@ export class PgDailyReportSnapshotReader implements IDailyReportSnapshotReader {
       evidenceMap.set(ev.symbol, list);
     }
 
+    // 回读 recommendation step trace 中的 selectionDiagnostics.shortfallReasons，
+    // 让"不足 30 只的原因"对用户可见（不需新增表/列，解析逻辑见 shortfall-reasons.ts）。
+    const shortfallReasons = await readShortfallReasonsByTrace(this.client, trace.trace_id);
+
     const grouped = groupRows(recommendationRows.rows, evidenceMap);
     const total = grouped.A.length + grouped.B.length + grouped.C.length;
     return {
@@ -294,6 +299,7 @@ export class PgDailyReportSnapshotReader implements IDailyReportSnapshotReader {
       as_of_trade_date: trace.as_of_trade_date,
       recommendation_kind: 'TRADING',
       stage_rules_version: 'db-snapshot-v1',
+      shortfall_reasons: shortfallReasons,
       batch_quality: {
         schema_checked_count: total,
         schema_mismatch_count: 0,

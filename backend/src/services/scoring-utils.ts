@@ -99,3 +99,42 @@ export const calculateExposureBreadthWeight = (memberCount: unknown): number => 
   }
   return Math.max(BROAD_EXPOSURE_MIN_WEIGHT, Number((1 / Math.sqrt(count)).toFixed(4)));
 };
+
+/**
+ * 计算 N 日动量（windowDays=5 即近5日涨幅）。
+ * 输入 K 线无需预先排序，内部按 tradingDay 升序处理。
+ * 不足 windowDays+1 条数据、或基准价 <=0 / 非有限，返回 null（避免被当作"全历史涨幅"误用）。
+ */
+export const computeMomentumPct = (
+  candles: readonly { tradingDay: Date; close: unknown }[],
+  windowDays: number,
+): number | null => {
+  if (candles.length <= windowDays) {
+    return null;
+  }
+  const sorted = [...candles].sort((left, right) => left.tradingDay.getTime() - right.tradingDay.getTime());
+  const latestClose = Number(sorted[sorted.length - 1].close);
+  const baseClose = Number(sorted[sorted.length - 1 - windowDays].close);
+  if (!Number.isFinite(latestClose) || !Number.isFinite(baseClose) || baseClose <= 0) {
+    return null;
+  }
+  return (latestClose - baseClose) / baseClose;
+};
+
+/**
+ * 计算"单股最新可见 K 线"距"全市场最新可见日"的天数（日历日差，向上取整，至少 1）。
+ * 用于市场快照的陈旧度（latestMarketDay 早于 latestCandleDay 视作无陈旧）。
+ */
+export const computeStaleTradingDays = (
+  latestCandleDay: Date | null,
+  latestMarketDay: Date | null,
+  oneDayMs: number,
+): number => {
+  if (!latestCandleDay || !latestMarketDay) {
+    return 0;
+  }
+  if (latestCandleDay.getTime() >= latestMarketDay.getTime()) {
+    return 0;
+  }
+  return Math.max(1, Math.round((latestMarketDay.getTime() - latestCandleDay.getTime()) / oneDayMs));
+};

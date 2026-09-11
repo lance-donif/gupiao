@@ -22,6 +22,7 @@ export interface IStockSyncServiceLike {
 }
 
 export interface IServiceCompositionRoot {
+  readonly prismaClient: IPrismaClient;
   readonly newsIngestService: INewsIngestServiceLike;
   readonly stockSyncService: IStockSyncServiceLike;
 }
@@ -97,7 +98,7 @@ class InMemoryTransactionalClient implements IPrismaTransactionalClient {
   public readonly normalizedNewsRecord = null as any;
 }
 
-class InMemoryPrismaClient implements IPrismaClient {
+export class InMemoryPrismaClient implements IPrismaClient {
   private readonly newsRecords = new Map<string, IPrismaNewsRecord>();
 
   private readonly stockRecords = new Map<string, IPrismaStockRecord>();
@@ -217,7 +218,12 @@ class StubStockProvider implements ISourceProvider<IStockSourceRequest, IProvide
   }
 }
 
-export const createDefaultPrismaClient = (): IPrismaClient => {
+/**
+ * 内存桩 Prisma 客户端，仅供测试/桩 CLI 使用。生产入口必须显式注入真实 PrismaClient。
+ * 改名 `createInMemoryPrismaClientForTests` 后，旧名 `createDefaultPrismaClient` 移除，
+ * 防止误用默认组合根导致静默写入内存。
+ */
+export const createInMemoryPrismaClientForTests = (): IPrismaClient => {
   return new InMemoryPrismaClient();
 };
 
@@ -264,10 +270,11 @@ const createDefaultStockSyncService = (
 export const createServiceCompositionRoot = (
   overrides: IServiceCompositionOverrides = {},
 ): IServiceCompositionRoot => {
-  const prismaClient = overrides.prismaClient ?? createDefaultPrismaClient();
+  const prismaClient = overrides.prismaClient ?? createInMemoryPrismaClientForTests();
   const sourceProviderDependencies = overrides.sourceProviderDependencies ?? createDefaultSourceProviderDependencies();
 
   return {
+    prismaClient,
     newsIngestService: overrides.newsIngestService ?? createDefaultNewsIngestService(prismaClient, sourceProviderDependencies),
     stockSyncService: overrides.stockSyncService ?? createDefaultStockSyncService(prismaClient, sourceProviderDependencies),
   };

@@ -1,4 +1,7 @@
 import { Prisma } from '@prisma/client';
+import { computeMomentumPct, computeStaleTradingDays } from './scoring-utils.js';
+import { isCandleVisibleAsOf } from './market-data/market-data-reader.js';
+import { DEFAULT_BUSINESS_CONFIG } from '../version.js';
 
 export interface ITempStockQuote {
   readonly symbol: string;
@@ -376,10 +379,8 @@ const resolveTopDiversityIndustryKey = (recommendation: ITempStockRecommendation
 const isRecommendationStockEligible = (recommendation: ITempStockRecommendation): boolean => {
   const symbol = recommendation.symbol.trim();
   const normalizedName = recommendation.stockName.trim().toUpperCase();
-  const normalizedSymbol = symbol.toUpperCase();
   return !symbol.startsWith('688')
-    && !normalizedName.includes('ST') && !normalizedName.includes('ＳＴ')
-    && !normalizedSymbol.startsWith('ST') && !normalizedSymbol.startsWith('*ST');
+    && !normalizedName.includes('ST') && !normalizedName.includes('ＳＴ');
 };
 
 const getRecentWeekGain = (recommendation: ITempStockRecommendation): number | null => {
@@ -563,7 +564,7 @@ export class TempStockRecommendationService {
     traceId: string,
     asOf: Date,
     clusterKey: string,
-    limit: number = 30,
+    limit: number = DEFAULT_BUSINESS_CONFIG.recommendation.targetCount,
     maxPerIndustry: number = 5,
   ): Promise<ITempRecommendationGenerationResult> {
     return this.buildPhysicalRecommendations(
@@ -581,7 +582,7 @@ export class TempStockRecommendationService {
     traceId: string,
     asOf: Date,
     clusterKey: string,
-    limit: number = 30,
+    limit: number = DEFAULT_BUSINESS_CONFIG.recommendation.targetCount,
     maxPerIndustry: number = 5,
   ): Promise<readonly ITempStockRecommendation[]> {
     const result = await this.buildPhysicalRecommendations(
@@ -890,18 +891,8 @@ export class TempStockRecommendationService {
       return result;
     }
 
+    // 全市场最新可见日仅由可见K线推导（不用findFirst，避免无visibleAt守卫取到盘中线）。
     let latestMarketTradingDayDate: Date | null = null;
-    if (typeof prisma.candle.findFirst === 'function') {
-      const latestMarketCandle = await prisma.candle.findFirst({
-        where: {
-          tradingDay: { lte: asOf },
-          stock: { clusterKey },
-        },
-        orderBy: { tradingDay: 'desc' },
-        select: { tradingDay: true },
-      });
-      latestMarketTradingDayDate = latestMarketCandle?.tradingDay ? new Date(latestMarketCandle.tradingDay) : null;
-    }
 
     const candles = await prisma.candle.findMany({
       where: {
@@ -910,6 +901,13 @@ export class TempStockRecommendationService {
           clusterKey,
           symbol: { in: uniqueSymbols },
         },
+        // 粗粒度可见性守卫：visibleAt 缺失（视为"按 15:00 收盘延迟可见"，由
+        // market-data-reader.isCandleVisibleAsOf 在调用方再做权威过滤）或 <= asOf 才放行，
+        // 避免盘中未收盘 K 线被当作"最新收盘"参与筛选。
+        OR: [
+          { visibleAt: null },
+          { visibleAt: { lte: asOf } },
+        ],
       },
       orderBy: [
         { stockId: 'asc' },
@@ -918,12 +916,17 @@ export class TempStockRecommendationService {
       select: {
         close: true,
         tradingDay: true,
+        visibleAt: true,
         stock: { select: { symbol: true } },
       },
     });
 
     const rowsBySymbol = new Map<string, { close: number; tradingDay: Date }[]>();
     for (const candle of candles) {
+      // 权威过滤：SQL粗过滤放行了 visibleAt=null，须在此用统一口径（含15:00回退）剔除盘中未可见K线。
+      if (!isCandleVisibleAsOf({ tradingDay: new Date(candle.tradingDay), visibleAt: candle.visibleAt ? new Date(candle.visibleAt) : null }, asOf)) {
+        continue;
+      }
       const symbol = String(candle.stock?.symbol ?? '').trim();
       if (!symbol) {
         continue;
@@ -947,17 +950,15 @@ export class TempStockRecommendationService {
       if (!latest) {
         continue;
       }
-      const base = rows[5] ?? rows[rows.length - 1];
-      const momentum5dPct = base && Number.isFinite(base.close) && base.close > 0 && base !== latest
-        ? (latest.close - base.close) / base.close
-        : null;
-      const longTermBase = rows.length >= 121 ? rows[120] : null;
-      const longTermMomentumPct = longTermBase && Number.isFinite(longTermBase.close) && longTermBase.close > 0
-        ? (latest.close - longTermBase.close) / longTermBase.close
-        : null;
-      const staleTradingDays = latestMarketTradingDayDate !== null && latest.tradingDay < latestMarketTradingDayDate
-        ? Math.max(1, Math.round((latestMarketTradingDayDate.getTime() - latest.tradingDay.getTime()) / ONE_DAY_MS))
-        : 0;
+      // 动量统一通过 scoring-utils.computeMomentumPct 计算（与 scoring/expectation 口径一致）：
+      // 不足 windowDays+1 条 K 线时返回 null，避免被当作"全历史涨幅"误用。
+      const momentum5dPct = computeMomentumPct(rows, 5);
+      const longTermMomentumPct = computeMomentumPct(rows, 120);
+      const staleTradingDays = computeStaleTradingDays(
+        latest.tradingDay,
+        latestMarketTradingDayDate,
+        ONE_DAY_MS,
+      );
       result.set(symbol, {
         latestClose: latest.close,
         latestTradingDay: latest.tradingDay.toISOString().slice(0, 10),

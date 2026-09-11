@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { BackendRuntimeStore } from './runtime-store.js';
 import type { GraphKind } from './runtime-types.js';
 import type { IStrategyProfitQuery } from './types.js';
-import { parsePositiveInteger, readJsonBody, writeJson, writeSseData, writeSseHeaders } from './http-utils.js';
+import { parsePositiveInteger, readJsonBody, requireDateParam, sendError, writeJson, writeSseData, writeSseHeaders } from './http-utils.js';
 import { resolveDefaultTargetDate } from './runtime-store.js';
 
 interface RouteResult { handled: boolean; ok: boolean }
@@ -165,12 +165,19 @@ export const handleBackendRoute = async (
   }
 
   if (pathname === '/api/strategy/profits' && method === 'GET') {
+    const asOfRaw = url.searchParams.get('as_of');
+    const asOf = asOfRaw == null || asOfRaw === ''
+      ? resolveDefaultTargetDate()
+      : requireDateParam(response, asOfRaw, 'as_of');
+    if (asOf === null) {
+      return { handled: true, ok: false };
+    }
     writeJson(
       response,
       200,
       await store.getStrategyProfits(
         url.searchParams.get('group_id') ?? 'main',
-        url.searchParams.get('as_of') ?? resolveDefaultTargetDate(),
+        asOf,
         {
           trace_id: url.searchParams.get('trace_id'),
           strategy_id: url.searchParams.get('strategy_id'),
@@ -204,12 +211,20 @@ export const handleBackendRoute = async (
 
   if (pathname === '/api/dispatch/daily' && method === 'POST') {
     const body = await readJsonBody<{ group_id?: string; target_date?: string | null }>(request);
+    let targetDate = resolveDefaultTargetDate();
+    if (body.target_date != null && body.target_date !== '') {
+      const validated = requireDateParam(response, body.target_date, 'target_date');
+      if (validated === null) {
+        return { handled: true, ok: false };
+      }
+      targetDate = validated;
+    }
     writeJson(
       response,
       200,
       await store.dispatchDaily({
         groupId: body.group_id ?? 'main',
-        targetDate: body.target_date ?? resolveDefaultTargetDate(),
+        targetDate,
       }),
     );
     return { handled: true, ok: true };
@@ -224,7 +239,7 @@ export const handleBackendRoute = async (
     const traceId = (url.searchParams.get('traceId') ?? '').trim();
     const symbol = (url.searchParams.get('symbol') ?? '').trim();
     if (!traceId || !symbol) {
-      writeJson(response, 400, { status: '待查', detail: '缺少 traceId 或 symbol' });
+      sendError(response, 400, 'MISSING_PARAM', '缺少 traceId 或 symbol', { missing: ['traceId', 'symbol'].filter(k => !url.searchParams.get(k)) });
       return { handled: true, ok: false };
     }
     // 调试入口：显式 ?unpublished=1 允许查看未发布明细，响应会带 publishStatus: 'draft' 标记。
@@ -234,7 +249,7 @@ export const handleBackendRoute = async (
       payload = await store.getContributionDetail(traceId, symbol, allowUnpublished);
     }
     catch {
-      writeJson(response, 500, { status: '查询失败', detail: '查询失败' });
+      sendError(response, 500, 'QUERY_FAILED', '查询失败');
       return { handled: true, ok: false };
     }
     if (!payload || payload.rows.length === 0) {
@@ -248,27 +263,53 @@ export const handleBackendRoute = async (
   const byTraceMatch = matchPath(pathname, /^\/api\/batches\/by-trace\/(.+)$/);
   if (byTraceMatch && method === 'GET') {
     const payload = await store.getBatchByTraceId(decodePathParam(byTraceMatch[1] ?? ''));
-    writeJson(response, payload ? 200 : 404, payload ?? { detail: 'batch not found' });
+    if (payload) {
+      writeJson(response, 200, payload);
+    } else {
+      sendError(response, 404, 'BATCH_NOT_FOUND', 'batch not found');
+    }
     return { handled: true, ok: Boolean(payload) };
   }
 
   const latestProgressMatch = matchPath(pathname, /^\/api\/batches\/latest\/([^/]+)\/progress$/);
   if (latestProgressMatch && method === 'GET') {
+    const rawDate = url.searchParams.get('target_date') ?? url.searchParams.get('display_date') ?? url.searchParams.get('trade_date');
+    const dateArg = rawDate == null || rawDate === ''
+      ? undefined
+      : requireDateParam(response, rawDate, 'target_date') ?? undefined;
+    if (rawDate && dateArg === undefined) {
+      return { handled: true, ok: false };
+    }
     const payload = await store.getLatestBatchProgress(
       decodePathParam(latestProgressMatch[1] ?? 'main'),
-      url.searchParams.get('target_date') ?? url.searchParams.get('display_date') ?? url.searchParams.get('trade_date'),
+      dateArg,
     );
-    writeJson(response, payload ? 200 : 404, payload ?? { detail: 'batch not found' });
+    if (payload) {
+      writeJson(response, 200, payload);
+    } else {
+      sendError(response, 404, 'BATCH_NOT_FOUND', 'batch not found');
+    }
     return { handled: true, ok: Boolean(payload) };
   }
 
   const latestBatchMatch = matchPath(pathname, /^\/api\/batches\/latest\/([^/]+)$/);
   if (latestBatchMatch && method === 'GET') {
+    const rawDate = url.searchParams.get('target_date') ?? url.searchParams.get('display_date') ?? url.searchParams.get('trade_date');
+    const dateArg = rawDate == null || rawDate === ''
+      ? undefined
+      : requireDateParam(response, rawDate, 'target_date') ?? undefined;
+    if (rawDate && dateArg === undefined) {
+      return { handled: true, ok: false };
+    }
     const payload = await store.getLatestBatchByGroup(
       decodePathParam(latestBatchMatch[1] ?? 'main'),
-      url.searchParams.get('target_date') ?? url.searchParams.get('display_date') ?? url.searchParams.get('trade_date'),
+      dateArg,
     );
-    writeJson(response, payload ? 200 : 404, payload ?? null);
+    if (payload) {
+      writeJson(response, 200, payload);
+    } else {
+      sendError(response, 404, 'BATCH_NOT_FOUND', 'batch not found');
+    }
     return { handled: true, ok: Boolean(payload) };
   }
 
@@ -281,7 +322,11 @@ export const handleBackendRoute = async (
       parsePositiveInteger(url.searchParams.get('page'), 1),
       parsePositiveInteger(url.searchParams.get('page_size'), 20),
     );
-    writeJson(response, payload ? 200 : 404, payload ?? { detail: 'node result not found' });
+    if (payload) {
+      writeJson(response, 200, payload);
+    } else {
+      sendError(response, 404, 'NODE_RESULT_NOT_FOUND', 'node result not found');
+    }
     return { handled: true, ok: Boolean(payload) };
   }
 

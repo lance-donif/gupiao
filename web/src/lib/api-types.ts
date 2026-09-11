@@ -1,4 +1,40 @@
-export interface DispatchResponse { trace_id: string; celery_task_id: string }
+export interface DispatchResponse { trace_id: string; job_id: string }
+
+/** 后端统一错误信封（http-utils.sendError）。message 兼容旧接口的 status/detail 文本。 */
+export interface ApiErrorBody {
+  readonly code: string;
+  readonly message: string;
+  readonly detail?: unknown;
+}
+
+export class ApiError extends Error {
+  readonly code: string;
+  readonly status: number;
+  readonly detail: unknown;
+  constructor(status: number, body: ApiErrorBody | { status?: string; detail?: string } | string) {
+    const parsed = parseApiErrorBody(body);
+    super(parsed.message);
+    this.name = 'ApiError';
+    this.code = parsed.code;
+    this.status = status;
+    this.detail = parsed.detail;
+  }
+}
+
+function parseApiErrorBody(body: unknown): { code: string; message: string; detail: unknown } {
+  if (typeof body === 'string') {
+    return { code: 'UNKNOWN', message: body, detail: undefined };
+  }
+  if (body && typeof body === 'object') {
+    const obj = body as Record<string, unknown>;
+    const code = typeof obj.code === 'string' ? obj.code : 'UNKNOWN';
+    const message = typeof obj.message === 'string'
+      ? obj.message
+      : (typeof obj.detail === 'string' ? obj.detail : (typeof obj.status === 'string' ? obj.status : '请求失败'));
+    return { code, message, detail: obj.detail };
+  }
+  return { code: 'UNKNOWN', message: '请求失败', detail: undefined };
+}
 
 interface BatchProgressNode {
   node_id: string;

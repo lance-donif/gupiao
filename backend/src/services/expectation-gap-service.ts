@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { hasPrismaDelegateMethod } from './prisma-utils.js';
-import { clamp, toNumber } from '../lib/number-utils.js';
+import { clamp } from '../lib/number-utils.js';
+import { computeMomentumPct } from './scoring-utils.js';
 
 /**
  * 弱信号/预期差引擎
@@ -23,9 +24,12 @@ export interface IExpectationGapInput {
 export interface IExpectationGapKeywordResult {
   readonly keyword: string;
   readonly graphStrength: number;
+  /** 无5日动量数据时为 0 占位（DB Decimal 非空约束），须配合 hasPriceData 解读，不得直接参与排序。 */
   readonly priceReaction: number;
+  /** 无数据时为 0 占位并沉底，不代表真实预期差。 */
   readonly expectationGap: number;
   readonly isWeakSignal: boolean;
+  readonly hasPriceData: boolean;
   readonly relatedSymbols: readonly string[];
   readonly evidenceEdges: readonly Record<string, unknown>[];
   readonly reasons: readonly string[];
@@ -103,16 +107,11 @@ const aggregateGraphStrengthByKeyword = (
 };
 
 /**
- * 计算5日涨跌幅，复用 scoring-contribution-engine 的 momentum5dPct 逻辑。
+ * 计算5日涨跌幅：复用 scoring-utils.computeMomentumPct（共享动量口径）。
+ * 不足 6 条 K 线 → null（不当作"平盘"）。
  */
 const calculateMomentum5dPct = (candlesDesc: readonly { tradingDay: Date; close: unknown }[]): number | null => {
-  if (candlesDesc.length < 6) {
-    return null;
-  }
-  const candles = [...candlesDesc].sort((left, right) => left.tradingDay.getTime() - right.tradingDay.getTime());
-  const latestClose = toNumber(candles[candles.length - 1].close);
-  const close5 = toNumber(candles[Math.max(0, candles.length - 6)].close);
-  return close5 > 0 ? (latestClose - close5) / close5 : null;
+  return computeMomentumPct(candlesDesc, 5);
 };
 
 const hasDelegate = (prisma: any, delegateName: string, methodName: string): boolean => {
@@ -210,22 +209,32 @@ export class ExpectationGapService {
       const normalizedGraphStrength = clamp(strength / GRAPH_STRENGTH_NORMALIZATION_FACTOR, 0, 1);
       const symbols = [...(symbolsByKeyword.get(keyword) ?? [])];
 
-      // priceReaction = 关联股票5日涨跌幅的平均值
+      // priceReaction = 关联股票5日涨跌幅的平均值；无数据时为 0（占位）。
       const momenta = symbols
         .map(symbol => momentumBySymbol.get(symbol))
         .filter((value): value is number => value !== null && value !== undefined && Number.isFinite(value));
-      const priceReaction = momenta.length > 0
+      const hasPriceData = momenta.length > 0;
+      const priceReaction = hasPriceData
         ? momenta.reduce((sum, value) => sum + value, 0) / momenta.length
         : 0;
 
-      const expectationGap = Number((normalizedGraphStrength - priceReaction).toFixed(4));
-      const isWeakSignal = expectationGap > WEAK_SIGNAL_GAP_THRESHOLD
+      // 无数据时 expectationGap 置 0 沉底（DB 非空约束下的占位），避免“未知”被当成大缺口置顶。
+      const expectationGap = hasPriceData
+        ? Number((normalizedGraphStrength - priceReaction).toFixed(4))
+        : 0;
+      // 无5日动量数据时不判定弱信号（避免"未知"被当成"平盘"误命中）。
+      const isWeakSignal = hasPriceData
+        && expectationGap > WEAK_SIGNAL_GAP_THRESHOLD
         && Math.abs(priceReaction) < WEAK_SIGNAL_FLAT_PRICE_THRESHOLD;
 
       const reasons: string[] = [
         `图谱强度 ${normalizedGraphStrength.toFixed(4)}（原始 ${strength.toFixed(4)}，归一化系数 ${GRAPH_STRENGTH_NORMALIZATION_FACTOR}）`,
-        `股价反应 ${priceReaction.toFixed(4)}（关联 ${symbols.length} 只股票，${momenta.length} 只有5日数据）`,
-        `预期差 ${expectationGap.toFixed(4)} = 图谱强度 - 股价反应`,
+        hasPriceData
+          ? `股价反应 ${priceReaction.toFixed(4)}（关联 ${symbols.length} 只股票，${momenta.length} 只有5日数据）`
+          : `股价反应 未知（关联 ${symbols.length} 只股票，均无5日动量数据，跳过弱信号判定）`,
+        hasPriceData
+          ? `预期差 ${expectationGap.toFixed(4)} = 图谱强度 - 股价反应`
+          : `预期差 未知（无股价数据，占位 0.0000，不参与排序）`,
         isWeakSignal
           ? `弱信号命中：预期差 > ${WEAK_SIGNAL_GAP_THRESHOLD} 且股价波动 < ${WEAK_SIGNAL_FLAT_PRICE_THRESHOLD}`
           : '非弱信号',
@@ -237,6 +246,7 @@ export class ExpectationGapService {
         priceReaction: Number(priceReaction.toFixed(4)),
         expectationGap,
         isWeakSignal,
+        hasPriceData,
         relatedSymbols: symbols.slice(0, 20),
         evidenceEdges: evidenceEdges.map(edge => ({
           sourceKeyword: edge.sourceKeyword,
@@ -249,8 +259,8 @@ export class ExpectationGapService {
       });
     }
 
-    // 按 expectationGap 降序
-    results.sort((left, right) => right.expectationGap - left.expectationGap);
+    // 有数据优先，无数据沉底；同类内按 expectationGap 降序。topGaps 只取有数据，避免“未知”置顶。
+    results.sort((left, right) => Number(right.hasPriceData) - Number(left.hasPriceData) || right.expectationGap - left.expectationGap);
 
     // 6. 落库
     if (results.length > 0 && hasDelegate(prisma, 'expectationGapSnapshot', 'createMany')) {
@@ -273,7 +283,7 @@ export class ExpectationGapService {
     return {
       snapshotCount: results.length,
       weakSignalCount: results.filter(item => item.isWeakSignal).length,
-      topGaps: results.slice(0, 20),
+      topGaps: results.filter(item => item.hasPriceData).slice(0, 20),
     };
   }
 }

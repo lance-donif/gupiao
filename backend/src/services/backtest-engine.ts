@@ -1,6 +1,7 @@
 import { dailyCloseVisibleAt } from './yield-visibility.js';
 import { inputFingerprint, artifactFingerprint } from './pipeline-checkpoint.js';
 import { Prisma } from '@prisma/client';
+import { DEFAULT_BUSINESS_CONFIG } from '../version.js';
 import { ScoringContributionEngine } from './scoring-contribution-engine.js';
 import { TempStockRecommendationService } from './temp-stock-recommendation-service.js';
 import { TraceManager } from './trace-manager.js';
@@ -168,7 +169,7 @@ export const resolveReplayStatusesAsOf = async (
 
 const resolveBacktestReplayTraceSummary = (input: IBacktestRunInput): IBacktestReplayTraceSummary => {
   const newsWindowDays = input.newsWindowDays ?? 7;
-  const limit = input.recommendationLimit ?? 30;
+  const limit = input.recommendationLimit ?? DEFAULT_BUSINESS_CONFIG.recommendation.targetCount;
   const maxPerIndustry = input.maxPerIndustry ?? 5;
 
   let profile = input.scoringProfile ?? 'short_news';
@@ -669,6 +670,17 @@ const RESTRICTED_TRADING_STATUSES = new Set([
   'LIMIT_UP', 'LIMIT_DOWN', 'SUSPEND', 'HALT', 'ST', 'RESUMED_LIMIT_UP', 'RESUMED_LIMIT_DOWN',
 ]);
 
+/**
+ * 计算收益率 (target - base) / base。
+ * 基准价非有限或 <= 0 时返回 null（避免 Infinity/NaN 污染聚合统计与落库）。
+ */
+const computeYield = (base: number, target: number): number | null => {
+  if (!Number.isFinite(base) || !Number.isFinite(target) || base <= 0) {
+    return null;
+  }
+  return (target - base) / base;
+};
+
 export interface YieldRecordDraft {
   readonly snapshotId: string;
   readonly symbol: string;
@@ -717,13 +729,17 @@ export const buildYieldRecordDrafts = (input: {
     }
 
     const plannedExitDay = exitCandle.tradingDay instanceof Date ? exitCandle.tradingDay : new Date(exitCandle.tradingDay);
-    const value = (Number(exitCandle.close) - input.p0) / input.p0;
+    const value = computeYield(input.p0, Number(exitCandle.close));
     const maturityAt = dailyCloseVisibleAt(plannedExitDay);
     const tradingStatus = exitCandle.tradingStatus != null ? String(exitCandle.tradingStatus) : null;
 
     let status: string;
     let actualExitDay: Date | null = plannedExitDay;
-    if (tradingStatus == null) {
+    if (value === null) {
+      // 基准价异常（<=0 / 非有限），视为数据缺口，禁止产出 Infinity。
+      status = 'coverage_gap';
+      actualExitDay = null;
+    } else if (tradingStatus == null) {
       status = 'coverage_gap';
       actualExitDay = null;
     } else if (RESTRICTED_TRADING_STATUSES.has(tradingStatus)) {
@@ -784,13 +800,16 @@ export const calculateReconciliationData = (params: {
     }
 
     const p0 = Number(baseCandles[0].close);
+    if (!Number.isFinite(p0) || p0 <= 0) {
+      continue;
+    }
     const p1Candle = futureCandles[0];
     const p3Candle = futureCandles.length >= 3 ? futureCandles[2] : null;
     const p5Candle = futureCandles.length >= 5 ? futureCandles[4] : null;
 
-    const yield1Day = p1Candle ? (Number(p1Candle.close) - p0) / p0 : null;
-    const yield3Day = p3Candle ? (Number(p3Candle.close) - p0) / p0 : null;
-    const yield5Day = p5Candle ? (Number(p5Candle.close) - p0) / p0 : null;
+    const yield1Day = p1Candle ? computeYield(p0, Number(p1Candle.close)) : null;
+    const yield3Day = p3Candle ? computeYield(p0, Number(p3Candle.close)) : null;
+    const yield5Day = p5Candle ? computeYield(p0, Number(p5Candle.close)) : null;
 
     const realizedPriceTarget = p5Candle
       ? Number(p5Candle.close)
@@ -882,7 +901,10 @@ async function generatePerformanceReports(
           const p5 = future.length >= 5 ? future[4] : null;
           const lastCandle = p5 ?? p3 ?? p1;
           if (lastCandle) {
-            y = (Number(lastCandle.close) - basePrice) / basePrice;
+            const computed = computeYield(basePrice, Number(lastCandle.close));
+            if (computed !== null) {
+              y = computed;
+            }
           }
         }
       }

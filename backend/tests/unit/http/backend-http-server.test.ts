@@ -84,7 +84,7 @@ describe('backend http server', () => {
     expect(clusters).toHaveLength(1);
     expect(clusters[0]?.id).toBe('main');
 
-    const dispatch = await fetchJson<{ trace_id: string; celery_task_id: string }>(
+    const dispatch = await fetchJson<{ trace_id: string; job_id: string }>(
       `${baseUrl}/api/dispatch/daily`,
       {
         method: 'POST',
@@ -92,7 +92,7 @@ describe('backend http server', () => {
       },
     );
     expect(dispatch.trace_id).toContain('trace-main-2026-03-18');
-    expect(dispatch.celery_task_id).toContain(dispatch.trace_id);
+    expect(dispatch.job_id).toContain(dispatch.trace_id);
 
     const latestBatch = await fetchJson<{ id: string; trace_id: string; group_id: string } | null>(
       `${baseUrl}/api/batches/latest/main`,
@@ -361,7 +361,7 @@ describe('backend http server', () => {
       body: JSON.stringify({ group_id: 'main', feedback_id: feedbackCreated.id, reason: 'test promote' }),
     });
     expect(promote.trace_id).toBeDefined();
-    expect(promote.celery_task_id).toBeDefined();
+    expect(promote.job_id).toBeDefined();
     expect(promote.status).toBe('待确认');
 
     const pendingVersions = await fetchJson<Array<{ id: string; status: string; previous_version_id: string | null }>>(
@@ -505,11 +505,11 @@ describe('backend http server', () => {
     runningServers.push(server);
 
     const response = await fetch(`http://127.0.0.1:${server.port}/api/batches/contribution?traceId=trace-1`);
-    const payload = await response.json() as { status: string; detail: string };
+    const payload = await response.json() as { code: string; message: string };
 
     expect(response.status).toBe(400);
-    expect(payload.status).toBe('待查');
-    expect(payload.detail).toContain('symbol');
+    expect(payload.code).toBe('MISSING_PARAM');
+    expect(payload.message).toContain('traceId');
   });
 
   it('returns an empty contribution detail payload when no rows exist', async () => {

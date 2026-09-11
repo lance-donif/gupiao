@@ -117,7 +117,7 @@ describe('backend http runtime store', () => {
     const latest = (await store.getLatestBatchByGroup('main')) as any;
     const progress = await store.getLatestBatchProgress('main');
 
-    expect(dispatch.celery_task_id).toContain(dispatch.trace_id);
+    expect(dispatch.job_id).toContain(dispatch.trace_id);
     expect(clusters[0]).toMatchObject({
       id: 'main',
       name: '主集群',

@@ -132,6 +132,8 @@ describe('service composition root', () => {
     const overrideNewsService = new OverrideNewsService();
     const overrideStockService = new OverrideStockService();
     const root = createServiceCompositionRoot({
+      // 注入非内存桩 Prisma，避免 ServiceCli.run 的内存桩防护抛错（测试只关心服务编排）。
+      prismaClient: {} as any,
       newsIngestService: overrideNewsService,
       stockSyncService: overrideStockService,
     });

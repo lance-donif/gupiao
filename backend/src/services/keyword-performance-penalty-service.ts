@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { toNumberOrNull } from '../lib/number-utils.js';
 import { visibleYields } from './yield-visibility.js';
-import { resolveScoringRecipe } from '../version.js';
+import { DEFAULT_BUSINESS_CONFIG, resolveScoringRecipe } from '../version.js';
 import {
   DEFAULT_SMOOTH_PENALTY_CONFIG,
   calculateSmoothPenalty,
@@ -35,10 +35,13 @@ export interface IKeywordPerformancePenaltyRefreshResult {
   readonly smoothKeywordCount?: number;
 }
 
-const DEFAULT_LOOKBACK_DAYS = 30;
-const DEFAULT_COOLDOWN_DAYS = 7;
-const DEFAULT_LOSS_THRESHOLD_PCT = -0.03;
-const DEFAULT_PENALTY_FACTOR = 0.6;
+// 业务配置（lookbackDays/cooldownDays/threshold/factor）的单一真源为 DEFAULT_BUSINESS_CONFIG.penalty，
+//  改值需同步递增 RECIPE_VERSION。此处保留同名 const 以便调用方 ?? 兜底不变。
+const PENALTY = DEFAULT_BUSINESS_CONFIG.penalty;
+const DEFAULT_LOOKBACK_DAYS = PENALTY.lookbackDays;
+const DEFAULT_COOLDOWN_DAYS = PENALTY.cooldownDays;
+const DEFAULT_LOSS_THRESHOLD_PCT = PENALTY.threshold;
+const DEFAULT_PENALTY_FACTOR = PENALTY.factor;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 /** 平滑惩罚最小加权样本量：n<5 不惩罚（与 DEFAULT_SMOOTH_PENALTY_CONFIG 口径一致）。 */
@@ -156,9 +159,9 @@ const compareSmoothObservation = (left: ISmoothObservation, right: ISmoothObserv
 /**
  * 只落库「有真实亏损样本且加权样本量 n>=5」的关键词，保证 n<5 不惩罚。
  *
- * 注意：`calculateSmoothPenalty` 的 factor 由 `1 - upgradeFactor × max(0, p − p0)` 给出，
- * 当前纯函数实现里 `p` 与 `p0` 恒等（见模块注释缺陷说明），因此 factor 目前恒为 1；
- * 这里仍按同一口径落库 factor 与完整审计依据，等纯函数修正后无需再改接线。
+ * `calculateSmoothPenalty` 的 factor 由 `1 - upgradeFactor × max(0, p − p0)` 给出：
+ * `p0` 取自全局亏损率（跨关键词计算），`p` 为关键词自身的收缩估计，
+ * 故 `p ≠ p0`、factor 可小于 1，惩罚机制真实生效（见 `event-scoring/smooth-penalty.ts`）。
  */
 const buildSmoothPenaltyRows = (
   results: readonly SmoothPenaltyResult[],

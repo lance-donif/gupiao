@@ -4,7 +4,7 @@ import type { IServiceCliRunResult } from './service-summary.js';
 
 import type { IServiceTimeWindow } from './service-types.js';
 import type { IStockSyncExecutionRequest } from './stock-sync-types.js';
-import { createServiceCompositionRoot } from './service-di.js';
+import { createServiceCompositionRoot, InMemoryPrismaClient } from './service-di.js';
 import {
   createHelpResult,
 
@@ -159,6 +159,15 @@ export class ServiceCli {
 
   public async run(argv: readonly string[]): Promise<IServiceCliRunResult> {
     const parsed = parseCommand(argv);
+
+    // 防护：CLI 入口禁止使用内存桩 Prisma（会静默写入内存不落库）。
+    // 生产路径（server.ts / run-daily-recommendation.ts）必须自建 PrismaClient，不走 ServiceCli。
+    if (this.services.prismaClient instanceof InMemoryPrismaClient) {
+      throw new Error(
+        'ServiceCli detected InMemoryPrismaClient — this CLI is for stub/test only. ' +
+        'Inject a real PrismaClient via createServiceCompositionRoot({ prismaClient }).',
+      );
+    }
 
     if (parsed.command === 'help') {
       return createHelpResult(HELP_TEXT);

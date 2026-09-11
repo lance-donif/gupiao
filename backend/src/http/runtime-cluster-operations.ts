@@ -88,7 +88,7 @@ export class RuntimeClusterOperations {
     };
   }
 
-  public async promoteCluster(input: PromoteInput): Promise<{ trace_id: string; celery_task_id: string; group_version_id: string; status: string }> {
+  public async promoteCluster(input: PromoteInput): Promise<{ trace_id: string; job_id: string; group_version_id: string; status: string }> {
     const now = nowBeijingDateTime();
     let traceId = '';
     let nextVersionId = '';
@@ -122,7 +122,7 @@ export class RuntimeClusterOperations {
         ],
       };
     });
-    return { trace_id: traceId, celery_task_id: `local-${traceId}`, group_version_id: nextVersionId, status: '待确认' };
+    return { trace_id: traceId, job_id: `local-${traceId}`, group_version_id: nextVersionId, status: '待确认' };
   }
 
   public async confirmPromoteCluster(input: ConfirmPromoteInput): Promise<Record<string, unknown>> {

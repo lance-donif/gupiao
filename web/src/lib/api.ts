@@ -12,6 +12,7 @@ import type {
   StrategyPerformanceReport,
   StrategyProfitPayload,
 } from './api-types';
+import { ApiError } from './api-types';
 
 export type * from './api-types';
 
@@ -24,8 +25,13 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`${resp.status} ${resp.statusText}: ${text}`);
+    let body: unknown = undefined;
+    try {
+      body = await resp.json();
+    } catch {
+      body = await resp.text().catch(() => '');
+    }
+    throw new ApiError(resp.status, body as Parameters<typeof ApiError>[1]);
   }
   return (await resp.json()) as T;
 }

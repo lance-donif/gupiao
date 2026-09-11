@@ -53,3 +53,45 @@ export const parsePositiveInteger = (value: string | null, fallback: number): nu
   }
   return Math.floor(parsed);
 };
+
+/** YYYY-MM-DD 日期参数校验。空值与非法格式均视为不合法（调用方按需决定是否兜底）。 */
+export const isValidDateParam = (value: string | null | undefined): value is string => {
+  if (!value) {
+    return false;
+  }
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+};
+
+/**
+ * 校验日期参数：合法则返回值；非法则向响应写入 400 + 标准错误信封并返回 null。
+ * 调用方需检查返回值是否为 null，已写入响应后请直接 return。
+ */
+export const requireDateParam = (
+  response: ServerResponse,
+  value: string | null | undefined,
+  fieldName: string,
+): string | null => {
+  if (isValidDateParam(value)) {
+    return value;
+  }
+  sendError(response, 400, 'INVALID_DATE', `${fieldName} 必须为 YYYY-MM-DD 格式`, { fieldName, received: value ?? null });
+  return null;
+};
+
+/** 统一错误信封：{ code, message, detail? }。 */
+export interface ApiErrorBody {
+  readonly code: string;
+  readonly message: string;
+  readonly detail?: unknown;
+}
+
+export const sendError = (
+  response: ServerResponse,
+  statusCode: number,
+  code: string,
+  message: string,
+  detail?: unknown,
+): void => {
+  const body: ApiErrorBody = detail === undefined ? { code, message } : { code, message, detail };
+  writeJson(response, statusCode, body);
+};

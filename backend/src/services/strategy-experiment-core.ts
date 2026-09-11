@@ -1,5 +1,6 @@
 import { normalizeSelectionSignalType } from './temp-stock-recommendation-service.js';
 import { clamp } from '../lib/number-utils.js';
+import { DEFAULT_BUSINESS_CONFIG } from '../version.js';
 
 export interface IStrategyExperimentWeights {
   readonly evidence: number;
@@ -245,9 +246,9 @@ const normalizeMarketWeights = (value: unknown): IMarketSignalWeights => {
 };
 
 export const defaultStrategyExperimentConfig = (): IStrategyExperimentConfig => ({
-  limit: 30,
-  maxPerSignalType: 30,
-  maxPrice: 40,
+  limit: DEFAULT_BUSINESS_CONFIG.recommendation.targetCount,
+  maxPerSignalType: 30,  // 每信号类型独立上限，与"推荐目标数"语义不同
+  maxPrice: DEFAULT_BUSINESS_CONFIG.recommendation.maxPrice,
   exclude688: true,
   excludeST: true,
   recent5dGainMaxPct: 0.2,

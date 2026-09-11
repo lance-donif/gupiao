@@ -12,6 +12,7 @@
 import { hasPrismaDelegateMethod } from './prisma-utils.js';
 import { toNumber } from '../lib/number-utils.js';
 import { dateKey } from '../lib/date-utils.js';
+import { DEFAULT_BUSINESS_CONFIG } from '../version.js';
 
 export interface IUpgradeProposalInput {
   readonly groupId: string;
@@ -74,7 +75,7 @@ interface IMutableUpgradeProposalResult {
 }
 
 // 经验阈值
-const RECOMMENDATION_YIELD_THRESHOLD = -0.03;  // 5日平均收益 < -3% 触发
+const RECOMMENDATION_YIELD_THRESHOLD = DEFAULT_BUSINESS_CONFIG.penalty.threshold;  // 5日平均收益 < 阈值触发（与关键词表现惩罚共用）
 const THEME_FORECAST_HITRATE_THRESHOLD = 0.50;  // 命中率 < 50% 触发
 
 interface IAutopilotPolicy {

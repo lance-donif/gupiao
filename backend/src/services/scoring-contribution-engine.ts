@@ -10,6 +10,7 @@ import {
   normalizeKeyword,
   calculateTimeDecay,
   calculateExposureBreadthWeight,
+  computeMomentumPct,
 } from './scoring-utils.js';
 import { clamp, toNumber } from '../lib/number-utils.js';
 import {
@@ -580,12 +581,10 @@ export const calculateMarketSignalScore = (
   // 当日涨跌：最新 close vs 前一日 close，不足 2 条 Candle 记 null
   const prevClose = candles.length >= 2 ? toNumber(candles[candles.length - 2]?.close) : null;
   const todayChangePct = prevClose && prevClose > 0 ? (latestClose - prevClose) / prevClose : null;
-  const close5 = toNumber(candles[Math.max(0, candles.length - 6)]?.close);
-  const close20 = candles.length >= 21 ? toNumber(candles[candles.length - 21]?.close) : null;
-  const close120 = candles.length >= 121 ? toNumber(candles[candles.length - 121]?.close) : null;
-  const momentum5dPct = close5 > 0 ? (latestClose - close5) / close5 : null;
-  const momentum20dPct = close20 && close20 > 0 ? (latestClose - close20) / close20 : null;
-  const longTermMomentumPct = close120 && close120 > 0 ? (latestClose - close120) / close120 : null;
+  // 动量统一通过 scoring-utils.computeMomentumPct 计算，确保与 temp/expectation 口径一致。
+  const momentum5dPct = computeMomentumPct(candles, 5);
+  const momentum20dPct = computeMomentumPct(candles, 20);
+  const longTermMomentumPct = computeMomentumPct(candles, 120);
   const previous20 = candles.slice(Math.max(0, candles.length - 21), -1);
   const avgVolume20 = average(previous20.map(candle => toNumber(candle.volume)).filter(value => value > 0));
   const volumeRatio20d = avgVolume20 && avgVolume20 > 0 ? latestVolume / avgVolume20 : null;

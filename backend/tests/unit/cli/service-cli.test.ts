@@ -86,6 +86,8 @@ describe('service-cli', () => {
     });
 
     const cli = new ServiceCli({
+      // 注入非内存桩 Prisma，避免 ServiceCli.run 的内存桩防护抛错。
+      prismaClient: {} as any,
       newsIngestService: newsService,
       stockSyncService: stockService,
     });
@@ -140,6 +142,7 @@ describe('service-cli', () => {
     });
 
     const cli = new ServiceCli({
+      prismaClient: {} as any,
       newsIngestService: newsService,
       stockSyncService: new RecordingStockSyncService({
         status: 'failure',
@@ -233,6 +236,8 @@ describe('service-cli', () => {
     });
 
     const cli = createServiceCli({
+      // 注入非内存桩 Prisma，避免 ServiceCli.run 的内存桩防护抛错（测试只关心 CLI 编排）。
+      prismaClient: {} as any,
       newsIngestService: new RecordingNewsIngestService({
         status: 'failure',
         summary: {

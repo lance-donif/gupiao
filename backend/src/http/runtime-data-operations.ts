@@ -39,6 +39,7 @@ import {
   buildRecommendationDocuments,
 } from './recommendation-builders.js';
 import { clamp01, toNumberOrNull } from '../lib/number-utils.js';
+import { readShortfallReasonsByTrace } from './shortfall-reasons.js';
 import { toIsoText, toNullableIsoText } from '../lib/date-utils.js';
 import { normalizeBaseUrl } from '../lib/url-utils.js';
 import { ensureCluster } from './runtime-store-shared.js';
@@ -1519,7 +1520,7 @@ export class RuntimeDataOperations {
     return (rows.rows[0]?.c ?? 0) > 0 ? 'published' : 'draft';
   }
 
-  public async dispatchDaily(input: IDispatchDailyInput): Promise<{ trace_id: string; celery_task_id: string }> {
+  public async dispatchDaily(input: IDispatchDailyInput): Promise<{ trace_id: string; job_id: string }> {
     const clusterKey = toClusterKey(input.groupId);
     const suffix = crypto.randomBytes(4).toString('hex');
     const traceId = `trace-${input.groupId}-${input.targetDate}-${suffix}`;
@@ -1610,7 +1611,7 @@ export class RuntimeDataOperations {
 
     return {
       trace_id: traceId,
-      celery_task_id: `celery-${traceId}`,
+      job_id: `celery-${traceId}`,
     };
   }
 
@@ -2903,6 +2904,11 @@ export class RuntimeDataOperations {
     // 主题预测 + 弱信号/预期差
     const themeForecasts = await this.loadThemeForecasts(metaTraceId, groupId);
     const expectationGaps = await this.loadExpectationGaps(metaTraceId, groupId);
+    // 推荐不足/为空时把 selectionDiagnostics.shortfallReasons 透到 warnings，主链路可见（与日报同口径）。
+    const shortfallReasons = recommendations.length > 0 ? [] : await readShortfallReasonsByTrace(pool, metaTraceId);
+    const warnings = recommendations.length > 0
+      ? []
+      : ['当前日期无 RecommendationSnapshot 数据', ...shortfallReasons];
 
     return {
       available: recommendations.length > 0,
@@ -2915,7 +2921,7 @@ export class RuntimeDataOperations {
       execution_history: executionHistory,
       theme_forecasts: themeForecasts,
       expectation_gaps: expectationGaps,
-      warnings: recommendations.length > 0 ? [] : ['当前日期无 RecommendationSnapshot 数据'],
+      warnings,
       sla,
       quality: {
         recommendation_count: recommendations.length,
