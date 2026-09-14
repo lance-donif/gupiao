@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { syncAndVerifyStockExposureFacts } from '../../../scripts/run-daily-recommendation.js';
+import {
+  resolveWeekendExpectedTradingDay,
+  shiftBeijingDay,
+} from '../../../scripts/run-daily-recommendation.js';
 
 class MockExposurePrismaClient {
   public constructor(
@@ -122,5 +126,21 @@ describe('run daily recommendation stock exposure sync', () => {
       keywordCount: 1,
       minExposureFacts: 500,
     }));
+  });
+});
+
+describe('trading-day-aware candle gate', () => {
+  it('shifts Beijing days across month boundaries', () => {
+    expect(shiftBeijingDay('2026-09-13', -2)).toBe('2026-09-11');
+    expect(shiftBeijingDay('2026-09-01', -1)).toBe('2026-08-31');
+    expect(shiftBeijingDay('2026-09-11', 3)).toBe('2026-09-14');
+  });
+
+  it('maps weekend asOf to Friday without network', () => {
+    // 2026-09-12 Sat, 2026-09-13 Sun, 2026-09-11 Fri, 2026-09-14 Mon.
+    expect(resolveWeekendExpectedTradingDay('2026-09-12', 6)).toBe('2026-09-11');
+    expect(resolveWeekendExpectedTradingDay('2026-09-13', 0)).toBe('2026-09-11');
+    expect(resolveWeekendExpectedTradingDay('2026-09-14', 1)).toBeNull();
+    expect(resolveWeekendExpectedTradingDay('2026-09-11', 5)).toBeNull();
   });
 });

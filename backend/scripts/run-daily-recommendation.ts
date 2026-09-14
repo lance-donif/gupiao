@@ -87,6 +87,66 @@ const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0
 const DEFAULT_MIN_EXPOSURE_FACTS = process.env.TICKFLOW_API_KEY ? 500 : 100;
 const DEFAULT_TICKFLOW_REFRESH_INTERVAL_DAYS = 30;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const SINA_SESSION_PROBE_TIMEOUT_MS = 15000;
+
+/** 北京日加减天（输入/输出均为 YYYY-MM-DD）。 */
+export const shiftBeijingDay = (day: string, deltaDays: number): string => {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + deltaDays);
+  return date.toISOString().slice(0, 10);
+};
+
+/**
+ * 周末期望交易日（纯本地推导，不碰网络）：A股周六日铁定休市。
+ * 返回 null 表示工作日，需要在线确认（节假日）。
+ */
+export const resolveWeekendExpectedTradingDay = (asOfBeijingDay: string, weekday: number): string | null => {
+  if (weekday === 0) {
+    return shiftBeijingDay(asOfBeijingDay, -2);
+  }
+  if (weekday === 6) {
+    return shiftBeijingDay(asOfBeijingDay, -1);
+  }
+  return null;
+};
+
+/** 新浪最后交易日（交易所日历）：探针单只高流动性个股，取其快照日期。 */
+const fetchSinaLastSessionDay = async (): Promise<string> => {
+  const response = await fetch('https://hq.sinajs.cn/list=sh600519', {
+    signal: AbortSignal.timeout(SINA_SESSION_PROBE_TIMEOUT_MS),
+    headers: { Referer: 'https://finance.sina.com.cn' },
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const buffer = await response.arrayBuffer();
+  const text = new TextDecoder('gbk').decode(buffer);
+  const match = text.match(/,(\d{4}-\d{2}-\d{2}),\d{2}:\d{2}:\d{2}/);
+  if (!match?.[1]) {
+    throw new Error('sina_session_date_not_found');
+  }
+  return match[1];
+};
+
+/**
+ * 期望最新交易日（YYYY-MM-DD）：周末本地推导，工作日用新浪确认。
+ * 新浪不可用时退回 asOf 当日（严格口径，只放行不收紧）。
+ */
+export const resolveExpectedLatestTradingDay = async (asOf: Date): Promise<string> => {
+  const asOfDay = getBeijingDateKey(asOf);
+  const weekday = new Date(`${asOfDay}T00:00:00Z`).getUTCDay();
+  const weekendDay = resolveWeekendExpectedTradingDay(asOfDay, weekday);
+  if (weekendDay !== null) {
+    return weekendDay;
+  }
+  try {
+    const sinaDay = await fetchSinaLastSessionDay();
+    return sinaDay <= asOfDay ? sinaDay : asOfDay;
+  }
+  catch {
+    return asOfDay;
+  }
+};
 const TICKFLOW_SW_UNIVERSE_SOURCE = 'tickflow_sw_universe';
 
 interface IStockExposureFreshnessResult {
@@ -847,16 +907,18 @@ const runFromForecastMode = async (
       ? getBeijingDateKey(latestCandleRaw)
       : null;
     const asOfBeijingDay = getBeijingDateKey(asOf);
-    if (latestCandleDay === null || latestCandleDay < asOfBeijingDay) {
+    // 期望最新交易日（周末=周五，工作日节假日用新浪确认），而非 asOf 当日。
+    const expectedTradingDay = await resolveExpectedLatestTradingDay(asOf);
+    if (latestCandleDay === null || latestCandleDay < expectedTradingDay) {
       const gapDays = latestCandleDay === null
         ? 'unknown'
-        : Math.round((new Date(asOfBeijingDay).getTime() - new Date(latestCandleDay).getTime()) / ONE_DAY_MS);
+        : Math.round((new Date(expectedTradingDay).getTime() - new Date(latestCandleDay).getTime()) / ONE_DAY_MS);
       throw new PipelineStopError(
         'candle_stale',
-        `Candle 数据未同步到 asOf 北京日：最新=${latestCandleDay}, asOf=${asOfBeijingDay}, 差值=${gapDays} 天，停止推荐`,
+        `Candle 数据未同步到期望交易日：最新=${latestCandleDay}, 期望=${expectedTradingDay}, asOf=${asOfBeijingDay}, 差值=${gapDays} 天，停止推荐`,
       );
     }
-    console.log(`[candle_check] OK 最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}`);
+    console.log(`[candle_check] OK 最新 Candle 日=${latestCandleDay}, 期望交易日=${expectedTradingDay}, asOf 日=${asOfBeijingDay}`);
     activeStep = null;
 
     // 3. 复制源 trace 的 CausalSignalCandidate 到本 trace（不重新跑 LLM 抽取）
@@ -1392,17 +1454,18 @@ const runRegistryDailyPipeline = async (input: {
       const latestCandleRaw = candleCheckRows[0]?.latest;
       const latestCandleDay = latestCandleRaw instanceof Date ? getBeijingDateKey(latestCandleRaw) : null;
       const asOfBeijingDay = getBeijingDateKey(asOf);
-      if (latestCandleDay === null || latestCandleDay < asOfBeijingDay) {
+      const expectedTradingDay = await resolveExpectedLatestTradingDay(asOf);
+      if (latestCandleDay === null || latestCandleDay < expectedTradingDay) {
         const gapDays = latestCandleDay === null
           ? 'unknown'
-          : Math.round((new Date(asOfBeijingDay).getTime() - new Date(latestCandleDay).getTime()) / ONE_DAY_MS);
-        console.error(`[candle_check] FAIL 最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天`);
+          : Math.round((new Date(expectedTradingDay).getTime() - new Date(latestCandleDay).getTime()) / ONE_DAY_MS);
+        console.error(`[candle_check] FAIL 最新 Candle 日=${latestCandleDay}, 期望交易日=${expectedTradingDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天`);
         throw new PipelineStopError(
           'candle_stale',
-          `Candle 数据未同步到 asOf 北京日：最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天，停止推荐`,
+          `Candle 数据未同步到期望交易日：最新 Candle 日=${latestCandleDay}, 期望=${expectedTradingDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天，停止推荐`,
         );
       }
-      console.log(`[candle_check] OK 最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}, 校验通过`);
+      console.log(`[candle_check] OK 最新 Candle 日=${latestCandleDay}, 期望交易日=${expectedTradingDay}, asOf 日=${asOfBeijingDay}, 校验通过`);
       return { latestCandleDay, asOfBeijingDay };
     }),
 
@@ -2321,17 +2384,18 @@ async function executeMain(args: Record<string, string>, runLease: PipelineRunLe
       ? getBeijingDateKey(latestCandleRaw)
       : null;
     const asOfBeijingDay = getBeijingDateKey(asOf);
-    if (latestCandleDay === null || latestCandleDay < asOfBeijingDay) {
+    const expectedTradingDay = await resolveExpectedLatestTradingDay(asOf);
+    if (latestCandleDay === null || latestCandleDay < expectedTradingDay) {
       const gapDays = latestCandleDay === null
         ? 'unknown'
-        : Math.round((new Date(asOfBeijingDay).getTime() - new Date(latestCandleDay).getTime()) / ONE_DAY_MS);
-      console.error(`[candle_check] FAIL 最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天`);
+        : Math.round((new Date(expectedTradingDay).getTime() - new Date(latestCandleDay).getTime()) / ONE_DAY_MS);
+      console.error(`[candle_check] FAIL 最新 Candle 日=${latestCandleDay}, 期望交易日=${expectedTradingDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天`);
       throw new PipelineStopError(
         'candle_stale',
-        `Candle 数据未同步到 asOf 北京日：最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天，停止推荐`,
+        `Candle 数据未同步到期望交易日：最新 Candle 日=${latestCandleDay}, 期望=${expectedTradingDay}, asOf 日=${asOfBeijingDay}, 差值=${gapDays} 天，停止推荐`,
       );
     }
-    console.log(`[candle_check] OK 最新 Candle 日=${latestCandleDay}, asOf 日=${asOfBeijingDay}, 校验通过`);
+    console.log(`[candle_check] OK 最新 Candle 日=${latestCandleDay}, 期望交易日=${expectedTradingDay}, asOf 日=${asOfBeijingDay}, 校验通过`);
     activeStep = null;
 
     activeStep = 'scoring_recommendation';
