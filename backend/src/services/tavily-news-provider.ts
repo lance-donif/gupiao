@@ -2,6 +2,7 @@ import type { INewsSourceRequest, IProviderNewsArticlePayload, IProviderNewsResp
 import crypto from 'node:crypto';
 import { SourceFailureCategory } from '../sources/contracts.js';
 import { normalizeBaseUrl, toNonEmptyString } from '../lib/url-utils.js';
+import { readNewsText } from './news-http.js';
 
 export interface IAkToolsNewsProviderOptions {
   readonly baseUrl: string;
@@ -30,35 +31,6 @@ const getEndpointTimeoutMs = (options: IAkToolsNewsProviderOptions): number => {
   return Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.floor(timeoutMs) : DEFAULT_ENDPOINT_TIMEOUT_MS;
 };
 
-const fetchWithTimeout = async (
-  fetchImpl: typeof fetch,
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<Response> => {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const request = fetchImpl(url, {
-    ...init,
-    signal: controller.signal,
-  });
-  const timeout = new Promise<Response>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`timeout after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-
-  try {
-    return await Promise.race([request, timeout]);
-  }
-  finally {
-    if (timer !== null) {
-      clearTimeout(timer);
-    }
-  }
-};
-
 const parseAktoolsDate = (raw: string): Date | null => {
   const normalized = raw.trim();
   const isoWithOffset = /^\d{4}-\d{2}-\d{2}T/u.test(normalized) && /(?:Z|[+-]\d{2}:\d{2})$/u.test(normalized);
@@ -74,7 +46,7 @@ const parseAktoolsDate = (raw: string): Date | null => {
   }
 
   const [, year, month, day, hour = '00', minute = '00', second = '00'] = match;
-  return new Date(Date.UTC(
+  const parsed = new Date(Date.UTC(
     Number(year),
     Number(month) - 1,
     Number(day),
@@ -82,6 +54,18 @@ const parseAktoolsDate = (raw: string): Date | null => {
     Number(minute),
     Number(second),
   ));
+  const beijing = new Date(parsed.getTime() + 8 * 3600_000);
+  if (beijing.getUTCFullYear() !== Number(year) || beijing.getUTCMonth() + 1 !== Number(month)
+    || beijing.getUTCDate() !== Number(day) || beijing.getUTCHours() !== Number(hour)
+    || beijing.getUTCMinutes() !== Number(minute) || beijing.getUTCSeconds() !== Number(second)) return null;
+  return parsed;
+};
+
+const parseCalendarTime = (record: IAkToolsRecord): Date | null => {
+  const day = toNonEmptyString(record['日期']);
+  const time = toNonEmptyString(record['时间']);
+  if (!day || !/^\d{4}-\d{2}-\d{2}$/u.test(day) || !time || !/^\d{2}:\d{2}(?::\d{2})?$/u.test(time)) return null;
+  return parseAktoolsDate(`${day} ${time}`);
 };
 
 const toIsoString = (raw: string | null, fallback: Date): string => {
@@ -119,8 +103,10 @@ const isToday = (publishedAt: string, referenceDate: Date): boolean => {
   return getBeijingDateKey(referenceDate) === getBeijingDateKey(published);
 };
 
-const buildQueryUrl = (baseUrl: string, endpoint: string): string => {
-  return `${normalizeBaseUrl(baseUrl)}/api/public/${endpoint}`;
+const buildQueryUrl = (baseUrl: string, endpoint: string, asOf: Date): string => {
+  const url = new URL(`${normalizeBaseUrl(baseUrl)}/api/public/${endpoint}`);
+  if (endpoint === 'news_economic_baidu') url.searchParams.set('date', getBeijingDateKey(asOf).replaceAll('-', ''));
+  return url.toString();
 };
 
 const createRecordId = (
@@ -239,7 +225,9 @@ const mapRecord = (
       .filter((item): item is string => item !== null)
       .join(' ');
     const publishedAtRaw = `${toNonEmptyString(record['日期']) ?? ''} ${toNonEmptyString(record['时间']) ?? ''}`.trim();
-    const publishedAt = toIsoString(publishedAtRaw, metadata.requestedAt);
+    const parsedDate = parseCalendarTime(record);
+    if (!parsedDate) return null;
+    const publishedAt = parsedDate.toISOString();
 
     if (!title || !summary) {
       return null;
@@ -277,6 +265,9 @@ export class AkToolsHttpNewsProvider implements ISourceProvider<INewsSourceReque
     checkedAt: new Date(0),
     detail: 'not-checked',
   };
+  private lastFetchSummary: Readonly<Record<string, unknown>> = {};
+
+  public getFetchSummary(): Readonly<Record<string, unknown>> { return this.lastFetchSummary; }
 
   public constructor(private readonly options: IAkToolsNewsProviderOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -296,53 +287,49 @@ export class AkToolsHttpNewsProvider implements ISourceProvider<INewsSourceReque
     const touchedEndpoints: string[] = [];
     const skippedEndpoints: string[] = [];
     const endpointTimeoutMs = getEndpointTimeoutMs(this.options);
+    const endpoints: Record<string, unknown> = {};
 
     for (const spec of ENDPOINT_SPECS) {
-      const url = buildQueryUrl(this.options.baseUrl, spec.endpoint);
-      let response: Response;
-
+      const url = buildQueryUrl(this.options.baseUrl, spec.endpoint, referenceDate);
       try {
-        response = await fetchWithTimeout(this.fetchImpl, url, {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json',
-          },
-        }, endpointTimeoutMs);
-      }
-      catch (error) {
+        const payload: unknown = JSON.parse(await readNewsText(url, { fetchImpl: this.fetchImpl, timeoutMs: endpointTimeoutMs, init: { headers: { Accept: 'application/json' } } }));
+        if (!Array.isArray(payload)) {
+          throw new Error(`AKTools returned non-array payload for ${spec.endpoint}`);
+        }
+
+        touchedEndpoints.push(spec.endpoint);
+        const filteredRecords = payload
+          .filter((item): item is IAkToolsRecord => item !== null && typeof item === 'object')
+          .filter(item => matchesQuery(item, request.query));
+        const mappedItems = filteredRecords
+          .map((item, index) => mapRecord(spec, item, request.query, metadata, index))
+          .filter((item): item is IProviderNewsArticlePayload => item !== null);
+
+        const notFutureItems = mappedItems.filter(item => new Date(item.publishedAt) <= referenceDate);
+        const visibleItems = notFutureItems.filter(item => isToday(item.publishedAt, referenceDate));
+        endpoints[spec.endpoint] = {
+          status: visibleItems.length ? 'success' : 'empty', rawCount: payload.length,
+          matchedCount: filteredRecords.length, invalidCount: filteredRecords.length - mappedItems.length,
+          invalidTimeCount: spec.endpoint === 'news_economic_baidu' ? filteredRecords.filter(item => parseCalendarTime(item) === null).length : 0,
+          futureCount: mappedItems.length - notFutureItems.length, outsideDateCount: notFutureItems.length - visibleItems.length,
+          validCount: visibleItems.length,
+        };
+        aggregatedItems.push(...visibleItems);
+      } catch (error) {
         const message = `AKTools request failed for ${spec.endpoint}: ${error instanceof Error ? error.message : 'unknown error'}`;
         skippedEndpoints.push(message);
-        continue;
+        endpoints[spec.endpoint] = { status: 'failed', error: message };
       }
-
-      if (!response.ok) {
-        const message = `AKTools request failed for ${spec.endpoint} with HTTP ${response.status}`;
-        skippedEndpoints.push(message);
-        continue;
-      }
-
-      const payload = await response.json();
-      if (!Array.isArray(payload)) {
-        const message = `AKTools returned non-array payload for ${spec.endpoint}`;
-        skippedEndpoints.push(message);
-        continue;
-      }
-
-      touchedEndpoints.push(spec.endpoint);
-      const filteredRecords = payload
-        .filter((item): item is IAkToolsRecord => item !== null && typeof item === 'object')
-        .filter(item => matchesQuery(item, request.query));
-      const mappedItems = filteredRecords
-        .map((item, index) => mapRecord(spec, item, request.query, metadata, index))
-        .filter((item): item is IProviderNewsArticlePayload => item !== null);
-
-      aggregatedItems.push(...mappedItems);
     }
 
     const effectiveLimit = Math.max(1, Math.floor(request.limit ?? this.options.maxResults));
     const limitedItems = aggregatedItems
       .filter(item => isToday(item.publishedAt, referenceDate))
       .slice(0, effectiveLimit);
+    this.lastFetchSummary = {
+      status: skippedEndpoints.length ? (touchedEndpoints.length ? 'partial' : 'failed') : limitedItems.length ? 'success' : 'empty',
+      endpoints, failedEndpoints: skippedEndpoints, returnedCount: limitedItems.length,
+    };
 
     if (limitedItems.length === 0) {
       const skippedDetail = skippedEndpoints.length > 0 ? `; skipped=${skippedEndpoints.join(' | ')}` : '';

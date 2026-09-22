@@ -17,6 +17,7 @@ import { STAGE_IDS, type StageId } from './pipeline/stage-registry.js';
 const DEFAULT_AKTOOLS_BASE_URL = process.env.AKTOOLS_BASE_URL ?? 'http://127.0.0.1:8010';
 const NEWS_FETCH_CACHE_BUCKET_MINUTES = 15;
 const NEWS_FETCH_CACHE_TTL_MS = NEWS_FETCH_CACHE_BUCKET_MINUTES * 60 * 1000;
+export const NEWS_FETCH_VERSION = 'news-fetch-v2';
 const SCORING_EXPOSURE_SOURCES = [
   'tickflow_sw_universe',
   'akshare_industry_board_em',
@@ -70,6 +71,7 @@ export interface IStockExposureVerificationResult {
 }
 
 export interface IAktoolsNewsFetchSummary {
+  readonly providerSummary: Readonly<Record<string, unknown>>;
   readonly articles: readonly {
     readonly title: string;
     readonly summary: string;
@@ -276,9 +278,16 @@ const loadNewsNowArticles = async (filePath: string, asOf: Date): Promise<readon
   });
 };
 
+class AkToolsNewsFetchError extends Error {
+  public constructor(message: string, public readonly providerSummary: Readonly<Record<string, unknown>>) {
+    super(message);
+  }
+}
+
 const fetchAkToolsArticles = async (asOf: Date): Promise<{
   readonly articles: readonly IDailyArticle[];
   readonly breakdown: Record<string, number>;
+  readonly providerSummary: Readonly<Record<string, unknown>>;
 }> => {
   const provider = new AkToolsHttpNewsProvider({
     baseUrl: DEFAULT_AKTOOLS_BASE_URL,
@@ -290,7 +299,7 @@ const fetchAkToolsArticles = async (asOf: Date): Promise<{
   );
 
   if (result.status !== 'success') {
-    throw new Error(result.failure.message);
+    throw new AkToolsNewsFetchError(result.failure.message, provider.getFetchSummary());
   }
 
   const breakdown: Record<string, number> = {};
@@ -321,6 +330,7 @@ const fetchAkToolsArticles = async (asOf: Date): Promise<{
   return {
     articles,
     breakdown,
+    providerSummary: provider.getFetchSummary(),
   };
 };
 
@@ -383,6 +393,7 @@ const resolveAkToolsNewsWithCache = async (
       return {
         articles: serializeArticles(fetched.articles),
         breakdown: fetched.breakdown,
+        providerSummary: fetched.providerSummary,
         totalArticles: fetched.articles.length,
       };
     },
@@ -398,6 +409,8 @@ const resolveAkToolsNewsWithCache = async (
       baseUrl: DEFAULT_AKTOOLS_BASE_URL,
       totalArticles: articles.length,
       breakdown: result.summary.breakdown,
+      providerSummary: result.summary.providerSummary,
+      status: result.summary.providerSummary.status,
     },
   };
 };
@@ -545,12 +558,16 @@ export const resolveNewsInput = async (
   }
 
   try {
-    const bucketKey = buildBeijingMinuteBucketKey(asOf, NEWS_FETCH_CACHE_BUCKET_MINUTES);
+    const bucketKey = `${buildBeijingMinuteBucketKey(asOf, NEWS_FETCH_CACHE_BUCKET_MINUTES)}:${NEWS_FETCH_VERSION}`;
     // AKTools 新闻源尽力而为：挂掉/为空只记 summary，不中断链路（主源仍是 newsnow）。
     const aktoolsPromise = isAktoolsNewsEnabled(args)
       ? resolveAkToolsNewsWithCache(prisma, traceId, clusterKey, asOf, bucketKey).catch((error: unknown) => ({
         articles: [] as readonly IDailyArticle[],
-        summary: { unavailable: error instanceof Error ? error.message : String(error) },
+        summary: {
+          unavailable: error instanceof Error ? error.message : String(error),
+          status: error instanceof AkToolsNewsFetchError ? error.providerSummary.status : 'failed',
+          ...(error instanceof AkToolsNewsFetchError ? { providerSummary: error.providerSummary } : {}),
+        },
         cacheHit: false,
       }))
       : Promise.resolve({
@@ -576,7 +593,7 @@ export const resolveNewsInput = async (
           bucketKey,
           ttlMinutes: NEWS_FETCH_CACHE_BUCKET_MINUTES,
           requiredSources: ['newsnow'],
-          optionalSources: ['aktools', 'sina-finance-roll', 'sina-rss', 'google-news-rss'],
+          optionalSources: ['aktools', 'sina-finance-feed', 'google-news-rss'],
           newsSourceMode: getNewsSourceMode(args),
         },
         aktools: aktoolsResult.summary,

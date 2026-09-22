@@ -31,7 +31,7 @@ export const REGISTRY_INPUT_SCHEMA = 'registry-stage-input-v1';
 
 /** 每个阶段的逻辑版本（进入输入指纹；语义变化时递增即可整体失效旧产物）。 */
 export const DEFAULT_STAGE_VERSIONS: Readonly<Record<StageId, string>> = {
-  news_fetch: 'news-fetch-v1',
+  news_fetch: 'news-fetch-v2',
   news_prepare: 'news-prepare-v1',
   exposure_refresh: 'exposure-refresh-v1',
   causal_extract: 'causal-extract-v1',

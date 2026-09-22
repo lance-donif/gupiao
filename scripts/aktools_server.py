@@ -15,6 +15,7 @@ import akshare as ak
 import pandas as pd
 import requests
 from fastapi import FastAPI, HTTPException, Request
+from scripts.baidu_news import news_economic_baidu
 
 app = FastAPI(title="gupiao-aktools-compat", version="0.1.0")
 
@@ -187,7 +188,7 @@ ENDPOINTS: dict[str, Callable[..., pd.DataFrame]] = {
     "stock_info_global_em": ak.stock_info_global_em,
     "stock_info_global_cls": ak.stock_info_global_cls,
     "stock_info_global_ths": ak.stock_info_global_ths,
-    "news_economic_baidu": ak.news_economic_baidu,
+    "news_economic_baidu": news_economic_baidu,
     "stock_board_industry_name_em": stock_board_industry_name_em,
     "stock_board_industry_cons_em": stock_board_industry_cons_em,
     "stock_board_concept_name_em": stock_board_concept_name_em,

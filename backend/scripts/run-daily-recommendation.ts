@@ -1203,7 +1203,7 @@ const runRegistryDailyPipeline = async (input: {
         prisma,
         traceId,
         'news_input',
-        { asOf, clusterKey, version: 1 },
+        { asOf, clusterKey, version: 2 },
         () => resolveNewsInput(prisma, args, traceId, clusterKey, asOf),
         leaseGuard,
       );
@@ -1240,7 +1240,7 @@ const runRegistryDailyPipeline = async (input: {
         prisma,
         traceId,
         'registry_prepare',
-        { asOf, clusterKey, version: 1 },
+        { asOf, clusterKey, version: 2 },
         async () => {
           const normalizationReport = new NewsIngestNormalizationPipeline().process(toCandidateArticles(articles));
           const deduplicationReport = new NewsIngestDeduplicationPipeline({ blockingTerms: (await getKeywordDictionary(prisma)).blockingTerms }).process(normalizationReport.processed);
@@ -2126,11 +2126,11 @@ async function executeMain(args: Record<string, string>, runLease: PipelineRunLe
     await TraceManager.startStepTrace(prisma, traceId, 'news_fetch', {
       clusterKey,
       asOf: asOf.toISOString(),
-      requiredSources: ['aktools', 'newsnow'],
-      optionalSources: ['sina-finance-roll', 'sina-rss', 'google-news-rss'],
+      requiredSources: ['newsnow'],
+      optionalSources: ['aktools', 'sina-finance-feed', 'google-news-rss'],
       newsSourceMode: getNewsSourceMode(args),
     });
-    const savedNewsInput = await checkpointWork(prisma, traceId, 'news_input', {asOf,clusterKey,version:1}, () => resolveNewsInput(prisma, args, traceId, clusterKey, asOf));
+    const savedNewsInput = await checkpointWork(prisma, traceId, 'news_input', {asOf,clusterKey,version:2}, () => resolveNewsInput(prisma, args, traceId, clusterKey, asOf));
     const newsInput = {...savedNewsInput, articles:savedNewsInput.articles.map(article=>({...article,publishedAt:new Date(article.publishedAt)}))};
     markStepEnd('news_fetch', stepStartedAt);
     const articles = newsInput.articles;

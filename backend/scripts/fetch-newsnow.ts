@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { writeFile, mkdir, readdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { readNewsText } from '../src/services/news-http.js';
 
 // ponytail: Bun v1.3.14（macOS）对 GTS Root R4 链的验证偶发失败，
 // 若未显式配置 CA 文件，则回退到系统证书包。
@@ -115,18 +116,18 @@ const NEWSNOW_SOURCE_IDS = [
   'iqiyi-hot-ranklist',
 ] as const;
 
-const parsePositiveIntegerEnv = (name: string, fallback: number): number => {
+const parsePositiveIntegerEnv = (name: string, fallback: number, minimum = 1): number => {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
   const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(`${name} must be a positive integer`);
+  if (!Number.isInteger(parsed) || parsed < minimum) {
+    throw new Error(`${name} must be an integer >= ${minimum}`);
   }
   return parsed;
 };
 
 const NEWSNOW_REQUEST_TIMEOUT_MS = parsePositiveIntegerEnv('NEWSNOW_REQUEST_TIMEOUT_MS', 60_000);
-const NEWSNOW_MAX_SOURCES = parsePositiveIntegerEnv('NEWSNOW_MAX_SOURCES', 0);
+const NEWSNOW_MAX_SOURCES = parsePositiveIntegerEnv('NEWSNOW_MAX_SOURCES', 0, 0);
 
 // 排除的视频/娱乐类域名
 const EXCLUDED_DOMAINS = [
@@ -183,27 +184,6 @@ const getHeaders = (): Record<string, string> => ({
   'Referer': `${NEWSNOW_ORIGIN}/`,
 });
 
-async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), NEWSNOW_REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(url, {
-      ...init,
-      headers: { ...getHeaders(), ...(init.headers ?? {}) },
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`NewsNow API 返回 ${response.status}: ${await response.text()}`);
-    }
-
-    return response;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 interface INewsNowApiItem {
   readonly id: string;
   readonly title: string;
@@ -226,32 +206,55 @@ function extractSummary(extra: unknown): string {
   return '';
 }
 
-async function fetchNewsNowSources(
+export function validateNewsNowSources(data: unknown): readonly INewsNowApiSource[] {
+  if (!Array.isArray(data)) throw new Error('NewsNow API 返回非数组数据');
+  let itemCount = 0;
+  for (const source of data) {
+    if (!source || typeof source !== 'object' || typeof source.id !== 'string'
+      || typeof source.status !== 'string' || !Array.isArray(source.items)) {
+      throw new Error('NewsNow API 返回非法来源结构');
+    }
+    for (const item of source.items) {
+      if (!item || typeof item !== 'object' || typeof item.title !== 'string' || typeof item.url !== 'string') {
+        throw new Error(`NewsNow API 来源 ${source.id} 返回非法新闻结构`);
+      }
+    }
+    itemCount += source.items.length;
+  }
+  if (itemCount === 0) throw new Error('NewsNow API 没有返回新闻');
+  return data as INewsNowApiSource[];
+}
+
+export async function fetchNewsNowSources(
   maxAttempts = 3,
+  options: { readonly fetchImpl?: typeof fetch; readonly timeoutMs?: number; readonly retryDelayMs?: number } = {},
 ): Promise<readonly INewsNowApiSource[]> {
   const sourceIds = NEWSNOW_MAX_SOURCES > 0
     ? NEWSNOW_SOURCE_IDS.slice(0, NEWSNOW_MAX_SOURCES)
     : NEWSNOW_SOURCE_IDS;
 
   let lastError: unknown;
+  maxAttempts = Math.max(1, Math.min(3, maxAttempts));
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const response = await fetchWithTimeout(NEWSNOW_API_URL, {
-        method: 'POST',
-        body: JSON.stringify({ sources: sourceIds }),
+      const text = await readNewsText(NEWSNOW_API_URL, {
+        fetchImpl: options.fetchImpl,
+        timeoutMs: options.timeoutMs ?? NEWSNOW_REQUEST_TIMEOUT_MS,
+        init: { method: 'POST', headers: getHeaders(), body: JSON.stringify({ sources: sourceIds }) },
       });
-      const data = (await response.json()) as unknown;
-      if (!Array.isArray(data)) {
-        throw new Error('NewsNow API 返回非数组数据');
+      if (!text.trim()) throw new Error('NewsNow API 返回空响应体');
+      let data: unknown;
+      try { data = JSON.parse(text); } catch {
+        throw new Error(`NewsNow API 返回非法 JSON（${text.length} 字符）`);
       }
-      return data as INewsNowApiSource[];
+      return validateNewsNowSources(data);
     }
     catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`  第 ${attempt}/${maxAttempts} 次请求失败：${message}`);
       if (attempt < maxAttempts) {
-        await delay(1000 * attempt);
+        await delay((options.retryDelayMs ?? 1000) * attempt);
       }
     }
   }

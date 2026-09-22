@@ -1,6 +1,8 @@
 import type { INewsSourceArticle } from '../sources/contracts.js';
 import crypto from 'node:crypto';
 import { toNonEmptyString } from '../lib/url-utils.js';
+import { isRetryableNewsError, readNewsText } from './news-http.js';
+import { SinaFinanceFeedSourceAdapter } from './sina-finance-feed.js';
 
 export type PublicNewsSourceMode = 'baseline' | 'expanded';
 
@@ -14,6 +16,7 @@ export interface IPublicNewsSourceAdapterFetchInput {
 export interface IPublicNewsSourceAdapterResult {
   readonly articles: readonly INewsSourceArticle[];
   readonly summary: Readonly<Record<string, unknown>>;
+  readonly status?: 'success' | 'partial' | 'empty' | 'failed';
 }
 
 export interface IPublicNewsSourceAdapter {
@@ -22,7 +25,7 @@ export interface IPublicNewsSourceAdapter {
 }
 
 export interface IPublicNewsSourceStatus {
-  readonly status: 'success' | 'failed' | 'disabled';
+  readonly status: 'success' | 'partial' | 'empty' | 'failed' | 'disabled';
   readonly articleCount: number;
   readonly elapsedMs: number;
   readonly error?: string;
@@ -74,24 +77,11 @@ export interface IRssNewsSourceAdapterOptions {
   readonly name: string;
   readonly feeds: readonly IRssFeedSpec[];
   readonly fetchImpl?: typeof fetch;
-}
-
-export interface ISinaFinanceRollAdapterOptions {
-  readonly pageUrl?: string;
-  readonly fetchImpl?: typeof fetch;
+  readonly retryOnce?: boolean;
 }
 
 const DEFAULT_PUBLIC_NEWS_TIMEOUT_MS = 12_000;
 const DEFAULT_PUBLIC_NEWS_SOURCE_LIMIT = 300;
-
-const DEFAULT_SINA_RSS_FEEDS: readonly IRssFeedSpec[] = [
-  { name: 'sina-finance-all', url: 'https://rss.sina.com.cn/news/allnews/finance.xml' },
-  { name: 'sina-finance-hot', url: 'https://rss.sina.com.cn/roll/finance/hot_roll.xml' },
-  { name: 'sina-stock-hot', url: 'https://rss.sina.com.cn/roll/stock/hot_roll.xml' },
-  { name: 'sina-future', url: 'https://rss.sina.com.cn/finance/future.xml' },
-] as const;
-
-const DEFAULT_SINA_FINANCE_ROLL_URL = 'https://finance.sina.com.cn/roll/';
 
 const DEFAULT_GOOGLE_NEWS_KEYWORDS: readonly string[] = [
   'A股 产业链',
@@ -123,12 +113,12 @@ const decodeHtmlEntities = (value: string): string =>
 const stripHtml = (value: string): string =>
   normalizeWhitespace(decodeHtmlEntities(decodeCdata(value).replace(/<[^>]+>/gu, ''))) || value;
 
-const parsePublishedAt = (raw: string | null, capturedAt: Date): Date => {
+const parsePublishedAt = (raw: string | null): Date | null => {
   if (!raw) {
-    return capturedAt;
+    return null;
   }
   const parsed = new Date(raw);
-  return Number.isNaN(parsed.getTime()) ? capturedAt : parsed;
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
 const createRecordId = (
@@ -151,24 +141,6 @@ const ensureUrl = (sourceName: string, recordId: string, rawUrl: string | null):
     return rawUrl;
   }
   return `public-news://${sourceName}/${recordId}`;
-};
-
-const fetchTextWithSignal = async (
-  fetchImpl: typeof fetch,
-  url: string,
-  signal: AbortSignal,
-): Promise<string> => {
-  const response = await fetchImpl(url, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
-    },
-    signal,
-  });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-  return await response.text();
 };
 
 const isSinaFinanceArticleUrl = (rawUrl: string): boolean => {
@@ -237,10 +209,9 @@ export const parseRssXml = (input: IParseRssXmlInput): readonly INewsSourceArtic
     const publishedAt = parsePublishedAt(
       toNonEmptyString(extractTagText(block, 'pubDate'))
       ?? toNonEmptyString(extractTagText(block, 'dc:date')),
-      input.capturedAt,
     );
 
-    if (!title || !summary) {
+    if (!title || !summary || !publishedAt) {
       continue;
     }
 
@@ -275,10 +246,9 @@ export const parseRssXml = (input: IParseRssXmlInput): readonly INewsSourceArtic
     const publishedAt = parsePublishedAt(
       toNonEmptyString(extractTagText(block, 'published'))
       ?? toNonEmptyString(extractTagText(block, 'updated')),
-      input.capturedAt,
     );
 
-    if (!title || !summary) {
+    if (!title || !summary || !publishedAt) {
       continue;
     }
 
@@ -346,7 +316,7 @@ export const parseSinaFinanceRollHtml = (input: IParseSinaFinanceRollHtmlInput):
   return articles;
 };
 
-class RssNewsSourceAdapter implements IPublicNewsSourceAdapter {
+export class RssNewsSourceAdapter implements IPublicNewsSourceAdapter {
   public readonly name: string;
 
   private readonly fetchImpl: typeof fetch;
@@ -357,11 +327,31 @@ class RssNewsSourceAdapter implements IPublicNewsSourceAdapter {
   }
 
   public async fetch(input: IPublicNewsSourceAdapterFetchInput): Promise<IPublicNewsSourceAdapterResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+    const deadline = Date.now() + input.timeoutMs;
     const feedResults = await Promise.all(this.options.feeds.map(async (feed) => {
+      let attempts = 0;
       try {
-        const xml = await fetchTextWithSignal(this.fetchImpl, feed.url, controller.signal);
+        let xml = '';
+        while (true) {
+          attempts += 1;
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) throw new Error('RSS source timeout');
+          try {
+            xml = await readNewsText(feed.url, {
+              fetchImpl: this.fetchImpl,
+              // Reserve half the budget for the one allowed retry.
+              timeoutMs: this.options.retryOnce && attempts === 1 ? Math.max(1, Math.floor(remaining / 2)) : remaining,
+              init: { headers: { Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*' } },
+            });
+            break;
+          } catch (error) {
+            if (!this.options.retryOnce || attempts >= 2 || !isRetryableNewsError(error) || Date.now() >= deadline) throw error;
+          }
+        }
+        if (!(/<rss\b[^>]*>[\s\S]*<\/rss\s*>/iu.test(xml) || /<feed\b[^>]*>[\s\S]*<\/feed\s*>/iu.test(xml))
+          || [...xml.matchAll(/<(?:item|entry)\b/giu)].length !== [...xml.matchAll(/<\/(?:item|entry)\s*>/giu)].length) {
+          throw new Error('Invalid RSS/Atom response');
+        }
         return {
           articles: parseRssXml({
             xml,
@@ -370,41 +360,50 @@ class RssNewsSourceAdapter implements IPublicNewsSourceAdapter {
             capturedAt: input.capturedAt,
           }),
           failure: null,
+          rawCount: [...xml.matchAll(/<(?:item|entry)\b/giu)].length,
+          attempts,
         };
       }
       catch (error) {
         return {
           articles: [],
           failure: `${feed.name}: ${error instanceof Error ? error.message : String(error)}`,
+          rawCount: 0,
+          attempts,
         };
       }
     }));
-    clearTimeout(timer);
 
     const articles = feedResults.flatMap(result => result.articles);
     const failures = feedResults
       .map(result => result.failure)
       .filter((failure): failure is string => failure !== null);
 
+    const visible = articles.filter(article => article.publishedAt.getTime() <= input.asOf.getTime());
+    const rawCount = feedResults.reduce((sum, result) => sum + result.rawCount, 0);
     return {
-      articles: articles
-        .filter(article => article.publishedAt.getTime() <= input.asOf.getTime())
-        .slice(0, input.limit),
+      articles: visible.slice(0, input.limit),
+      status: failures.length === this.options.feeds.length && failures.length > 0 ? 'failed'
+        : failures.length > 0 ? 'partial' : visible.length > 0 ? 'success' : 'empty',
       summary: {
         feedCount: this.options.feeds.length,
         failedFeeds: failures,
+        rawCount, validCount: articles.length, invalidCount: rawCount - articles.length,
+        futureCount: articles.length - visible.length, returnedCount: Math.min(visible.length, input.limit),
+        attempts: feedResults.reduce((sum, result) => sum + result.attempts, 0),
       },
     };
   }
 }
 
-class GoogleNewsRssSourceAdapter extends RssNewsSourceAdapter {
+export class GoogleNewsRssSourceAdapter extends RssNewsSourceAdapter {
   public constructor(options: {
     readonly keywords?: readonly string[];
     readonly fetchImpl?: typeof fetch;
   } = {}) {
     super({
       name: 'google-news-rss',
+      retryOnce: true,
       fetchImpl: options.fetchImpl,
       feeds: createGoogleNewsRssUrls(options.keywords ?? DEFAULT_GOOGLE_NEWS_KEYWORDS)
         .map((url, index) => ({
@@ -412,43 +411,6 @@ class GoogleNewsRssSourceAdapter extends RssNewsSourceAdapter {
           url,
         })),
     });
-  }
-}
-
-class SinaFinanceRollSourceAdapter implements IPublicNewsSourceAdapter {
-  public readonly name = 'sina-finance-roll';
-
-  private readonly pageUrl: string;
-
-  private readonly fetchImpl: typeof fetch;
-
-  public constructor(options: ISinaFinanceRollAdapterOptions = {}) {
-    this.pageUrl = options.pageUrl ?? DEFAULT_SINA_FINANCE_ROLL_URL;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-  }
-
-  public async fetch(input: IPublicNewsSourceAdapterFetchInput): Promise<IPublicNewsSourceAdapterResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), input.timeoutMs);
-    try {
-      const html = await fetchTextWithSignal(this.fetchImpl, this.pageUrl, controller.signal);
-      const articles = parseSinaFinanceRollHtml({
-        html,
-        pageUrl: this.pageUrl,
-        capturedAt: input.capturedAt,
-      });
-      return {
-        articles: articles
-          .filter(article => article.publishedAt.getTime() <= input.asOf.getTime())
-          .slice(0, input.limit),
-        summary: {
-          pageUrl: this.pageUrl,
-        },
-      };
-    }
-    finally {
-      clearTimeout(timer);
-    }
   }
 }
 
@@ -493,7 +455,7 @@ export class PublicNewsSourceOrchestrator {
           .slice(0, this.options.perSourceLimit);
         articles.push(...visibleArticles);
         sourceStatuses[adapter.name] = {
-          status: 'success',
+          status: result.status && result.status !== 'success' ? result.status : visibleArticles.length > 0 ? 'success' : 'empty',
           articleCount: visibleArticles.length,
           elapsedMs: Date.now() - startedAt,
           summary: result.summary,
@@ -544,14 +506,7 @@ export const createDefaultPublicNewsSourceOrchestrator = (options: {
     timeoutMs: options.timeoutMs ?? DEFAULT_PUBLIC_NEWS_TIMEOUT_MS,
     perSourceLimit: options.perSourceLimit ?? DEFAULT_PUBLIC_NEWS_SOURCE_LIMIT,
     adapters: [
-      new SinaFinanceRollSourceAdapter({
-        fetchImpl: options.fetchImpl,
-      }),
-      new RssNewsSourceAdapter({
-        name: 'sina-rss',
-        feeds: DEFAULT_SINA_RSS_FEEDS,
-        fetchImpl: options.fetchImpl,
-      }),
+      new SinaFinanceFeedSourceAdapter(options.fetchImpl),
       new GoogleNewsRssSourceAdapter({
         fetchImpl: options.fetchImpl,
       }),
