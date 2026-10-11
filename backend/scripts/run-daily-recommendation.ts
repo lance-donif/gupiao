@@ -76,6 +76,7 @@ import {
   type StopAfterStage,
   type IStockExposureVerificationResult,
 } from '../src/services/pipeline-utils.js';
+import { shiftBeijingDay } from '../src/lib/beijing-time.js';
 
 loadBackendEnv();
 
@@ -88,13 +89,6 @@ const DEFAULT_MIN_EXPOSURE_FACTS = process.env.TICKFLOW_API_KEY ? 500 : 100;
 const DEFAULT_TICKFLOW_REFRESH_INTERVAL_DAYS = 30;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const SINA_SESSION_PROBE_TIMEOUT_MS = 15000;
-
-/** 北京日加减天（输入/输出均为 YYYY-MM-DD）。 */
-export const shiftBeijingDay = (day: string, deltaDays: number): string => {
-  const date = new Date(`${day}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + deltaDays);
-  return date.toISOString().slice(0, 10);
-};
 
 /**
  * 周末期望交易日（纯本地推导，不碰网络）：A股周六日铁定休市。

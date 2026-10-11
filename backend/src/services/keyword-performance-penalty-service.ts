@@ -9,6 +9,7 @@ import {
   type SmoothPenaltyObservation,
   type SmoothPenaltyResult,
 } from './event-scoring/smooth-penalty.js';
+import { toBeijingDayKey } from '../lib/beijing-time.js';
 
 export interface IKeywordPerformancePenaltyRefreshInput {
   readonly asOf: Date;
@@ -43,7 +44,7 @@ const DEFAULT_COOLDOWN_DAYS = PENALTY.cooldownDays;
 const DEFAULT_LOSS_THRESHOLD_PCT = PENALTY.threshold;
 const DEFAULT_PENALTY_FACTOR = PENALTY.factor;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+
 /** 平滑惩罚最小加权样本量：n<5 不惩罚（与 DEFAULT_SMOOTH_PENALTY_CONFIG 口径一致）。 */
 const SMOOTH_MIN_SAMPLES = 5;
 /** 审计 JSON 中保留的责任权重明细条数上限（避免 reason 字段无界膨胀）。 */
@@ -85,8 +86,7 @@ const uniqueKeywordsFromEvidence = (row: Record<string, unknown>): readonly stri
 };
 
 /** 北京时间口径的交易日键（YYYY-MM-DD）。 */
-const toTradingDayKey = (value: Date | string): string =>
-  new Date(new Date(value).getTime() + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
+const toTradingDayKey = (value: Date | string): string => toBeijingDayKey(value);
 
 interface ISessionCalendar {
   readonly sessions: readonly string[];

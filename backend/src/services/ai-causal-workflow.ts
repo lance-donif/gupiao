@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { sha256Json } from '../lib/hash-utils.js';
 import { Prisma } from '@prisma/client';
 import { planAiBatch, type AiBatchSample } from './ai-batch-planner.js';
 import { aiRequestContext } from './ai-request-context.js';
@@ -440,7 +441,7 @@ export class DurableCausalExtractionService {
       if(!legacyRow.length)throw new AiNeedsAttentionError('No AI workflow row for legacy resume');
       if(new Date(String(legacyRow[0].checkpointAsOf)).getTime()!==input.asOf.getTime() || String(legacyRow[0].clusterKey)!==input.clusterKey)throw new AiNeedsAttentionError('AI input changed; start a new trace');
     }
-    const manifestVersion=createHash('sha256').update(JSON.stringify({version:this.session.workflowVersion,prompt:durablePromptVersion(this.extractor),asOf:input.asOf,news:input.news})).digest('hex');
+    const manifestVersion=sha256Json({version:this.session.workflowVersion,prompt:durablePromptVersion(this.extractor),asOf:input.asOf,news:input.news});
     await prisma.$transaction(async(tx:any)=>{
       const existing=await tx.$queryRawUnsafe('SELECT checkpoint->>\'aiManifestVersion\' AS version FROM "AiWorkflow" WHERE "traceId"=$1 FOR UPDATE',input.traceId);
       if(existing[0]?.version && existing[0].version!==manifestVersion)throw new AiNeedsAttentionError('AI input or prompt changed; start a new trace');

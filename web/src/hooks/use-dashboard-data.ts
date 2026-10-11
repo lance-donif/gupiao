@@ -1,6 +1,5 @@
 import * as React from 'react';
 import type {
-  BatchProgress,
   DashboardEvidencePayload,
   DashboardNetworkPayload,
   DashboardSnapshotPayload,
@@ -31,11 +30,25 @@ async function cachedLoad<T>(key: string, loader: () => Promise<T>): Promise<T> 
   return promise;
 }
 
-function useAsync<T>(loader: () => Promise<T>, deps: React.DependencyList, enabled = true): AsyncState<T> {
+/**
+ * @param cacheScope 缓存命名空间。不同接口即使deps 相同也必须传不同scope，
+ *                   否则会共用同一个 inflight promise（曾导致"亲友网络"Tab 永远拿不到数据）。
+ * @param deps       触发重新请求的业务依赖；loader 的闭包变量也必须在此列全。
+ */
+function useAsync<T>(
+  cacheScope: string,
+  loader: () => Promise<T>,
+  deps: React.DependencyList,
+  enabled = true,
+): AsyncState<T> {
   const [data, setData] = React.useState<T | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [reloadToken, setReloadToken] = React.useState(0);
+
+  // 用 ref 持有最新 loader，避免把每次渲染的新闭包塞进依赖数组造成无限循环。
+  const loaderRef = React.useRef(loader);
+  loaderRef.current = loader;
 
   React.useEffect(() => {
     if (!enabled) {
@@ -47,8 +60,8 @@ function useAsync<T>(loader: () => Promise<T>, deps: React.DependencyList, enabl
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    const cacheKey = JSON.stringify([...deps, reloadToken]);
-    cachedLoad(cacheKey, loader)
+    const cacheKey = JSON.stringify([cacheScope, ...deps, reloadToken]);
+    cachedLoad(cacheKey, () => loaderRef.current())
       .then((payload) => {
         if (!controller.signal.aborted) {
           setData(payload);
@@ -65,14 +78,11 @@ function useAsync<T>(loader: () => Promise<T>, deps: React.DependencyList, enabl
         }
       });
     return () => controller.abort();
-  }, [...deps, enabled, reloadToken]);
+  }, [cacheScope, enabled, reloadToken, ...deps]);
 
-  return {
-    data,
-    loading,
-    error,
-    reload: () => setReloadToken(value => value + 1),
-  };
+  const reload = React.useCallback(() => setReloadToken(value => value + 1), []);
+
+  return { data, loading, error, reload };
 }
 
 export function useDashboardSnapshot(input: {
@@ -82,6 +92,7 @@ export function useDashboardSnapshot(input: {
   refreshKey?: string | null;
 }) {
   return useAsync<DashboardSnapshotPayload>(
+    'dashboard-snapshot',
     () => api.getDashboardSnapshot({
       group_id: input.groupId,
       display_date: input.displayDate,
@@ -93,6 +104,7 @@ export function useDashboardSnapshot(input: {
 
 export function useStockDetail(input: { symbol: string | null; traceId: string; groupId: string; strategyId: string }) {
   return useAsync<DashboardStockDetailPayload>(
+    'stock-detail',
     () => api.getDashboardStockDetail(input.symbol ?? '', {
       trace_id: input.traceId,
       group_id: input.groupId,
@@ -105,6 +117,7 @@ export function useStockDetail(input: { symbol: string | null; traceId: string; 
 
 export function useStockEvidence(input: { symbol: string | null; traceId: string; groupId: string }) {
   return useAsync<DashboardEvidencePayload>(
+    'stock-evidence',
     () => api.getDashboardStockEvidence(input.symbol ?? '', {
       trace_id: input.traceId,
       group_id: input.groupId,
@@ -116,6 +129,7 @@ export function useStockEvidence(input: { symbol: string | null; traceId: string
 
 export function useStockNetwork(input: { symbol: string | null; traceId: string; groupId: string }) {
   return useAsync<DashboardNetworkPayload>(
+    'stock-network',
     () => api.getDashboardStockNetwork(input.symbol ?? '', {
       trace_id: input.traceId,
       group_id: input.groupId,
@@ -124,11 +138,3 @@ export function useStockNetwork(input: { symbol: string | null; traceId: string;
     Boolean(input.symbol && input.traceId),
   );
 }
-
-export function useBatchProgress(input: { groupId: string; displayDate: string }) {
-  return useAsync<BatchProgress | null>(
-    () => api.getLatestBatchProgress(input.groupId, input.displayDate),
-    [input.groupId, input.displayDate],
-  );
-}
-

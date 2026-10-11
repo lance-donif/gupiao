@@ -36,32 +36,6 @@ function parseApiErrorBody(body: unknown): { code: string; message: string; deta
   return { code: 'UNKNOWN', message: '请求失败', detail: undefined };
 }
 
-interface BatchProgressNode {
-  node_id: string;
-  node_label: string;
-  sequence_no: number;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
-  total_count: number;
-  current_index: number;
-  current_label: string;
-  has_result: boolean;
-  started_at?: string | null;
-  updated_at?: string | null;
-  finished_at?: string | null;
-}
-
-export interface BatchProgress {
-  batch_id: string;
-  trace_id: string;
-  group_id: string;
-  target_trading_date: string;
-  batch_status: string;
-  current_stage: string;
-  current_stage_index: number;
-  remaining_node_count: number;
-  nodes: BatchProgressNode[];
-}
-
 export interface BatchBrief {
   id: string;
   group_id: string;

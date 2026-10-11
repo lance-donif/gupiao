@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CausalSignalExtractionService, createCausalSignalExtractorFromEnv } from '../../../src/services/causal-signal-extraction-service.js';
 import { AiStockKeywordGenerationService, createAiStockKeywordRequesterFromEnv } from '../../../src/services/ai-stock-keyword-generation-service.js';
-import { createFriendNetworkLlmAiAdapterFromEnv } from '../../../src/services/friend-network-llm-ai-adapter.js';
 import { createExposureCandidateExtractorFromEnv } from '../../../src/services/limitup-evidence-initialization.js';
 
 function environment(reverse = false): NodeJS.ProcessEnv {
@@ -25,19 +24,16 @@ const input = { traceId: 'trace-1', asOf, clusterKey: 'global', news: [news] };
 const signal = { newsId: 'n1', event: news.title, businessVariable: '供给不足', assetOrThemeKeyword: '白银', direction: 'positive', confidence: 0.9, evidenceText: news.title };
 const stock = { symbol: '600001', name: '测试股份', industry: '白银' };
 const keywordPayload = { stocks: [{ symbol: stock.symbol, keywords: [{ keyword: '白银', exposureType: 'industry_exposure', confidence: 0.9, reason: '行业' }] }] };
-const relationship = { sourceKeyword: '光伏', targetKeyword: '白银', evidence: ['光伏拉动白银需求'] };
-const decision = { ...relationship, relationType: 'driver', direction: 'forward', confidence: 0.9, weakSignal: false, reasoning: '需求传导', shouldKeep: true };
 const completion = (value: unknown) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) }, finish_reason: 'stop' }] }));
 
 const cases = [
   // causal 抽取默认走 v3 逐条协议（CAUSAL_PROTOCOL_MODE 未设置 = items）。
   { name: 'causal', value: { items: [{ newsId: 'n1', status: 'signals', signals: [signal] }] }, invoke: (env: NodeJS.ProcessEnv) => createCausalSignalExtractorFromEnv(env).extract(input) },
   { name: 'keywords', value: keywordPayload, invoke: (env: NodeJS.ProcessEnv) => createAiStockKeywordRequesterFromEnv(env).requestKeywords({ stocks: [stock], prompt: 'keywords', model: 'ignored', promptVersion: 'test' }) },
-  { name: 'relationships', value: { decisions: [decision] }, invoke: (env: NodeJS.ProcessEnv) => createFriendNetworkLlmAiAdapterFromEnv(env).judge([relationship]) },
   { name: 'exposures', value: { candidates: [{ keyword: '白银', exposureType: 'industry_exposure', sourceId: 'n1', evidenceText: news.title, confidence: 0.9 }] }, invoke: (env: NodeJS.ProcessEnv) => createExposureCandidateExtractorFromEnv(env).extract({ limitUpCase: { symbol: stock.symbol, stockName: stock.name, tradeDate: asOf }, news: [news] }) },
 ];
 
-describe('all four AI entrypoints', () => {
+describe('all AI entrypoints', () => {
   it.each(cases)('$name uses the shared file and switches on malformed output', async item => {
     const fetchMock = vi.fn().mockResolvedValueOnce(completion({})).mockResolvedValueOnce(completion(item.value));
     vi.stubGlobal('fetch', fetchMock);
@@ -58,8 +54,7 @@ describe('all four AI entrypoints', () => {
   it.each([
     { index: 0, invalid: { items: [{ newsId: 'n1', status: 'signals', signals: [{ ...signal, evidenceOffsetStart: 'bad' }] }] } },
     { index: 1, invalid: { stocks: [{ symbol: stock.symbol, keywords: [] }] } },
-    { index: 2, invalid: { decisions: [{ ...decision, reasoning: '' }] } },
-    { index: 3, invalid: { candidates: [{ keyword: '白银', exposureType: 'industry_exposure', sourceId: 'n1', evidenceText: news.title, confidence: 0.9, aliasSuggestions: [null] }] } },
+    { index: 2, invalid: { candidates: [{ keyword: '白银', exposureType: 'industry_exposure', sourceId: 'n1', evidenceText: news.title, confidence: 0.9, aliasSuggestions: [null] }] } },
   ])('switches instead of manufacturing defaults for malformed nested output ($index)', async ({ index, invalid }) => {
     const item = cases[index]!;
     const fetchMock = vi.fn().mockResolvedValueOnce(completion(invalid)).mockResolvedValueOnce(completion(item.value));

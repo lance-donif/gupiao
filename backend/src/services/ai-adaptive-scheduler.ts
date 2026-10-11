@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { sha256Text } from '../lib/hash-utils.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { IAiProviderConfig, IAiProvider, IAiLimits } from './ai-provider-config.js';
 import type { AiSchedulerStore, AiLease } from './ai-scheduler-store.js';
@@ -12,7 +13,7 @@ export interface AiCandidate {
 }
 interface Scope { key: string; identity: string; limits: IAiLimits; }
 export interface AiResponseMetrics { headers?: Headers; tokens?: number; performance?:{inputTokens:number;outputTokens:number;latencyMs:number;tokenSource?:'usage'|'byte_bound'}; }
-const digest = (text: string): string => createHash('sha256').update(text).digest('hex');
+const digest = sha256Text;
 export const candidateKey = (c: AiCandidate): string => JSON.stringify([c.provider.id, c.model.id]);
 
 export class AiAdaptiveScheduler {

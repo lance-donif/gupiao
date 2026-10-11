@@ -12,7 +12,6 @@ describe('project initialization', () => {
   it('declares the required source directories', () => {
     expect(projectStructure.sourceDirectories).toEqual([
       'types',
-      'data-structures',
       'sources',
       'repositories',
       'services',

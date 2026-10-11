@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { BEIJING_OFFSET_MS } from '../lib/beijing-time.js';
 
 export type DataRefreshLedgerStatus = 'success' | 'failed' | 'running';
 
@@ -62,7 +63,7 @@ export const buildBeijingMinuteBucketKey = (time: Date, bucketMinutes: number): 
     throw new Error(`Invalid bucketMinutes: ${bucketMinutes}`);
   }
   const bucketMs = bucketMinutes * 60 * 1000;
-  const beijingOffsetMs = 8 * 60 * 60 * 1000;
+  const beijingOffsetMs = BEIJING_OFFSET_MS;
   const beijingMs = time.getTime() + beijingOffsetMs;
   const bucketedBeijingMs = Math.floor(beijingMs / bucketMs) * bucketMs;
   const bucketStartUtc = new Date(bucketedBeijingMs - beijingOffsetMs);

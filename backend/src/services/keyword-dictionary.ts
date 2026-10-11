@@ -3,6 +3,7 @@
  * 加载失败/词表为空一律抛 KeywordDictionaryError，调用方不得静默回退硬编码。
  */
 import { hasDelegate } from './scoring/scoring-helpers.js';
+import { uniqueNonEmpty } from '../lib/date-utils.js';
 
 export const KEYWORD_DICTIONARY_ACTIVE_STATUS = 'active';
 export const DEFAULT_KEYWORD_DICTIONARY_TTL_MS = 5 * 60 * 1000;
@@ -43,8 +44,6 @@ const toTerm = (value: unknown): string | null => {
   return text.length > 0 ? text : null;
 };
 
-const dedupeOrdered = (values: readonly string[]): string[] => [...new Set(values)];
-
 /** 纯函数：行 -> 快照（只收 active；排序语义与原硬编码一致：高信号词按长度降序）。 */
 export const buildKeywordDictionarySnapshot = (
   rows: readonly IKeywordDictionaryRow[],
@@ -62,7 +61,7 @@ export const buildKeywordDictionarySnapshot = (
         terms.push(term);
       }
     }
-    return dedupeOrdered(terms);
+    return uniqueNonEmpty(terms);
   };
 
   const canonicalGroups = new Map<string, string[]>();

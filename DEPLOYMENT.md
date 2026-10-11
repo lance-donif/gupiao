@@ -17,11 +17,109 @@ docker compose -f docker-compose.production.yml stop
 docker compose -f docker-compose.production.yml logs --tail=100 api web
 ```
 
+## 离线重建（宿主无外网时）
+
+宿主出网依赖 Mihomo（`127.0.0.1:7890`）。当它的上游节点不可用时，
+`docker compose build` 会因无法 pull `oven/bun:1`、`nginx`、`docker/dockerfile:1` 而失败，
+表现为 `failed to resolve source metadata ... EOF`。
+
+此时不要修改 Dockerfile，改用**补丁式构建**：以线上正在运行的镜像为底座，只替换源码或产物。
+
+后端（在容器内跑 `tsc`，能完整复现类型检查）：
+
+```dockerfile
+FROM gupiao-backend:<当前tag>
+WORKDIR /app
+RUN rm -rf src scripts dist          # 必须先清空！COPY 只覆盖不删除
+COPY src ./src
+COPY scripts ./scripts
+COPY tsconfig.json prisma.config.ts package.json ./
+RUN bun run build
+```
+
+前端（vite 依赖只存在于本地，服务器无 `web/node_modules` 且无法联网安装）：
+本地 `cd web && bun run build`，上传 `dist/` 后 `COPY` 进 nginx 镜像。
+
+两处共同的坑：**`COPY` 不会删除目标目录中已存在、但源里没有的文件**。
+本次删除了 29 个源文件，若不清空 `/app/src`，旧模块仍会被 `tsc` 编译并报“导出不存在”。
+
+自检要点（构建后必须确认）：
+
+```sh
+# 新模块在、已删模块无残留、入口齐全
+docker run --rm --entrypoint sh gupiao-backend:<tag> -c \
+  'ls /app/dist/src/lib/beijing-time.js /app/dist/scripts/run-scheduler.js; \
+   ls /app/dist/src/services/service-di.js 2>&1 | tail -1'
+```
+
+部署后确认 web 服务已改为显式 `image:`（否则 compose 会尝试联网 rebuild）：
+
+```yaml
+web:
+  build: ./web
+  image: gupiao-web:<tag>
+```
+
+
+## 代理（Mihomo）故障排查
+
+宿主出网完全依赖 Mihomo TUN（`/etc/mihomo/config.yaml`，API `127.0.0.1:9090`）。
+一旦它失效，表现为：`docker compose build` 无法 pull、容器内 HTTPS 全部
+`unknown certificate verification error`、`sync-stock-history` 熔断
+（`aktools_unavailable_fail_fast`）导致当日推荐链路在第 1 步就中断
+（**此时不会写入 RunTrace**，所以「某天没有推荐记录」往往意味着失败发生在落库之前）。
+
+**关键坑：节点域名必须用订阅自带的 DoH 解析。**
+
+节点 server 是 `*.huaweidns.cn` 这类动态域名。若 `proxy-server-nameserver`
+填公共 DNS（如 `223.5.5.5`），会解析到一个连不通的 IP，表现为所有节点
+`dial tcp <ip>:<port>: i/o timeout`、API 探活全部 503/504。
+必须使用订阅下发的专用 DoH：
+
+```yaml
+dns:
+  default-nameserver: [223.5.5.5, 119.29.29.29, 114.114.114.114]
+  proxy-server-nameserver: ['https://sh.dns44.cn:44443/dns-query', 'https://hk.dns44.cn:44443/dns-query']
+  nameserver: [223.5.5.5, 119.29.29.29, 114.114.114.114]
+```
+
+`nameserver` 也不要用 `1.1.1.1/8.8.8.8` 的 DoH —— 它们本身需要经代理才能到达，
+代理故障时会连域名解析一起拖垮，形成死锁。
+
+修改后的标准流程（顺序不可省）：
+
+```sh
+mihomo -t -d /etc/mihomo -f /etc/mihomo/config.yaml   # 先测语法，避免起不来失去 SSH
+systemctl restart mihomo
+# 验证：18/18 节点可用、gstatic 经 7890 返回 204
+S=$(grep '^secret:' /etc/mihomo/config.yaml | awk '{print $2}')
+curl -s -o /dev/null -w '%{http_code}\n' -x http://127.0.0.1:7890 http://www.gstatic.com/generate_204
+```
+
+排查节点可用性：
+
+```sh
+curl -s -H "Authorization: Bearer $S" http://127.0.0.1:9090/proxies | \
+  python3 -c "import sys,json; d=json.load(sys.stdin)['proxies']; \
+  print([g for g,v in d.items() if v.get('type')=='Selector'])"
+# 单节点延迟：GET /proxies/<urlencoded name>/delay?timeout=5000&url=http://www.gstatic.com/generate_204
+```
+
+配置文件是**手写内联节点**（非 proxy-provider 订阅），订阅更新后需手动同步
+`proxies:` 段。修改前务必备份：`cp config.yaml config.yaml.bak-$(date +%F)`。
+
+
+## 数据库漂移记录
+
+- `StrategyPerformanceReport`：模型存在于 `schema.prisma`，但**从未生成 migration**，
+  导致生产库缺表（多策略实验阶段 `upsert` 直接 P2021 报错）。2026-10-11 已手工按
+  模型定义补建（含唯一索引 `(strategyId, asOf)`、clusterKey 索引、外键级联）。
+  **待办：在本地用 `prisma migrate dev --create-only` 补一份迁移，否则新环境部署仍会缺表。**
+
 ## Data
 
 Persistent directories are `data/postgres`, `data/redis`, and `backend/tmp`.
 The root-only `.env` holds database credentials. Do not commit or publish it.
-
 Initialize the stock universe without AI:
 
 ```sh

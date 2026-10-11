@@ -10,6 +10,8 @@ import { AiChatClient, createAiOptionsFromEnv, withAiSource, type AiSourcedArray
 import { isAiRecord } from './ai-provider-config.js';
 import { toNumber } from '../lib/number-utils.js';
 import { stableHash } from '../lib/hash-utils.js';
+import { AI_MAX_REQUEST_CHARS } from './ai-limits.js';
+import { shiftBeijingDay, toBeijingDayKey } from '../lib/beijing-time.js';
 
 export type LimitUpCaseMode = 'touch' | 'sealed';
 export type CoverageGapMissReason = 'no_evidence_chain' | 'score_too_low' | 'filtered_out' | 'not_in_stock_pool';
@@ -225,14 +227,8 @@ export interface ICoverageGapLoopResult {
   readonly candidateGeneration: IGenerateExposureCandidatesResult;
 }
 
-const BEIJING_DATE_FORMATTER = new Intl.DateTimeFormat('sv-SE', {
-  timeZone: 'Asia/Shanghai',
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-});
 
-const DEFAULT_MAX_REQUEST_CHARS = 240_000;
+const DEFAULT_MAX_REQUEST_CHARS = AI_MAX_REQUEST_CHARS;
 const DEFAULT_MAX_LLM_NEWS_PER_CASE = 120;
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {
@@ -250,15 +246,13 @@ const toDate = (value: unknown): Date => {
   return parsed;
 };
 
-const toBeijingDate = (date: Date): string => BEIJING_DATE_FORMATTER.format(date);
+/** 北京自然日键。统一走 lib/beijing-time，不再各自持有 Intl formatter。 */
+const toBeijingDate = (date: Date): string => toBeijingDayKey(date);
 
+/** 把北京自然日 + 时刻解析成 UTC时刻（窗口边界用）。 */
 const beijingDateTime = (date: string, time: string): Date => new Date(`${date}T${time}+08:00`);
 
-const shiftBeijingDate = (date: string, offsetDays: number): string => {
-  const base = beijingDateTime(date, '00:00:00');
-  base.setUTCDate(base.getUTCDate() + offsetDays);
-  return toBeijingDate(base);
-};
+const shiftBeijingDate = (date: string, offsetDays: number): string => shiftBeijingDay(date, offsetDays);
 
 export const resolveHistoricalNewsWindowBounds = (
   tradeDate: Date,

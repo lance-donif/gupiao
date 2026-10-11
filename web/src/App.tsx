@@ -101,6 +101,7 @@ export default function App() {
               size="icon"
               className="h-7.5 w-7.5 shrink-0"
               onClick={() => shiftGlobalDate(-1)}
+              aria-label="前一天"
               title="前一天"
             >
               <ChevronLeft className="h-3.5 w-3.5" />
@@ -117,6 +118,7 @@ export default function App() {
               size="icon"
               className="h-7.5 w-7.5 shrink-0"
               onClick={() => shiftGlobalDate(1)}
+              aria-label="后一天"
               title="后一天"
             >
               <ChevronRight className="h-3.5 w-3.5" />
@@ -144,7 +146,8 @@ export default function App() {
             size="icon"
             className="h-7.5 w-7.5 shrink-0"
             onClick={() => void ctx.refreshStrategies()}
-            title="刷新策略"
+            aria-label="刷新策略"
+              title="刷新策略"
           >
             <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
           </Button>

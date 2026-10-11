@@ -1,8 +1,8 @@
 import type {IAiProvider,IAiProviderConfig} from './ai-provider-config.js';
 import type {ICausalSignalExtractionNews} from './causal-signal-extraction-service.js';
 
-/** 最终 LLM 请求体（含 prompt 与序列化 body）的硬字符上限，与 ai-chat-client.ts 的 240000 对齐。 */
-export const AI_MAX_REQUEST_CHARS=240000;
+export { AI_MAX_REQUEST_CHARS } from './ai-limits.js';
+import { AI_MAX_REQUEST_CHARS } from './ai-limits.js';
 /** 输入 + 输出之外固定预留的安全余量（tokens）。 */
 export const AI_CONTEXT_SAFETY_TOKENS=2048;
 /** 模型未显式声明上下文窗口时的默认值。 */

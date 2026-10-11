@@ -1,6 +1,5 @@
 import type {
   BatchBrief,
-  BatchProgress,
   ClusterSummary,
   DashboardEvidencePayload,
   DashboardNetworkPayload,
@@ -45,16 +44,6 @@ export const api = {
   },
   getBatchByTraceId(trace_id: string) {
     return http<BatchBrief>(`/api/batches/by-trace/${encodeURIComponent(trace_id)}`);
-  },
-  getLatestBatchProgress(group_id: string, target_date?: string | null) {
-    const qs = new URLSearchParams();
-    if (target_date) {
-      qs.set('target_date', target_date);
-    }
-    const suffix = qs.toString() ? `?${qs.toString()}` : '';
-    return http<BatchProgress | null>(
-      `/api/batches/latest/${encodeURIComponent(group_id)}/progress${suffix}`,
-    );
   },
   getDashboardSnapshot(params: { group_id: string; display_date: string; strategy_id?: string | null }) {
     const qs = new URLSearchParams({

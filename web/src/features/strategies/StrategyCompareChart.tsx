@@ -15,11 +15,6 @@ interface Props {
   summaries: StrategyProfitSummary[];
 }
 
-function fmtPct(v: number | null, digits = 1): string {
-  if (v == null || !Number.isFinite(v)) return '--';
-  return `${(v * 100).toFixed(digits)}%`;
-}
-
 export function StrategyCompareChart({ summaries }: Props) {
   const containerRef = React.useRef<HTMLDivElement>(null);
   const chartRef = React.useRef<echarts.ECharts | null>(null);
@@ -27,6 +22,8 @@ export function StrategyCompareChart({ summaries }: Props) {
   React.useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    // 容器位于 flex-1 min-h-0 内，首帧可能拿到 0 高度；此时 init 会触发 ECharts 尺寸告警。
+    if (el.clientWidth === 0 || el.clientHeight === 0) return;
     chartRef.current = echarts.init(el, undefined, { renderer: 'canvas' });
     const observer = new ResizeObserver(() => {
       chartRef.current?.resize();
@@ -81,7 +78,7 @@ export function StrategyCompareChart({ summaries }: Props) {
           axisPointer: { type: 'shadow' },
           formatter: (params: Array<{ seriesName: string; value: number | null; name: string }>) => {
             const lines = params.map((p) => {
-              const unit = p.seriesName === '最大回撤' ? '%' : '%';
+              const unit = '%';
               return `${p.seriesName}: ${p.value != null ? `${p.value}${unit}` : '--'}`;
             });
             return `<b>${params[0]?.name}</b><br/>${lines.join('<br/>')}`;
@@ -148,14 +145,21 @@ export function StrategyCompareChart({ summaries }: Props) {
       },
       true,
     );
-  }, [seriesData, summaries]);
+  }, [seriesData]);
 
   return (
     <div className="space-y-1">
-      <div className="text-[11px] text-muted-foreground">
+      <div id="strategy-compare-desc" className="text-[11px] text-muted-foreground">
         胜率 / 平均收益 / 最大回撤对比（%，取最佳已结算时间窗口）
       </div>
-      <div ref={containerRef} style={{ height: 200, width: '100%' }} />
+      {/* 高度交给 CSS：内联 style 硬编码 200px 无法响应式，也违反 AGENTS.md 的弹性高度约束 */}
+      <div
+        ref={containerRef}
+        role="img"
+        aria-labelledby="strategy-compare-desc"
+        aria-label={`策略对比柱状图：${seriesData.names.join('、')}`}
+        className="h-[200px] w-full min-h-[180px] xl:h-[240px]"
+      />
     </div>
   );
 }

@@ -1,6 +1,8 @@
+import { toBeijingDayKey } from '../lib/beijing-time.js';
+
 /** A daily close is available only after the exchange's 15:00 Beijing close. */
 export function dailyCloseVisibleAt(tradingDay: Date): Date {
-  const day = new Date(tradingDay.getTime() + 8 * 3600000).toISOString().slice(0, 10);
+  const day = toBeijingDayKey(tradingDay);
   return new Date(Math.max(tradingDay.getTime(), new Date(`${day}T15:00:00+08:00`).getTime()));
 }
 

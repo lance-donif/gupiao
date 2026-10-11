@@ -32,6 +32,7 @@ import {
   MAX_MOVEMENT_EVIDENCE_PER_SYMBOL,
   DIRECT_STOCK_NAME_MATCH_MIN_LENGTH,
 } from './scoring/constants.js';
+import { toDayKey } from '../lib/date-utils.js';
 import {
   buildExposureKeywordIndex,
   buildExposureKeywordMatches,
@@ -977,10 +978,6 @@ export interface IMarketSignalFreshness {
   readonly latestMarketTradingDayDate: Date | null;
   readonly staleTradingDays: number;
 }
-
-const toDayKey = (value: Date | null | undefined): string | null => {
-  return value?.toISOString?.().slice(0, 10) ?? null;
-};
 
 const withMarketSignalFreshness = (
   signal: IMarketSignalScore,

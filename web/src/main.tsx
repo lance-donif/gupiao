@@ -12,7 +12,7 @@ const StrategiesPage = lazy(() => import('./pages/Strategies'));
 
 function PageFallback() {
   return (
-    <div className="flex h-[calc(100vh-48px)] items-center justify-center text-[12px] text-muted-foreground">
+    <div className="flex h-[calc(100dvh-var(--app-header-height))] items-center justify-center text-[12px] text-muted-foreground">
       加载中…
     </div>
   );
@@ -47,7 +47,10 @@ const router = createBrowserRouter([
           </Suspense>
         ),
       },
+      // Trace 页尚未实现（数据契约见 api-types 的 BatchBrief），暂重定向回Dashboard。
       { path: 'traces/:traceId', element: <Navigate to="/" replace /> },
+      // 兜底：未匹配路径不再渲染空白页
+      { path: '*', element: <Navigate to="/" replace /> },
     ],
   },
 ]);

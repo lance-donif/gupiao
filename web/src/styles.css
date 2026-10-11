@@ -13,7 +13,8 @@
   --secondary: 240 4.8% 95.9%;
   --secondary-foreground: 240 5.9% 10%;
   --muted: 214 22% 91.5%;
-  --muted-foreground: 222 12% 40%;
+  /* 40% 在浅色背景上对比度约 4.3:1，低于 WCAG AA 正文 4.5:1；34% 约 6.1:1 */
+  --muted-foreground: 222 14% 34%;
   --accent: 199 82% 92%;
   --accent-foreground: 240 5.9% 10%;
   --destructive: 0 84.2% 60.2%;
@@ -40,6 +41,13 @@
   --shadow-sunken: inset 0 1px 4px rgba(15, 23, 42, 0.12), inset 0 -1px 0 rgba(255, 255, 255, 0.75);
   --shadow-focus: 0 0 0 2px var(--focus-ring), 0 7px 16px rgba(14, 165, 233, 0.12);
   --workstation-gap: 0.75rem;
+  /* 顶栏高度单一来源：styles.css 与 TSX 里的 calc(100dvh - var(--app-header-height))
+     都读它，改高度只需改这一处。 */
+  --app-header-height: 48px;
+  --score-evidence: #2563eb;
+  --score-graph: #7c3aed;
+  --score-exposure: #0891b2;
+  --score-market: #d97706;
 }
 
 * {
@@ -176,10 +184,16 @@ button:active:not(:disabled),
 .ring-ring {
   --tw-ring-color: hsl(var(--ring));
 }
-.price-up {
+/*
+ * 涨跌语义类。A股约定：红涨绿跌。
+ * 请统一通过 stock-up / stock-down（或 src/lib/format.ts的 changeToneClass）
+ * 使用，不要在组件里裸写 text-red-500 / text-emerald-600 —— 历史上已因此
+ * 出现过 RecommendationHistory 与 Dashboard 方向相反的 bug。
+ */
+.stock-up {
   color: var(--price-up);
 }
-.price-down {
+.stock-down {
   color: var(--price-down);
 }
 
@@ -206,7 +220,7 @@ button:active:not(:disabled),
   grid-template-columns: 1fr; /* 移动端优先：默认单列流动 */
   gap: var(--workstation-gap);
   height: auto; /* 手机端自适应内容高度 */
-  min-height: calc(100vh - 48px);
+  min-height: calc(100dvh - var(--app-header-height));
   padding: var(--workstation-gap);
   background: linear-gradient(180deg, #f8fafc 0%, var(--surface-base) 48%, #e8eef5 100%);
   overflow: auto; /* 手机端全局纵向滚动 */
@@ -293,15 +307,24 @@ button:active:not(:disabled),
   border-radius: inherit;
 }
 
-.dashboard-grid > *,
-.dashboard-grid .card-modern,
-.dashboard-grid section {
-  min-width: 0;
+/* 评分四段配色。权重口径见 AGENTS.md（证据 45 / 图谱 20 / 暴露 15 / 市场 20），
+   组件通过 data-kind 驱动，不再内联 hex —— 换主题只改这里。 */
+.score-bar-fill[data-kind='evidence'] {
+  background: var(--score-evidence);
+}
+.score-bar-fill[data-kind='graph'] {
+  background: var(--score-graph);
+}
+.score-bar-fill[data-kind='exposure'] {
+  background: var(--score-exposure);
+}
+.score-bar-fill[data-kind='market'] {
+  background: var(--score-market);
 }
 
-.scroll-panel {
-  min-height: 0;
-  overflow: auto;
+.dashboard-grid > *,
+.dashboard-grid section {
+  min-width: 0;
 }
 
 /* 修复 Radix UI ScrollArea 内部 display: table 导致移动端宽度被内容撑破的 Bug */
@@ -317,13 +340,13 @@ button:active:not(:disabled),
 
   .app-shell {
     display: grid;
-    grid-template-rows: 48px 1fr;
-    height: 100vh;
+    grid-template-rows: var(--app-header-height) 1fr;
+    height: 100dvh;
     min-width: 1024px; /* 恢复大屏下的大尺寸控制 */
   }
 
   .app-shell header {
-    height: 48px;
+    height: var(--app-header-height);
   }
 
   .app-main {
@@ -333,7 +356,7 @@ button:active:not(:disabled),
 
   .dashboard-grid {
     grid-template-columns: minmax(0, 1fr) 288px;
-    height: calc(100vh - 48px);
+    height: calc(100dvh - var(--app-header-height));
     overflow: hidden;
     transition: padding-left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   }
@@ -390,61 +413,8 @@ button:active:not(:disabled),
   }
 
   .recommendation-rail-scroll {
-    max-height: calc(100vh - 120px) !important;
+    max-height: calc(100dvh - 120px) !important;
   }
-}
-
-.evidence-chain-card[data-state='open'] {
-  border-color: hsl(var(--primary) / 0.25);
-  box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.04);
-}
-
-.network-edge-positive {
-  stroke: #f43f5e; /* rose-500 */
-}
-
-.network-edge-neutral {
-  stroke: #cbd5e1; /* slate-300 */
-}
-
-.network-edge-negative {
-  stroke: #10b981; /* emerald-500 */
-}
-
-/* Modern and clean Card & Shadow overrides */
-.card-modern {
-  border: 1px solid hsl(var(--border) / 0.45) !important;
-  background-color: hsl(var(--card) / 0.5) !important;
-  backdrop-filter: blur(12px);
-  box-shadow:
-    0 1px 3px 0 rgba(0, 0, 0, 0.03),
-    0 1px 2px -1px rgba(0, 0, 0, 0.03) !important;
-  border-radius: 8px !important;
-  transition: border-color 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
-}
-
-.card-modern:hover {
-  border-color: hsl(var(--border) / 0.8) !important;
-  box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.05) !important;
-}
-
-.card-interactive {
-  transition:
-    transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
-    border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.card-interactive:hover {
-  transform: translateY(-1px);
-  border-color: hsl(var(--primary) / 0.2) !important;
-  box-shadow: 0 6px 16px -4px rgba(0, 0, 0, 0.06) !important;
-}
-
-.card-interactive:focus-within {
-  outline: none;
-  border-color: hsl(var(--primary) / 0.4) !important;
-  box-shadow: 0 0 0 2px hsl(var(--primary) / 0.1) !important;
 }
 
 tbody tr {

@@ -102,9 +102,3 @@ export interface IPrismaTransactionalClient {
   readonly rawNewsRecord: IPrismaRawNewsDelegate;
   readonly normalizedNewsRecord: IPrismaNormalizedNewsDelegate;
 }
-
-export interface IPrismaClient extends IPrismaTransactionalClient {
-  $transaction: <T>(
-    callback: (transaction: IPrismaTransactionalClient) => Promise<T>,
-  ) => Promise<T>;
-}

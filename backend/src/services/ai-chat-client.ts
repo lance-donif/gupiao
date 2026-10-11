@@ -5,6 +5,7 @@ import { AiAdaptiveScheduler } from './ai-adaptive-scheduler.js';
 import { aiStoreFromDatabase } from './ai-scheduler-store.js';
 import { performAiRequest } from './ai-transport.js';
 import { aiRequestContext } from './ai-request-context.js';
+import {AI_MAX_REQUEST_CHARS} from './ai-limits.js';
 
 export interface IAiSource {
   readonly providerId: string;
@@ -89,7 +90,7 @@ export class AiChatClient {
     readonly signal?: AbortSignal;
     readonly validate: (value: unknown) => T;
   }): Promise<{ readonly value: T; readonly source: IAiSource }> {
-    const maxChars = Math.min(240000, input.maxRequestChars ?? 240000);
+    const maxChars = Math.min(AI_MAX_REQUEST_CHARS, input.maxRequestChars ?? AI_MAX_REQUEST_CHARS);
     if (!Number.isFinite(maxChars) || maxChars <= 0 || !Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0 || input.timeoutMs > 2147483647) throw new AiInputError('Invalid AI request limits');
     input.signal?.throwIfAborted();
     const promptChars = input.messages.reduce((sum, message) => sum + message.content.length, 0);

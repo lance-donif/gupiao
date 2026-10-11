@@ -11,7 +11,8 @@
  * 只有「不存在 / 已提交可跳过 / 租约已过期」时才可能拿到 owner，天然排他。
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { sha256Json } from '../lib/hash-utils.js';
 import { EXTRACTION_SEMANTIC_VERSION, PROMPT_SCHEMA_VERSION } from '../version.js';
 
 export const CONTENT_CACHE_STATUS_CLAIMED = 'CLAIMED';
@@ -36,13 +37,13 @@ export interface CausalCacheKey {
 export const buildCausalCacheKey = (input: CausalCacheKeyInput): CausalCacheKey => {
   const extractionSemanticVersion = input.extractionSemanticVersion ?? EXTRACTION_SEMANTIC_VERSION;
   const schemaVersion = input.schemaVersion ?? PROMPT_SCHEMA_VERSION;
-  const cacheKey = createHash('sha256').update(JSON.stringify({
+  const cacheKey = sha256Json({
     extractionSemanticVersion,
     promptVersion: input.promptVersion,
     schemaVersion,
     protocolVersion: input.protocolVersion,
     inputFingerprint: input.inputFingerprint,
-  })).digest('hex');
+  });
   return { cacheKey, contentVersion: input.inputFingerprint };
 };
 

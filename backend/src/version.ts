@@ -5,13 +5,10 @@
  * 供应商顺序、凭证、并发和超时属于调度配置，不进入业务配置指纹。
  */
 
-import { createHash } from 'node:crypto';
+import { stableHash } from './lib/hash-utils.js';
 
 /** 业务配方版本：算法、权重、策略口径或门槛语义变化时必须递增。 */
 export const RECIPE_VERSION = 'recipe-v1';
-
-/** 产物 Schema 版本：持久化结构变化时必须递增。 */
-export const SCHEMA_VERSION = 'schema-v1';
 
 /**
  * AI 逐条结果协议版本号（数值）。
@@ -26,7 +23,6 @@ export const EXTRACTION_SEMANTIC_VERSION = 'extraction-semantic-v1';
 /** Prompt 家族版本与输出 schema 版本。 */
 export const PROMPT_SCHEMA_VERSION = 'outcome-schema-v1';
 export const CAUSAL_PROMPT_FAMILY = 'causal-signal-extraction-v2';
-export const RULE_PROMPT_VERSION = 'rule-pattern-v1';
 
 /** 组装线上抽取 Prompt 版本（模型指纹参与，不同模型结果不互相复用）。 */
 export function causalPromptVersion(modelFingerprint: string): string {
@@ -85,22 +81,8 @@ export const DEFAULT_BUSINESS_CONFIG: IBusinessConfig = {
   penalty: { factor: 0.6, cooldownDays: 7, threshold: -0.03, lookbackDays: 30 },
 };
 
-/** 稳定序列化：键排序、Date 转 UTC ISO、bigint 转字符串，不依赖属性插入顺序。 */
-export function canonicalize(value: unknown): unknown {
-  if (typeof value === 'bigint') return value.toString();
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    if (typeof record.toJSON === 'function') return canonicalize((record as { toJSON(): unknown }).toJSON());
-    return Object.fromEntries(Object.keys(record).sort().map(key => [key, canonicalize(record[key])]));
-  }
-  return value;
-}
-
 export async function sha256Hex(value: unknown): Promise<string> {
-  const { createHash } = await import('node:crypto');
-  return createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex');
+  return stableHash(value);
 }
 
 /**
@@ -108,7 +90,7 @@ export async function sha256Hex(value: unknown): Promise<string> {
  * `createTraceId` 等同步构造运行身份的路径必须使用它——不能为了一个哈希把整条链路改成异步。
  */
 export function sha256HexSync(value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex');
+  return stableHash(value);
 }
 
 /** 业务配置指纹：只覆盖影响产物的业务参数。 */

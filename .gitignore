@@ -55,3 +55,6 @@ temp/
 # IDE
 .idea/
 .vscode/
+
+# 部署临时凭据（不入库）
+.deploy/

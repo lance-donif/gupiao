@@ -3,7 +3,6 @@ import { Collapsible } from 'radix-ui';
 import {
   ArrowRight,
   Activity,
-  AlertTriangle,
   Check,
   ChevronDown,
   Copy,
@@ -39,7 +38,19 @@ import {
   useStockNetwork,
 } from '@/hooks/use-dashboard-data';
 import { buildEvidencePreview } from '@/features/dashboard/dashboard-view-model';
-import { cn, formatMinute, formatPercent, formatScore } from '@/lib/utils';
+import {
+  compactText,
+  formatEvidencePath,
+  formatExternalFactMeta,
+  formatPrice,
+  formatQuoteSource,
+  formatQuoteTime,
+  toFiniteScore,
+} from '@/features/dashboard/dashboard-format';
+import { EmptyBlock, Metric, MiniMetric } from '@/features/dashboard/dashboard-primitives';
+import { cn } from '@/lib/cn';
+import { changeToneClass, formatMinute, formatPercent, formatScore } from '@/lib/format';
+import { useIsDesktop } from '@/hooks/use-media-query';
 
 const actionClasses: Record<
   DashboardStockDetailPayload['ui_summary']['decision']['action_state'],
@@ -102,70 +113,6 @@ function CopyableId({ id, label }: { id: string; label?: string }) {
   );
 }
 
-function compactText(value: string | null | undefined, fallback = '--') {
-  const text = String(value ?? '').trim();
-  return text.length > 0 ? text : fallback;
-}
-
-function formatPrice(value: number | null | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)} 元` : '--';
-}
-
-function formatQuoteTime(value: string | null | undefined): string {
-  if (!value) {
-    return '时间未知';
-  }
-  return formatMinute(value);
-}
-
-function formatQuoteSource(
-  source: DashboardStockDetailPayload['live_quote']['source'] | undefined
-): string {
-  if (source === 'tickflow') {
-    return 'TickFlow 行情';
-  }
-  if (source === 'yahoo_finance') {
-    return 'Yahoo 行情';
-  }
-  if (source === 'candle_fallback') {
-    return '最新 K 线';
-  }
-  return '行情不可用';
-}
-
-function formatExternalFactLabel(item: DashboardEvidenceChainItem) {
-  const fact = item.exposure.external_fact;
-  const sourceName = compactText(fact.sourceName ?? fact.source_name ?? fact.source, '外部事实');
-  const exposureType = compactText(
-    fact.exposureType ?? fact.exposure_type ?? item.exposure.exposure_type,
-    '暴露'
-  );
-  return `${sourceName} · ${exposureType}`;
-}
-
-function formatExternalFactMeta(item: DashboardEvidenceChainItem) {
-  const fact = item.exposure.external_fact;
-  const fields = [
-    `source=${compactText(fact.source)}`,
-    `sourceId=${compactText(fact.sourceId ?? fact.source_id)}`,
-    `sourceName=${compactText(fact.sourceName ?? fact.source_name)}`,
-    `exposureType=${compactText(fact.exposureType ?? fact.exposure_type ?? item.exposure.exposure_type)}`,
-    `rawField=${compactText(fact.rawField ?? fact.raw_field)}`,
-    `updatedAt=${compactText(fact.updatedAt ?? fact.updated_at ?? fact.observed_at)}`,
-    `confidence=${formatScore(fact.confidence, 2)}`,
-  ];
-  return fields.join(' · ');
-}
-
-function formatEvidencePath(item: DashboardEvidenceChainItem) {
-  const signal = item.signal.source_keyword || item.signal.asset_or_theme_keyword || '未知信号';
-  return `${signal} → ${formatExternalFactLabel(item)} → ${item.stock_link.stock_name}`;
-}
-
-function toFiniteScore(value: number | null | undefined) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
 function RecommendationRail({
   rows,
   selectedSymbol,
@@ -175,9 +122,15 @@ function RecommendationRail({
   selectedSymbol: string | null;
   onSelect: (row: DashboardRecommendationItem) => void;
 }) {
-  const [isOpen, setIsOpen] = React.useState(() => {
-    return typeof window === 'undefined' ? true : window.innerWidth >= 1100;
-  });
+  // 断点读自 useIsDesktop：随窗口缩放实时更新，且与 styles.css 的
+  // 1100px 共享同一常量。此前直接读 window.innerWidth 只在挂载时求值一次，
+  // 用户缩放窗口后侧栏状态会与 CSS 的 :has() 选择器脱节。
+  const isDesktop = useIsDesktop();
+  const [isOpen, setIsOpen] = React.useState(isDesktop);
+
+  React.useEffect(() => {
+    setIsOpen(isDesktop);
+  }, [isDesktop]);
 
   return (
     <aside
@@ -187,7 +140,7 @@ function RecommendationRail({
       <div className="flex h-11 shrink-0 items-center justify-between border-b border-border/70 px-3">
         <div className="flex items-center gap-1.5">
           <div className="text-sm font-semibold leading-5">推荐列表</div>
-          <Badge variant="outline" className="number-figure h-4 px-1 text-[9px]">
+          <Badge variant="outline" className="number-figure h-4 px-1 text-[11px]">
             {rows.length} 只
           </Badge>
         </div>
@@ -197,57 +150,19 @@ function RecommendationRail({
       <ScrollArea className="min-h-0 flex-1 recommendation-rail-scroll">
         <div className="space-y-2 p-2">
           {rows.map((row) => (
-            <button
+            <RailRow
               key={`${row.trace_id}-${row.symbol}`}
-              type="button"
-              onClick={() => {
-                onSelect(row);
-                // 移动端/小屏点击任意股票时，抽屉自动收起，提升查看详情的体验
-                if (window.innerWidth < 1100) {
-                  setIsOpen(false);
-                }
-              }}
-              className={cn(
-                'workstation-control relative grid min-h-[68px] w-full grid-cols-[34px_minmax(0,1fr)_58px] items-center gap-2 rounded-xl px-2.5 py-2 text-left hover:border-sky-200 hover:bg-white dark:hover:border-sky-900/60 dark:hover:bg-sky-950/20',
-                selectedSymbol === row.symbol &&
-                  'border-sky-300 bg-sky-50 ring-2 ring-sky-100 shadow-[var(--shadow-soft)] before:absolute before:inset-y-2 before:left-0 before:w-1 before:rounded-r before:bg-sky-500 dark:border-sky-800 dark:bg-sky-950/30 dark:ring-sky-950'
-              )}
-              aria-pressed={selectedSymbol === row.symbol}
-            >
-              <div className="number-figure text-[12px] font-semibold text-muted-foreground">
-                #{row.rank}
-              </div>
-              <div className="min-w-0">
-                <div className="truncate text-[13px] font-semibold leading-5">{row.stock_name}</div>
-                <div className="truncate text-[11px] leading-4 text-muted-foreground">
-                  {row.symbol} · {row.industry}
-                </div>
-                {(row.win_rate_t1 != null || row.win_rate_t3 != null) && (
-                  <div className="mt-0.5 flex gap-1">
-                    {row.win_rate_t1 != null && (
-                      <span className="number-figure rounded bg-emerald-50 px-1 py-0 text-[10px] leading-4 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400">
-                        T+1 {Math.round(row.win_rate_t1 * 100)}%
-                      </span>
-                    )}
-                    {row.win_rate_t3 != null && (
-                      <span className="number-figure rounded bg-sky-50 px-1 py-0 text-[10px] leading-4 text-sky-700 dark:bg-sky-950/30 dark:text-sky-400">
-                        T+3 {Math.round(row.win_rate_t3 * 100)}%
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-              <div className="text-right rounded-sm bg-white/72 px-1.5 py-1 shadow-[var(--shadow-control)]">
-                <div className="number-figure text-[15px] font-bold leading-5 text-foreground">
-                  {Math.round(row.total_score)}
-                </div>
-                <div className="text-[10px] leading-4 text-muted-foreground">阶段 {row.stage}</div>
-              </div>
-            </button>
+              row={row}
+              selected={selectedSymbol === row.symbol}
+              isDesktop={isDesktop}
+              onSelect={onSelect}
+              onNarrowSelect={() => setIsOpen(false)}
+            />
           ))}
           {rows.length === 0 && <EmptyBlock text="当前日期暂无推荐快照" />}
         </div>
       </ScrollArea>
+
       <div className="h-8 shrink-0 border-t border-border/70 px-3 py-1.5 text-[11px] text-muted-foreground">
         首屏仅显示决策字段，完整细节在中栏展开。
       </div>
@@ -257,6 +172,8 @@ function RecommendationRail({
         type="button"
         onClick={() => setIsOpen(!isOpen)}
         className="absolute right-[-14px] top-1/2 -translate-y-1/2 z-40 flex h-16 w-3.5 items-center justify-center rounded-r-md border-y border-r border-border bg-white shadow-[var(--shadow-control)] text-muted-foreground hover:w-5 active:scale-[0.96] transition-[transform,width] duration-150 focus-visible:outline-none"
+        aria-expanded={isOpen}
+        aria-label={isOpen ? '收起推荐列表' : '展开推荐列表'}
         title={isOpen ? '收起推荐列表' : '展开推荐列表'}
       >
         <ChevronDown
@@ -264,11 +181,78 @@ function RecommendationRail({
             'h-3 w-3 text-sky-600 transition-transform duration-200',
             isOpen ? 'rotate-90' : '-rotate-90'
           )}
+          aria-hidden="true"
         />
       </button>
     </aside>
   );
 }
+
+/**
+ * 推荐列表单行。抽成memo 组件：此前切换选中股票会让整列表（默认 30 行）全部重渲染。
+ */
+const RailRow = React.memo(function RailRow({
+  row,
+  selected,
+  isDesktop,
+  onSelect,
+  onNarrowSelect,
+}: {
+  row: DashboardRecommendationItem;
+  selected: boolean;
+  isDesktop: boolean;
+  onSelect: (row: DashboardRecommendationItem) => void;
+  onNarrowSelect: () => void;
+}) {
+  return (
+  <button
+    type="button"
+    onClick={() => {
+      onSelect(row);
+      // 移动端/小屏点击任意股票时，抽屉自动收起，提升查看详情的体验
+      if (!isDesktop) {
+        onNarrowSelect();
+      }
+    }}
+    className={cn(
+      'workstation-control relative grid min-h-[68px] w-full grid-cols-[34px_minmax(0,1fr)_58px] items-center gap-2 rounded-xl px-2.5 py-2 text-left hover:border-sky-200 hover:bg-white dark:hover:border-sky-900/60 dark:hover:bg-sky-950/20',
+      selected &&
+        'border-sky-300 bg-sky-50 ring-2 ring-sky-100 shadow-[var(--shadow-soft)] before:absolute before:inset-y-2 before:left-0 before:w-1 before:rounded-r before:bg-sky-500 dark:border-sky-800 dark:bg-sky-950/30 dark:ring-sky-950'
+    )}
+    aria-pressed={selected}
+  >
+    <div className="number-figure text-[12px] font-semibold text-muted-foreground">
+      #{row.rank}
+    </div>
+    <div className="min-w-0">
+      <div className="truncate text-[13px] font-semibold leading-5">{row.stock_name}</div>
+      <div className="truncate text-[11px] leading-4 text-muted-foreground">
+        {row.symbol} · {row.industry}
+      </div>
+      {(row.win_rate_t1 != null || row.win_rate_t3 != null) && (
+        <div className="mt-0.5 flex gap-1">
+          {row.win_rate_t1 != null && (
+            <span className="number-figure rounded bg-emerald-50 px-1 py-0 text-[10px] leading-4 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400">
+              T+1 {Math.round(row.win_rate_t1 * 100)}%
+            </span>
+          )}
+          {row.win_rate_t3 != null && (
+            <span className="number-figure rounded bg-sky-50 px-1 py-0 text-[10px] leading-4 text-sky-700 dark:bg-sky-950/30 dark:text-sky-400">
+              T+3 {Math.round(row.win_rate_t3 * 100)}%
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+    <div className="text-right rounded-sm bg-white/72 px-1.5 py-1 shadow-[var(--shadow-control)]">
+      <div className="number-figure text-[15px] font-bold leading-5 text-foreground">
+        {Math.round(row.total_score)}
+      </div>
+      <div className="text-[10px] leading-4 text-muted-foreground">阶段 {row.stage}</div>
+    </div>
+    </button>
+  );
+});
 
 function PrimaryDecisionSurface({
   selected,
@@ -351,28 +335,28 @@ function ScoreStack({ detail }: { detail: DashboardStockDetailPayload | null }) 
       label: '证据',
       value: toFiniteScore(detail?.score_breakdown.evidence),
       max: 45,
-      color: '#2563eb',
+      kind: 'evidence',
       icon: ShieldCheck,
     },
     {
       label: '图谱',
       value: toFiniteScore(detail?.score_breakdown.graph),
       max: 20,
-      color: '#7c3aed',
+      kind: 'graph',
       icon: Layers3,
     },
     {
       label: '暴露',
       value: toFiniteScore(detail?.score_breakdown.exposure),
       max: 15,
-      color: '#0891b2',
+      kind: 'exposure',
       icon: Target,
     },
     {
       label: '市场',
       value: toFiniteScore(detail?.score_breakdown.market),
       max: 20,
-      color: '#d97706',
+      kind: 'market',
       icon: LineChart,
     },
   ];
@@ -395,7 +379,8 @@ function ScoreStack({ detail }: { detail: DashboardStockDetailPayload | null }) 
             <div className="score-bar-track">
               <div
                 className="score-bar-fill"
-                style={{ width: `${width}%`, backgroundColor: item.color }}
+                data-kind={item.kind}
+                style={{ width: `${width}%` }}
               />
             </div>
             <div className="number-figure text-right text-[11px] font-semibold">
@@ -412,9 +397,7 @@ function ActionPlanStrip({ detail }: { detail: DashboardStockDetailPayload | nul
   const trigger = detail?.ui_summary.buy_trigger;
   const quote = detail?.live_quote;
   const changePct = quote?.change_pct ?? null;
-  const changeTone = changePct !== null
-    ? changePct >= 0 ? 'text-red-500' : 'text-emerald-600'
-    : 'text-muted-foreground';
+  const changeTone = changeToneClass(changePct);
   const items = [
     {
       label: '买入条件',
@@ -493,9 +476,7 @@ function ReasonGrid({ detail }: { detail: DashboardStockDetailPayload | null }) 
 function MarketQuoteCard({ detail }: { detail: DashboardStockDetailPayload | null }) {
   const quote = detail?.live_quote;
   const changePct = quote?.change_pct ?? null;
-  const changeColor = changePct !== null
-    ? changePct >= 0 ? 'text-red-500' : 'text-emerald-600'
-    : 'text-muted-foreground';
+  const changeColor = changeToneClass(changePct);
   return (
     <div className="workstation-control rounded-xl p-3">
       <div className="flex items-center justify-between gap-2">
@@ -595,7 +576,7 @@ function ThemeForecastPanel({ snapshot }: { snapshot: DashboardSnapshotPayload |
           <div>
             <div className="mb-2 flex items-center gap-1.5">
               <div className="text-[13px] font-semibold text-emerald-700 dark:text-emerald-400">看涨主题</div>
-              <Badge variant="outline" className="number-figure h-4 px-1 text-[9px]">{bullish.length}</Badge>
+              <Badge variant="outline" className="number-figure h-4 px-1 text-[11px]">{bullish.length}</Badge>
             </div>
             <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
               {bullish.map(f => (
@@ -615,7 +596,7 @@ function ThemeForecastPanel({ snapshot }: { snapshot: DashboardSnapshotPayload |
                     </div>
                   </div>
                   {f.weak_signal && (
-                    <Badge className="mt-1 h-4 px-1 text-[9px] text-amber-700">弱信号</Badge>
+                    <Badge className="mt-1 h-4 px-1 text-[11px] text-amber-700">弱信号</Badge>
                   )}
                   <div className="mt-1.5 flex flex-wrap gap-1">
                     <span className="text-[10px] text-muted-foreground">信号强度 {(f.signal_strength * 100).toFixed(0)}%</span>
@@ -641,7 +622,7 @@ function ThemeForecastPanel({ snapshot }: { snapshot: DashboardSnapshotPayload |
           <div>
             <div className="mb-2 flex items-center gap-1.5">
               <div className="text-[13px] font-semibold text-rose-700 dark:text-rose-400">看跌主题</div>
-              <Badge variant="outline" className="number-figure h-4 px-1 text-[9px]">{bearish.length}</Badge>
+              <Badge variant="outline" className="number-figure h-4 px-1 text-[11px]">{bearish.length}</Badge>
             </div>
             <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
               {bearish.map(f => (
@@ -667,7 +648,7 @@ function ThemeForecastPanel({ snapshot }: { snapshot: DashboardSnapshotPayload |
           <div>
             <div className="mb-2 flex items-center gap-1.5">
               <div className="text-[13px] font-semibold text-amber-700 dark:text-amber-400">弱信号（预期差）</div>
-              <Badge variant="outline" className="number-figure h-4 px-1 text-[9px]">{gaps.length}</Badge>
+              <Badge variant="outline" className="number-figure h-4 px-1 text-[11px]">{gaps.length}</Badge>
             </div>
             <div className="space-y-1.5">
               {gaps.map(g => (
@@ -794,7 +775,9 @@ function SlaEmptyState({ snapshot }: { snapshot: DashboardSnapshotPayload | null
             {snapshot?.execution_history.length ?? 0} 条
           </Badge>
         </div>
-        <ScrollArea className="h-full max-h-[280px]">
+        {/* AGENTS.md 布局规范：弹性区域内的 ScrollArea 不得再叠加硬编码高度上限，
+            否则下方内容会被截断并留白。该 ScrollArea 已处在 flex-1 min-h-0 容器内。 */}
+        <ScrollArea className="h-full">
           <div className="grid gap-2 pr-2 md:grid-cols-2">
             {(snapshot?.execution_history ?? []).slice(0, 6).map((row) => (
               <div
@@ -1005,7 +988,7 @@ function NetworkPanel({ network }: { network: DashboardNetworkPayload | null }) 
       <div className="workstation-control rounded-xl p-3">
         <div className="mb-3 flex items-center gap-2 text-[12px] text-muted-foreground">
           <Network className="h-4 w-4" />
-          <span>{network.network_preview.explanation || '证据链路预览'}</span>
+          <span className="line-clamp-2">{network.network_preview.explanation || '证据链路预览'}</span>
         </div>
         <div className="space-y-2">
           {chains.map((chain) => (
@@ -1061,14 +1044,14 @@ function NetworkPanel({ network }: { network: DashboardNetworkPayload | null }) 
               className="rounded-md border border-border/70 p-2"
             >
               <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0 text-[12px] font-semibold leading-4">
+                <div className="min-w-0 truncate text-[12px] font-semibold leading-4">
                   {row.source} → {row.target}
                 </div>
                 <Badge variant="outline" className="h-5 px-1.5 font-mono text-[10px]">
                   {formatPercent(row.strength, 0)}
                 </Badge>
               </div>
-              <div className="mt-1 text-[11px] leading-4 text-muted-foreground">
+              <div className="mt-1 truncate text-[11px] leading-4 text-muted-foreground">
                 {row.relation} · {row.source_type}
               </div>
             </div>
@@ -1252,7 +1235,7 @@ function SystemRail({
                     </Badge>
                   </div>
                   <div className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                    {row.target_trading_date} · {row.group_id} · {row.strategy_id || '全部策略'}
+                    <span className="block truncate">{row.target_trading_date} · {row.group_id} · {row.strategy_id || '全部策略'}</span>
                   </div>
                   <div className="mt-2 flex items-center justify-between gap-2">
                     <CopyableId id={row.trace_id} />
@@ -1313,45 +1296,10 @@ function EvidenceStep({ title, text, sub }: { title: string; text: string; sub: 
   );
 }
 
-function Metric({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
-  return (
-    <div className="rounded-md border border-border bg-background p-2">
-      <div className="flex items-center gap-1 text-[10px] font-semibold leading-4 text-muted-foreground">
-        {icon}
-        {label}
-      </div>
-      <div className="mt-0.5 font-mono text-[14px] font-bold leading-5">{value}</div>
-    </div>
-  );
-}
-
-function MiniMetric({ label, value, className }: { label: string; value: string; className?: string }) {
-  return (
-    <div className="workstation-control rounded-sm px-2 py-1">
-      <div className="text-[10px] leading-4 text-muted-foreground">{label}</div>
-      <div className={cn('number-figure text-[12px] font-semibold leading-4', className)}>{value}</div>
-    </div>
-  );
-}
-
-function EmptyBlock({ text, compact = false }: { text: string; compact?: boolean }) {
-  return (
-    <div
-      className={cn(
-        'flex h-full min-h-[96px] items-center justify-center rounded-lg border border-dashed border-border bg-background text-center text-[12px] leading-5 text-muted-foreground',
-        compact && 'min-h-0 px-3 py-3'
-      )}
-    >
-      <div className="flex items-center gap-2">
-        <AlertTriangle className="h-4 w-4" />
-        <span>{text}</span>
-      </div>
-    </div>
-  );
-}
-
 export default function DashboardPage() {
   const ctx = useAppShell();
+  // 只解构需要的稳定引用：把整个 ctx 对象放进 useEffect 依赖会让任何字段变化都重跑副作用。
+  const { setActiveTraceId } = ctx;
   
   const dispatchRefreshKey = React.useMemo(() => {
     return ctx.lastDispatchOutcome
@@ -1396,9 +1344,9 @@ export default function DashboardPage() {
 
   React.useEffect(() => {
     if (traceId) {
-      ctx.setActiveTraceId(traceId);
+      setActiveTraceId(traceId);
     }
-  }, [ctx, traceId]);
+  }, [setActiveTraceId, traceId]);
 
   const detailInput = React.useMemo(() => ({
     symbol: selected?.symbol ?? null,
@@ -1409,21 +1357,16 @@ export default function DashboardPage() {
 
   const detail = useStockDetail(detailInput);
 
-  const evidenceInput = React.useMemo(() => ({
+  // evidence 与 network 的入参完全相同，合并为一个 memo（两个 hook 内部按 scope 区分缓存键）
+  const symbolScopeInput = React.useMemo(() => ({
     symbol: selected?.symbol ?? null,
     traceId,
     groupId: ctx.activeClusterId,
   }), [selected?.symbol, traceId, ctx.activeClusterId]);
 
-  const evidence = useStockEvidence(evidenceInput);
+  const evidence = useStockEvidence(symbolScopeInput);
 
-  const networkInput = React.useMemo(() => ({
-    symbol: selected?.symbol ?? null,
-    traceId,
-    groupId: ctx.activeClusterId,
-  }), [selected?.symbol, traceId, ctx.activeClusterId]);
-
-  const network = useStockNetwork(networkInput);
+  const network = useStockNetwork(symbolScopeInput);
 
   return (
     <div className="dashboard-grid">

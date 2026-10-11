@@ -17,9 +17,6 @@ import { readFileSync } from 'node:fs';
 import { hasDelegate } from '../scoring/scoring-helpers.js';
 import { datasetVersionWhere } from './market-data-reader.js';
 
-/** 被来源数据缺失、无法推断的字段，统一用 null 表示「未知」。 */
-export const UNKNOWN_FIELD_REPRESENTATION = 'null' as const;
-
 export interface CandleImportRecord {
   readonly stockId: string;
   readonly tradingDay: Date;
@@ -35,9 +32,6 @@ export interface CandleImportRecord {
   readonly corporateActions?: unknown;
   readonly visibleAt?: Date | null;
 }
-
-/** 合法且可进入严格成交回测的复权口径（后复权 / 不复权）。前复权 'qfq' 不在内。 */
-export const STRICT_BACKTEST_ALLOWED_ADJ_TYPES = new Set(['hfq', 'none', null]);
 
 /** 合法且可进入严格成交回测的 K 线复权口径：后复权 hfq / 不复权 none。未知(null) 与前复权(qfq) 一律拒绝。 */
 export const STRICT_CANDLE_ADJ_TYPES: ReadonlySet<string> = new Set(['hfq', 'none']);

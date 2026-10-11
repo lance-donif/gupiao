@@ -19,10 +19,7 @@ import {
   datasetVersionWhere,
   buildDatasetSqlClause,
 } from '../market-data/market-data-reader.js';
-
-const toDayKey = (value: Date | null | undefined): string | null => {
-  return value?.toISOString?.().slice(0, 10) ?? null;
-};
+import { toDayKey } from '../../lib/date-utils.js';
 
 /**
  * 修复点 1：市场信号新鲜度。原实现只判 tradingDay <= asOf，完全无可见性守卫。

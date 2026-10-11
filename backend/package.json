@@ -21,10 +21,20 @@
   },
   "keywords": [
     "typescript",
-    "langchain",
-    "deepagents",
     "prisma"
   ],
+  "knip": {
+    "entry": [
+      "scripts/*.ts",
+      "src/**/*.test.ts",
+      "tests/**/*.test.ts"
+    ],
+    "project": [
+      "src/**/*.ts",
+      "scripts/**/*.ts"
+    ],
+    "ignoreExportsUsedInFile": true
+  },
   "author": "",
   "license": "MIT",
   "trustedDependencies": [

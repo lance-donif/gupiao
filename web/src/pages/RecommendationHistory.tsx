@@ -23,7 +23,10 @@ import {
 import { useToast } from '@/components/ui/toast';
 import { api } from '@/lib/api';
 import type { StrategyProfitPayload, StrategyProfitRow } from '@/lib/api-types';
-import { cn, formatMinute, formatPercent } from '@/lib/utils';
+import { cn } from '@/lib/cn';
+import { changeToneClass, formatMinute, formatPercent } from '@/lib/format';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import { Metric } from '@/features/dashboard/dashboard-primitives';
 
 const HORIZONS: Array<['live' | 't1' | 't3' | 't5', string]> = [
   ['live', 'LIVE'],
@@ -55,7 +58,11 @@ export default function RecommendationHistoryPage() {
   const [returnStatus, setReturnStatus] = React.useState('all');
   const [sortBy, setSortBy] = React.useState<SortBy>('execution_time');
   const [sortOrder, setSortOrder] = React.useState<SortOrder>('desc');
-  const deferredSymbolQuery = React.useDeferredValue(symbolQuery);
+  // 两个输入框都会触发全量历史查询，必须真防抖。
+  // 原先 symbolQuery 只用 useDeferredValue（只降渲染优先级，不减少请求数），
+  // traceId 则完全没做处理，每敲一个字符就打一次接口。
+  const debouncedSymbolQuery = useDebouncedValue(symbolQuery);
+  const debouncedTraceId = useDebouncedValue(traceId);
 
   React.useEffect(() => {
     setTradeDate(ctx.globalDate);
@@ -70,8 +77,8 @@ export default function RecommendationHistoryPage() {
     try {
       const payload = await api.getStrategyProfits(ctx.activeClusterId, tradeDate, {
         strategy_id: strategyId,
-        trace_id: traceId.trim() || null,
-        symbol_query: deferredSymbolQuery.trim() || null,
+        trace_id: debouncedTraceId.trim() || null,
+        symbol_query: debouncedSymbolQuery.trim() || null,
         return_status: returnStatus,
         sort_by: sortBy,
         sort_order: sortOrder,
@@ -84,13 +91,13 @@ export default function RecommendationHistoryPage() {
     }
   }, [
     ctx.activeClusterId,
-    deferredSymbolQuery,
+    debouncedSymbolQuery,
+    debouncedTraceId,
     returnStatus,
     sortBy,
     sortOrder,
     strategyId,
     toast,
-    traceId,
     tradeDate,
   ]);
 
@@ -106,7 +113,7 @@ export default function RecommendationHistoryPage() {
   });
 
   return (
-    <div className="page-workbench grid min-h-[calc(100vh-48px)] grid-cols-[minmax(0,1fr)] gap-3 overflow-auto p-3 xl:h-[calc(100vh-48px)] xl:overflow-hidden">
+    <div className="page-workbench grid min-h-[calc(100dvh-var(--app-header-height))] grid-cols-[minmax(0,1fr)] gap-3 overflow-auto p-3 xl:h-[calc(100dvh-var(--app-header-height))] xl:overflow-hidden">
       <section className="workstation-panel-strong flex min-h-0 flex-col rounded-2xl">
         <div className="flex h-auto min-h-14 shrink-0 flex-col gap-3 border-b border-border/70 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -226,10 +233,10 @@ export default function RecommendationHistoryPage() {
           </div>
         </div>
         <CardContent className="grid shrink-0 grid-cols-2 gap-3 border-b border-border/70 p-4 lg:grid-cols-4">
-          <Metric label="推荐记录" value={String(rows.length)} />
-          <Metric label="已结算" value={String(settledReturns.length)} />
-          <Metric label="平均收益" value={formatPercent(avgReturn(settledReturns), 2)} />
-          <Metric label="胜率" value={formatPercent(winRate(settledReturns), 0)} />
+          <Metric variant="panel" label="推荐记录" value={String(rows.length)} />
+          <Metric variant="panel" label="已结算" value={String(settledReturns.length)} />
+          <Metric variant="panel" label="平均收益" value={formatPercent(avgReturn(settledReturns), 2)} />
+          <Metric variant="panel" label="胜率" value={formatPercent(winRate(settledReturns), 0)} />
         </CardContent>
         <ScrollArea className="min-h-0 flex-1 px-3 pb-3">
           {rows.length === 0 && (
@@ -311,11 +318,9 @@ function RecommendationRow({ row }: { row: StrategyProfitRow }) {
             key={key}
             className={cn(
               'number-figure text-right text-[11px] font-semibold',
-              returnPct === null
-                ? 'text-muted-foreground'
-                : returnPct >= 0
-                  ? 'text-emerald-600'
-                  : 'text-rose-600'
+              // A股约定：红涨绿跌。此前这里写成了 emerald=涨 / rose=跌，与
+              // Dashboard 的红涨绿跌相反，已统一走语义类。
+              changeToneClass(returnPct)
             )}
             title={`${label} ${statusLabel} ${horizon?.settlement_note ?? ''}`}
           >
@@ -327,15 +332,6 @@ function RecommendationRow({ row }: { row: StrategyProfitRow }) {
         );
       })}
     </TableRow>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="workstation-control rounded-xl p-3">
-      <div className="text-[11px] font-semibold leading-4 text-muted-foreground">{label}</div>
-      <div className="number-figure mt-1 text-[16px] font-bold leading-6">{value}</div>
-    </div>
   );
 }
 

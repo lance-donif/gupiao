@@ -4,8 +4,6 @@ import { Dialog as SheetPrimitive } from 'radix-ui';
 import { cn } from '@/lib/utils';
 
 export const Sheet = SheetPrimitive.Root;
-export const SheetTrigger = SheetPrimitive.Trigger;
-export const SheetClose = SheetPrimitive.Close;
 
 export const SheetContent = React.forwardRef<
   React.ElementRef<typeof SheetPrimitive.Content>,
@@ -22,8 +20,11 @@ export const SheetContent = React.forwardRef<
       {...props}
     >
       {children}
-      <SheetPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100">
-        <X className="h-4 w-4" />
+      <SheetPrimitive.Close
+        className="absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100"
+        aria-label="关闭"
+      >
+        <X className="h-4 w-4" aria-hidden="true" />
       </SheetPrimitive.Close>
     </SheetPrimitive.Content>
   </SheetPrimitive.Portal>

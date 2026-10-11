@@ -43,7 +43,12 @@ import { useToast } from '@/components/ui/toast';
 import { buildStrategyViewModel } from '@/features/strategies/strategy-view-model';
 import { StrategyCompareChart } from '@/features/strategies/StrategyCompareChart';
 import { api } from '@/lib/api';
-import { cn, formatPercent } from '@/lib/utils';
+import { cn } from '@/lib/cn';
+import { formatPercent } from '@/lib/format';
+
+/** 策略列表选中态样式。移动端卡片与桌面表格共用，避免同一视觉状态两处漂移。 */
+const STRATEGY_SELECTED_ROW =
+  'bg-sky-50/80 shadow-[inset_3px_0_0_var(--score-evidence)] dark:bg-sky-950/20';
 
 function defaultConfig(): StrategyConfig {
   return {
@@ -124,6 +129,16 @@ export default function StrategiesPage() {
     void load();
   }, [load]);
 
+  /**
+   * 变更（保存/切换/复制/删除）后刷新。
+   *
+   * 只需 ctx.refreshStrategies —— 它已重新拉取策略定义。
+   * 此前还会额外 await load()，导致同一接口被串行请求两次（4 处操作各多打一次）。
+   */
+  const refreshAfterMutation = React.useCallback(async () => {
+    await ctx.refreshStrategies();
+  }, [ctx.refreshStrategies]);
+
   function openEditor(strategy?: StrategyDefinition) {
     setEditing(strategy ?? null);
     setName(strategy?.name ?? '');
@@ -153,8 +168,7 @@ export default function StrategiesPage() {
         await api.createStrategy(payload);
       }
       setEditorOpen(false);
-      await ctx.refreshStrategies();
-      await load();
+      await refreshAfterMutation();
     } catch (error) {
       toast({ title: '保存策略失败', description: String(error), variant: 'destructive' });
     }
@@ -167,8 +181,7 @@ export default function StrategiesPage() {
         enabled: !strategy.enabled,
         config_json: strategy.config_json,
       });
-      await ctx.refreshStrategies();
-      await load();
+      await refreshAfterMutation();
     } catch (error) {
       toast({ title: '切换失败', description: String(error), variant: 'destructive' });
     }
@@ -181,8 +194,7 @@ export default function StrategiesPage() {
         name: `${strategy.name} 副本`,
         enabled: false,
       });
-      await ctx.refreshStrategies();
-      await load();
+      await refreshAfterMutation();
     } catch (error) {
       toast({ title: '复制失败', description: String(error), variant: 'destructive' });
     }
@@ -191,8 +203,7 @@ export default function StrategiesPage() {
   async function deleteStrategy(strategy: StrategyDefinition) {
     try {
       await api.deleteStrategy(strategy.id, ctx.activeClusterId);
-      await ctx.refreshStrategies();
-      await load();
+      await refreshAfterMutation();
     } catch (error) {
       toast({ title: '删除失败', description: String(error), variant: 'destructive' });
     }
@@ -208,7 +219,7 @@ export default function StrategiesPage() {
   const selectedVm = selected ? buildStrategyViewModel(selected, selectedSummary) : null;
 
   return (
-    <div className="page-workbench grid min-h-[calc(100vh-48px)] grid-cols-1 gap-3 overflow-auto p-3 xl:h-[calc(100vh-48px)] xl:grid-cols-[minmax(520px,1fr)_360px] xl:overflow-hidden">
+    <div className="page-workbench grid min-h-[calc(100dvh-var(--app-header-height))] grid-cols-1 gap-3 overflow-auto p-3 xl:h-[calc(100dvh-var(--app-header-height))] xl:grid-cols-[minmax(520px,1fr)_360px] xl:overflow-hidden">
       <section className="workstation-panel-strong flex min-h-0 flex-col rounded-2xl">
         <div className="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-4">
           <div>
@@ -240,6 +251,7 @@ export default function StrategiesPage() {
                 onSelect={setSelectedId}
                 onEdit={openEditor}
                 onCopy={(strategy) => void copyStrategy(strategy)}
+                onDelete={(strategy) => void deleteStrategy(strategy)}
               />
               <StrategyListDesktop
                 strategies={strategies}
@@ -347,6 +359,69 @@ export default function StrategiesPage() {
   );
 }
 
+/**
+ * 策略行操作按钮组（编辑 / 复制 / 删除）。
+ *
+ * 移动端卡片与桌面表格共用同一实现 —— 此前移动端只有编辑/复制，
+ * 导致手机上无法删除策略或切换启用状态。
+ */
+function StrategyActions(props: {
+  strategy: StrategyDefinition;
+  onEdit: (strategy: StrategyDefinition) => void;
+  onCopy: (strategy: StrategyDefinition) => void;
+  onDelete: (strategy: StrategyDefinition) => void;
+}) {
+  const { strategy } = props;
+  return (
+    <div className="flex justify-end gap-1" onClick={(event) => event.stopPropagation()}>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7"
+        onClick={() => props.onEdit(strategy)}
+        aria-label="编辑"
+        title="编辑"
+      >
+        <Edit className="h-3.5 w-3.5" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7"
+        onClick={() => props.onCopy(strategy)}
+        aria-label="复制"
+        title="复制"
+      >
+        <Copy className="h-3.5 w-3.5" />
+      </Button>
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="删除" title="删除">
+            <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+          </Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除策略？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将删除「{strategy.name}」策略定义，历史收益记录保留。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => props.onDelete(strategy)}
+              className="bg-rose-600 text-white hover:bg-rose-700"
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
 function StrategyListMobile(props: {
   strategies: readonly StrategyDefinition[];
   summaryById: ReadonlyMap<string, StrategyProfitSummary>;
@@ -354,66 +429,51 @@ function StrategyListMobile(props: {
   onSelect: (id: string) => void;
   onEdit: (strategy: StrategyDefinition) => void;
   onCopy: (strategy: StrategyDefinition) => void;
+  onDelete: (strategy: StrategyDefinition) => void;
 }) {
   return (
     <div className="space-y-2 md:hidden">
       {props.strategies.map((strategy) => {
         const summary = props.summaryById.get(strategy.id) ?? null;
         const vm = buildStrategyViewModel(strategy, summary);
+        const selected = props.selectedId === strategy.id;
         return (
+          // 选择区用真<button>，操作按钮放在同级：
+          // role="button" 的元素内再嵌 button 是无效 ARIA，读屏会混淆两层语义。
           <div
             key={strategy.id}
-            role="button"
-            tabIndex={0}
             className={cn(
-              'workstation-control w-full rounded-xl p-3 text-left transition-colors',
-              props.selectedId === strategy.id && 'bg-sky-50/80 shadow-[inset_3px_0_0_#2563eb]'
+              'workstation-control w-full rounded-xl transition-colors',
+              selected && STRATEGY_SELECTED_ROW
             )}
-            onClick={() => props.onSelect(strategy.id)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                props.onSelect(strategy.id);
-              }
-            }}
           >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="line-clamp-1 text-[13px] font-semibold">{strategy.name}</div>
-                <div className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">
-                  {strategy.description || '无描述'}
+            <button
+              type="button"
+              aria-pressed={selected}
+              className="w-full rounded-xl p-3 text-left"
+              onClick={() => props.onSelect(strategy.id)}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="line-clamp-1 text-[13px] font-semibold">{strategy.name}</div>
+                  <div className="mt-1 line-clamp-1 text-[11px] text-muted-foreground">
+                    {strategy.description || '无描述'}
+                  </div>
                 </div>
+                <Badge
+                  variant={strategy.enabled ? 'default' : 'secondary'}
+                  className="h-5 shrink-0 px-1.5 text-[10px]"
+                >
+                  {vm.enabled_label}
+                </Badge>
               </div>
-              <Badge
-                variant={strategy.enabled ? 'default' : 'secondary'}
-                className="h-5 shrink-0 px-1.5 text-[10px]"
-              >
-                {vm.enabled_label}
-              </Badge>
-            </div>
-            <div className="mt-3 grid gap-2">
-              <SummaryRow label="筛选" value={vm.filter_summary} />
-              <SummaryRow label="权重" value={vm.weight_summary} mono />
-            </div>
-            <div className="mt-3 flex justify-end gap-1" onClick={(event) => event.stopPropagation()}>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={() => props.onEdit(strategy)}
-                title="编辑"
-              >
-                <Edit className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={() => props.onCopy(strategy)}
-                title="复制"
-              >
-                <Copy className="h-3.5 w-3.5" />
-              </Button>
+              <div className="mt-3 grid gap-2">
+                <SummaryRow label="筛选" value={vm.filter_summary} />
+                <SummaryRow label="权重" value={vm.weight_summary} mono />
+              </div>
+            </button>
+            <div className="px-3 pb-3">
+              <StrategyActions strategy={strategy} onEdit={props.onEdit} onCopy={props.onCopy} onDelete={props.onDelete} />
             </div>
           </div>
         );
@@ -453,7 +513,7 @@ function StrategyListDesktop(props: {
               className={cn(
                 'cursor-pointer transition-colors hover:bg-white/80',
                 props.selectedId === strategy.id &&
-                  'bg-sky-50/80 shadow-[inset_3px_0_0_#2563eb] dark:bg-sky-950/20'
+                  STRATEGY_SELECTED_ROW
               )}
               onClick={() => props.onSelect(strategy.id)}
             >
@@ -463,8 +523,8 @@ function StrategyListDesktop(props: {
                   {strategy.description || '无描述'}
                 </div>
               </TableCell>
-              <TableCell className="text-muted-foreground">{vm.filter_summary}</TableCell>
-              <TableCell className="number-figure text-[11px]">{vm.weight_summary}</TableCell>
+              <TableCell className="max-w-[220px] truncate text-muted-foreground" title={vm.filter_summary}>{vm.filter_summary}</TableCell>
+              <TableCell className="number-figure max-w-[260px] truncate text-[11px]" title={vm.weight_summary}>{vm.weight_summary}</TableCell>
               <TableCell>
                 <button
                   type="button"
@@ -482,50 +542,7 @@ function StrategyListDesktop(props: {
                 </button>
               </TableCell>
               <TableCell className="text-right">
-                <div className="flex justify-end gap-1" onClick={(event) => event.stopPropagation()}>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    onClick={() => props.onEdit(strategy)}
-                    title="编辑"
-                  >
-                    <Edit className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    onClick={() => props.onCopy(strategy)}
-                    title="复制"
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                  </Button>
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button variant="ghost" size="icon" className="h-7 w-7" title="删除">
-                        <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                      </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>确认删除策略？</AlertDialogTitle>
-                        <AlertDialogDescription>
-                          将删除「{strategy.name}」策略定义，历史收益记录保留。
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>取消</AlertDialogCancel>
-                        <AlertDialogAction
-                          onClick={() => props.onDelete(strategy)}
-                          className="bg-rose-600 text-white hover:bg-rose-700"
-                        >
-                          删除
-                        </AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
-                </div>
+                <StrategyActions strategy={strategy} onEdit={props.onEdit} onCopy={props.onCopy} onDelete={props.onDelete} />
               </TableCell>
             </TableRow>
           );

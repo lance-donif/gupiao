@@ -11,6 +11,7 @@
  *   直接返回既有的最新版本（`reused: true`）。
  */
 import { PrismaClient, Prisma } from '@prisma/client';
+import { beijingDayWindow } from '../../lib/beijing-time.js';
 
 export type PublishAuditStatus = 'pass' | 'warn' | 'fail' | 'backfill' | (string & {});
 
@@ -154,10 +155,7 @@ export async function getLatestPublish(
   const where: Prisma.RecommendationPublishWhereInput = { supersededBy: null };
   if (options.asOf !== undefined) {
     const asOf = options.asOf instanceof Date ? options.asOf : new Date(options.asOf);
-    const start = new Date(asOf.getTime() - 8 * 60 * 60 * 1000);
-    start.setUTCHours(0, 0, 0, 0);
-    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
-    where.asOf = { gte: start, lt: end };
+    where.asOf = { ...beijingDayWindow(asOf) };
   }
   const found = await prisma.recommendationPublish.findFirst({
     where: { ...where, clusterKey: options.clusterKey },
@@ -189,10 +187,7 @@ export async function getPublishedTraceIds(
   const where: Prisma.RecommendationPublishWhereInput = { supersededBy: null };
   if (options.asOf !== undefined) {
     const asOf = options.asOf instanceof Date ? options.asOf : new Date(options.asOf);
-    const start = new Date(asOf.getTime() - 8 * 60 * 60 * 1000);
-    start.setUTCHours(0, 0, 0, 0);
-    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
-    where.asOf = { gte: start, lt: end };
+    where.asOf = { ...beijingDayWindow(asOf) };
   }
   const rows = await prisma.recommendationPublish.findMany({
     where: { ...where, clusterKey: options.clusterKey },

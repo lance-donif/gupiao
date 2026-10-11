@@ -1,7 +1,15 @@
 import { Prisma } from '@prisma/client';
 import { computeMomentumPct, computeStaleTradingDays } from './scoring-utils.js';
 import { isCandleVisibleAsOf } from './market-data/market-data-reader.js';
+import {
+  isMomentumChannelCandidate,
+  loadMomentumCandidates,
+  momentumAwareGate,
+  toMomentumRecommendation,
+} from './momentum-candidate-source.js';
 import { DEFAULT_BUSINESS_CONFIG } from '../version.js';
+import { toBeijingDayKey } from '../lib/beijing-time.js';
+import { uniqueNonEmpty } from '../lib/date-utils.js';
 
 export interface ITempStockQuote {
   readonly symbol: string;
@@ -42,6 +50,8 @@ export interface ITempRecommendationScoreBreakdown {
   selectionSignalType?: string;
   exposureFactId?: string;
   supplementalSource?: string;
+  /** 候选来源通道：'momentum'（异动通道）或缺省（证据通道） */
+  selectionChannel?: string;
 }
 
 export interface ITempStockRecommendation {
@@ -77,6 +87,10 @@ export interface ITempRecommendationSelectionDiagnostics {
   readonly topDiversityCount: number;
   readonly supplementalCandidateCount: number;
   readonly supplementalSelectedCount: number;
+  /** 异动通道候选数（授权打破「无证据不补位」后引入，见 momentum-candidate-source.ts） */
+  readonly momentumCandidateCount?: number;
+  /** 异动通道最终入选数 */
+  readonly momentumSelectedCount?: number;
   readonly distinctIndustryCount: number;
   readonly eligibleIndustryCount: number;
   readonly shortfallReasons: readonly string[];
@@ -107,7 +121,7 @@ interface IMarketSignalSummary {
 }
 
 const SCORE_COMPONENT_PATTERN = /评分组件：证据\s+([\d.]+)\/\d+，图谱\s+([\d.]+)\/\d+，暴露\s+([\d.]+)\/\d+，市场\s+([\d.]+)\/\d+，总分\s+([\d.]+)\/100/u;
-const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const INDUSTRY_MOMENTUM_PENALTY_THRESHOLD = -0.05;
 const INDUSTRY_MOMENTUM_PENALTY_MIN_FACTOR = 0.3;
@@ -541,6 +555,36 @@ const normalizeCooldownKeyword = (value: unknown): string => {
   return String(value ?? '').replace(/\s+/gu, '').toLocaleLowerCase('zh-CN');
 };
 
+/**
+ * 单一行业在最终推荐中的最大占比。
+ *
+ * 为什么需要独立的行业上限：`maxPerIndustry` 约束的是**信号类型**，而信号类型来自
+ * 命中的关键词（见 normalizeSelectionSignalType）。同一行业可因命中不同关键词被拆成
+ * 多个信号类型，各自都不触顶，于是行业实际上无上限。实测：
+ *   - 2026-10-07 交通运输 9 只（航运交通 5 + 机场 4），占全量 41%
+ *   - 2026-09-23 交通运输 15 只，占全量 54%
+ * 行业过度集中会让整份推荐随单一主题波动，与「每行业保底 1 只」的多样化意图相悖。
+ *
+ * 取 0.2：limit=30 时单行业最多 6 只，至少覆盖 5 个行业。
+ */
+const MAX_INDUSTRY_SHARE = 0.2;
+
+/**
+ * 由推荐总数推导单行业上限。
+ *
+ * 关键约束：**不得比 maxPerIndustry 更严**。maxPerIndustry 是既有的「单信号类型」
+ * 配额（默认 5，见 generatePhysicalRecommendations* 的入参），全选同一行业的合法场景
+ * （单行业只有一种信号类型时）必须保持不变。本上限只用于堵住「同行业拆成多个信号类型
+ * 从而绕过配额」的漏洞，因此取两者较大值。
+ */
+export const resolveMaxPerIndustryCap = (limit: number, maxPerSignalType: number): number => {
+  const shareCap = Number.isFinite(limit) && limit > 0
+    ? Math.max(2, Math.ceil(limit * MAX_INDUSTRY_SHARE))
+    : 2;
+  const typeCap = Number.isFinite(maxPerSignalType) && maxPerSignalType > 0 ? maxPerSignalType : 1;
+  return Math.max(typeCap, shareCap);
+};
+
 const hasCooldownKeyword = (
   recommendation: ITempStockRecommendation,
   previousDayKeywords: ReadonlySet<string>,
@@ -555,7 +599,7 @@ const hasCooldownKeyword = (
 
 
 const resolvePreviousBeijingDayRange = (asOf: Date): { startInclusive: Date; endExclusive: Date } => {
-  const beijingDateKey = new Date(asOf.getTime() + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
+  const beijingDateKey = toBeijingDayKey(asOf);
   const currentDayStart = new Date(`${beijingDateKey}T00:00:00.000+08:00`);
   return {
     startInclusive: new Date(currentDayStart.getTime() - ONE_DAY_MS),
@@ -750,18 +794,44 @@ export class TempStockRecommendationService {
     }
     void marketBreadthSource;
 
-    candidates.sort((a: any, b: any) => b.score - a.score || a.symbol.localeCompare(b.symbol));
+    // 3.9 异动通道：以 asOf 当日行情（涨幅+放量）产出候选，与证据通道合并后统一选择。
+    // 产品决策：授权打破「无 EvidenceContribution 不补位」——涨停股普遍无新闻证据，
+    // 纯证据评分结构性错过它们（实测 2026-10-09：93 只涨停仅 9 只有证据，
+    // 证据分 0.0-0.1 与其余 760+ 只候选不可区分）。
+    const surgeCandidates = await loadMomentumCandidates(prisma, clusterKey, asOf);
+    let surgeRecommendations: ITempStockRecommendation[] = [];
+    if (surgeCandidates.length > 0) {
+      const surgeSymbols = surgeCandidates.map(item => item.symbol);
+      const surgeInfo = await this.loadStockInfoMap(prisma, clusterKey, asOf, surgeSymbols);
+      surgeRecommendations = surgeCandidates.map(candidate =>
+        toMomentumRecommendation(
+          candidate,
+          surgeInfo.get(candidate.symbol)?.industry ?? FALLBACK_INDUSTRY,
+        ),
+      );
+    }
+    // 同symbol双通道去重：保留得分高者（异动候选通常更高）
+    const dedupedCandidates = new Map<string, ITempStockRecommendation>();
+    for (const candidate of [...candidates, ...surgeRecommendations]) {
+      const existing = dedupedCandidates.get(candidate.symbol);
+      if (!existing || candidate.score > existing.score) {
+        dedupedCandidates.set(candidate.symbol, candidate);
+      }
+    }
+    const blendedCandidates = [...dedupedCandidates.values()];
+
+    blendedCandidates.sort((a: any, b: any) => b.score - a.score || a.symbol.localeCompare(b.symbol));
 
     // 4. 按主贡献信号类型限制单类数量，避免一个主题占满榜单。
     const selector = new TempRecommendationSelector();
     const initialSelection = selector.selectTopRecommendationsWithDiagnostics(
-      candidates as unknown as readonly ITempStockRecommendation[],
+      blendedCandidates as unknown as readonly ITempStockRecommendation[],
       limit,
       maxPerIndustry,
       cooldownExclusions,
     );
 
-    // AGENTS.md: 推荐不得用无 EvidenceContribution 的股票补位，因此不再引入 movement_evidence 补充候选。
+    // 异动通道与证据通道并存：通道来源由 scoreBreakdown.selectionChannel 标记，全程可追溯。
     const selection = initialSelection;
     const selected = selection.recommendations;
 
@@ -797,6 +867,8 @@ export class TempStockRecommendationService {
       diagnostics: {
         featureSnapshotCount: features.length,
         ...selection.diagnostics,
+        momentumCandidateCount: surgeCandidates.length,
+        momentumSelectedCount: selected.filter(item => isMomentumChannelCandidate(item)).length,
       },
     };
   }
@@ -808,7 +880,7 @@ export class TempStockRecommendationService {
     symbols: readonly string[],
   ): Promise<Map<string, IStockInfo>> {
     const stockInfoMap = new Map<string, IStockInfo>();
-    const uniqueSymbols = [...new Set(symbols.map(symbol => String(symbol).trim()).filter(Boolean))];
+    const uniqueSymbols = uniqueNonEmpty(symbols);
     if (uniqueSymbols.length === 0) {
       return stockInfoMap;
     }
@@ -886,7 +958,7 @@ export class TempStockRecommendationService {
     asOf: Date,
     symbols: readonly string[],
   ): Promise<Map<string, IMarketSignalSummary>> {
-    const uniqueSymbols = [...new Set(symbols.map(symbol => String(symbol).trim()).filter(Boolean))];
+    const uniqueSymbols = uniqueNonEmpty(symbols);
     const result = new Map<string, IMarketSignalSummary>();
     if (uniqueSymbols.length === 0 || !prisma.candle?.findMany) {
       return result;
@@ -1099,15 +1171,23 @@ export class TempRecommendationSelector {
   } {
     const stockEligibleRecommendations = recommendations.filter(isRecommendationStockEligible);
     const excludedByStockFilter = recommendations.length - stockEligibleRecommendations.length;
-    const gainEligibleRecommendations = stockEligibleRecommendations.filter(isRecentWeekGainEligible);
+    // 异动通道候选已在源头完成自身过滤（涨幅/量比/价格/688/ST/新股），
+    // 证据通道的质量门对其短路；股票池与价格门对两通道统一生效。
+    const gainEligibleRecommendations = stockEligibleRecommendations.filter(
+      item => momentumAwareGate(item, isRecentWeekGainEligible),
+    );
     const excludedByRecentWeekGain = stockEligibleRecommendations.length - gainEligibleRecommendations.length;
-    const lossEligibleRecommendations = gainEligibleRecommendations.filter(isRecentWeekLossEligible);
+    const lossEligibleRecommendations = gainEligibleRecommendations.filter(
+      item => momentumAwareGate(item, isRecentWeekLossEligible),
+    );
     const excludedByRecentWeekLoss = gainEligibleRecommendations.length - lossEligibleRecommendations.length;
     const priceEligibleRecommendations = lossEligibleRecommendations.filter(isPriceEligible);
     const excludedByPrice = lossEligibleRecommendations.length - priceEligibleRecommendations.length;
     const todayDropEligibleRecommendations = priceEligibleRecommendations.filter(isTodayDropEligible);
     const excludedByTodayDrop = priceEligibleRecommendations.length - todayDropEligibleRecommendations.length;
-    const qualityEligibleRecommendations = todayDropEligibleRecommendations.filter(isRecommendationQualityEligible);
+    const qualityEligibleRecommendations = todayDropEligibleRecommendations.filter(
+      item => momentumAwareGate(item, isRecommendationQualityEligible),
+    );
     const excludedByQualityGate = todayDropEligibleRecommendations.length - qualityEligibleRecommendations.length;
     const previousDayStockSymbols = _cooldownExclusions.previousDayStockSymbols;
     const previousDayKeywords = _cooldownExclusions.previousDayKeywords;
@@ -1121,6 +1201,10 @@ export class TempRecommendationSelector {
     const excludedByPreviousDayKeyword = previousStockEligibleRecommendations.length - keywordEligibleRecommendations.length;
     const eligibleRecommendations = keywordEligibleRecommendations;
     const signalTypeCounts = new Map<string, number>();
+    // 行业上限独立于信号类型上限：信号类型由关键词决定，同行业可拆成多个信号类型
+    // 从而绕过 maxPerIndustry（详见 MAX_INDUSTRY_SHARE 注释）。
+    const industryCounts = new Map<string, number>();
+    const maxPerIndustryCap = resolveMaxPerIndustryCap(limit, maxPerIndustry);
     const topDiversityIndustries = new Set<string>();
     const effectiveTopDiversity = Math.max(0, Math.min(topDiversityCount, limit));
     // 每行业保底 1 个：先统计可用行业，全覆盖后才放开同行业补位
@@ -1134,6 +1218,7 @@ export class TempRecommendationSelector {
     const selected: ITempStockRecommendation[] = [];
     const postponed: ITempStockRecommendation[] = [];
     let skippedBySignalTypeCap = 0;
+    let skippedByIndustryCap = 0;
     let skippedByTopDiversity = 0;
 
     for (const recommendation of eligibleRecommendations) {
@@ -1144,8 +1229,14 @@ export class TempRecommendationSelector {
         continue;
       }
 
-      // 前 N 名强制行业多样化 + 每行业保底 1 个：还有未覆盖行业时，同行业候选暂存让路
+      // 行业上限：同一行业（无论命中多少种关键词）合计不得超过 maxPerIndustryCap
       const industryKey = resolveTopDiversityIndustryKey(recommendation);
+      if (industryKey !== null && (industryCounts.get(industryKey) ?? 0) >= maxPerIndustryCap) {
+        skippedByIndustryCap += 1;
+        continue;
+      }
+
+      // 前 N 名强制行业多样化 + 每行业保底 1 个：还有未覆盖行业时，同行业候选暂存让路
       const hasUncoveredIndustry = topDiversityIndustries.size < eligibleIndustryKeys.size;
       if (industryKey !== null && topDiversityIndustries.has(industryKey)
         && (selected.length < effectiveTopDiversity || hasUncoveredIndustry)) {
@@ -1154,6 +1245,7 @@ export class TempRecommendationSelector {
       }
       if (industryKey !== null) {
         topDiversityIndustries.add(industryKey);
+        industryCounts.set(industryKey, (industryCounts.get(industryKey) ?? 0) + 1);
       }
 
       selected.push(recommendation);
@@ -1176,6 +1268,15 @@ export class TempRecommendationSelector {
       if (currentCount >= maxPerIndustry) {
         postponedSkippedByCap += 1;
         continue;
+      }
+      // 回填同样受行业上限约束，否则回填阶段会把上限绕过去
+      const industryKey = resolveTopDiversityIndustryKey(recommendation);
+      if (industryKey !== null && (industryCounts.get(industryKey) ?? 0) >= maxPerIndustryCap) {
+        skippedByIndustryCap += 1;
+        continue;
+      }
+      if (industryKey !== null) {
+        industryCounts.set(industryKey, (industryCounts.get(industryKey) ?? 0) + 1);
       }
       selected.push(recommendation);
       signalTypeCounts.set(signalType, currentCount + 1);
@@ -1214,6 +1315,9 @@ export class TempRecommendationSelector {
       excludedByPreviousDayStock,
       excludedByPreviousDayKeyword,
       skippedBySignalTypeCap,
+      skippedByIndustryCap,
+      maxPerIndustryCap,
+      industryCounts: Object.fromEntries(industryCounts.entries()),
       skippedByTopDiversity,
       topDiversityCount: effectiveTopDiversity,
       distinctIndustryCount,

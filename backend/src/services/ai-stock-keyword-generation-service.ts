@@ -1,8 +1,9 @@
 import { AiChatClient, AiInputError, AiCandidatesExhaustedError, createAiOptionsFromEnv, type IAiSource } from './ai-chat-client.js';
 import { isAiRecord } from './ai-provider-config.js';
+import { AI_MAX_REQUEST_CHARS, isAiRequestWithinLimit } from './ai-limits.js';
 
 const DEFAULT_BATCH_SIZE = 20;
-const DEFAULT_MAX_REQUEST_CHARS = 240000;
+const DEFAULT_MAX_REQUEST_CHARS = AI_MAX_REQUEST_CHARS;
 const KEYWORDS_PER_STOCK = 5;
 const SOURCE = 'ai_generated_stock_knowledge';
 const SOURCE_NAME = 'AI 生成股票知识关键词';
@@ -207,7 +208,7 @@ export class AiStockKeywordGenerationService {
       }
       const prompt = buildPrompt(toRequest);
       const bodyChars = JSON.stringify({ model: this.requester.model, prompt }).length;
-      if (prompt.length > maxRequestChars || bodyChars > maxRequestChars) {
+      if (!isAiRequestWithinLimit(prompt.length, bodyChars, maxRequestChars)) {
         if (toRequest.length > 1) {
           const mid = Math.floor(toRequest.length / 2);
           const left = toRequest.slice(0, mid);

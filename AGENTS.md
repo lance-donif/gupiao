@@ -8,7 +8,7 @@
 - 今日推荐：新闻 -> LLM 因果抽取 -> Evidence -> 图谱/行情评分 -> Snapshot。
 - 历史回测：严格按 `asOf` 时间边界重放。
 - 自选股：关键词关系网络分析。
-- 前端页：Dashboard、Strategies、Trace、RecommendationHistory。
+- 前端页：Dashboard、Strategies、RecommendationHistory。Trace 页尚未实现（数据契约见 `api-types` 的 `BatchBrief`），`/traces/:traceId` 暂重定向回`/`。
 
 ## Work Style
 
@@ -28,7 +28,7 @@ gupiao/
 
 - `backend/src/services/`：业务服务和流水线
 - `backend/src/http/`：本地 HTTP shell
-- `backend/src/repositories/`：仓储层（当前仅 `News`/`Stock`/`FriendNetworkGraph`/覆盖率初始化走仓储；其余领域表由 service 直连 Prisma，为已知现状）
+- `backend/src/repositories/`：仓储层（当前仅 `FriendNetworkGraph`/覆盖率初始化走仓储；其余领域表由 service 直连 Prisma，为已知现状）
 - 算法散落于：`backend/src/services/scoring/`（评分）、`services/event-scoring/`（事件惩罚）、`services/market-data/`（行情读取）、`services/friend-network-*`（图谱）、`services/backtest-engine.ts`（series 回测）
 - `backend/prisma/schema.prisma`：数据库模型
 - `backend/scripts/run-daily-recommendation.ts`：每日推荐主入口
@@ -80,14 +80,23 @@ gupiao/
 - 默认推荐目标为 30 只。
 - 排除 `688` 开头股票。
 - 排除 `ST/*ST` 股票。
-- 排除最近 5 个可见交易日涨幅超过 20% 的股票。
-- 排除收盘价超过 40 元的股票。
+- 排除最近 5 个可见交易日涨幅超过 20% 的股票（**仅证据通道**；异动通道豁免，见下）。
+- 排除收盘价超过 40 元的股票（两通道统一）。
 - 今天推荐过的股票，明天不能再推荐。
 - 今天推荐用过的关键词，明天不能再推荐。
 - 每次凑满 30 只，不按市场宽度降载（市场状态只记录透明度）。
 - 每行业保底 1 只：先覆盖全部可用行业，再按分补足名额。
 - 可用候选不足 30 时输出原因，不用无 `EvidenceContribution` 的股票硬凑。
-- 推荐生成前会执行质量门槛：过滤行情快照过期、弱证据靠图谱补分、暴露过宽、过热追涨、无量弱反弹的候选。
+- 推荐生成前会执行质量门槛：过滤行情快照过期、弱证据靠图谱补分、暴露过宽、过热追涨、无量弱反弹的候选（**仅证据通道**；异动通道在源头已自过滤）。
+
+**异动通道（2026-10-11 起，产品决策打破「无证据不补位」）**：
+
+- 实现：`backend/src/services/momentum-candidate-source.ts`，与证据通道合并进同一选择器。
+- 入选条件：asOf 最近两个交易日间涨幅 ≥9.5% 且量比（对前一日）≥1.2、价格 ≤40、非 688/ST/新股（N/C 前缀）。
+- 评分：55 起步 + 超额涨幅 ×2.5 + 量比加成（≤15），上限 95；信号类型 `momentum异动`，受单信号类型上限（5）自然限流。
+- 证据通道的质量门（近 5 日涨幅、极端下跌、质量门槛）对异动候选短路；行业上限与冷却规则两通道共用。
+- 动机：涨停股普遍无新闻证据（实测 2026-10-09：93 只涨停仅 9 只有证据、分值与 760+ 只候选不可区分），纯证据评分结构性错过它们。
+- 行业上限：单行业最多 `ceil(limit × 0.2)` 只（30 只时为 6），只堵「同行业拆多信号类型绕过配额」的漏洞，不比单信号类型上限更严。
 
 关键词表现惩罚：
 
@@ -156,7 +165,7 @@ docker compose down
 ## Tech Stack
 
 - Backend：TypeScript 6, Bun 1.3, Prisma 7, Vitest 4
-- Frontend：React 19, Vite 8, TypeScript 6, Radix UI, ECharts, AntV G6
+- Frontend：React 19, Vite 8, TypeScript 6, Radix UI, ECharts
 - Database：PostgreSQL, Redis, Apache AGE 图扩展
 - AI：自研客户端直调模型 provider（`backend/src/services/ai-transport.ts`、`ai-chat-client.ts`），无 LangChain 依赖
 
@@ -164,15 +173,17 @@ docker compose down
 
 - 单元测试：纯逻辑，无外部依赖。
 - 集成测试：真实外部服务，必须明确依赖。
-- 后端测试用 `bun run test`（Vitest）；当前基线 552 通过 / 0 失败 / 75 跳过（82 文件：77 通过、5 跳过），2026-09-11 实测（无 `AI_TEST_DATABASE_URL` 时集成测试跳过）。
+- 后端测试用 `bun run test`（Vitest）；当前基线 555 通过 / 0 失败 / 76 跳过（76 文件：71 通过、5 跳过），2026-10-11 实测（无 `AI_TEST_DATABASE_URL` 时集成测试跳过）。
+- 前端测试用 `bun run test`（Vitest）；当前基线 18 通过 / 0 失败（5 文件），2026-10-11 实测。
 - 前端变更：需要浏览器页面验证。
 - 后端交接：禁止带 lint error；跳过的测试必须单列，不得计为通过。
+- 已知不稳定用例：`tests/unit/services/news-fetch-repair.test.ts` 的「bounds stalled response bodies by the total source timeout」在 30ms 超时下断言重试次数，高负载时偶发失败（约 1/4）。该文件本次未改动，属既有问题。
 
 ## Rewrite Status
 
 - M0–M7 开发已落地，完成情况见 `M0_M7_COMPLETION_REPORT_2026-09-10.md`。
 - 生产默认：`SCORING_RECIPE=event-v2`、`PIPELINE_STAGE_EXECUTOR=registry`、`CAUSAL_PROTOCOL_MODE=items`。
-- 验收基线：`cd backend && bun run check:fix` 全绿；带 `AI_TEST_DATABASE_URL` 时 80 文件 / 605 用例全部通过（0 跳过）；后端与前端构建通过。
+- 验收基线：`cd backend && bun run check:fix` 全绿；`cd web && bun run build && bun run test && bun run check:deps` 全绿。
 - 评测门槛是"报告"而非"开关"：M7 报告会输出 bootstrap 置信区间与回撤对比，未达门槛时标记 `overrideForced=true` 并保留 `event-v2`。
 
 ## Frontend Layout Rules

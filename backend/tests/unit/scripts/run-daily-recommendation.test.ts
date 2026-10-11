@@ -1,10 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { syncAndVerifyStockExposureFacts } from '../../../scripts/run-daily-recommendation.js';
-import {
-  resolveWeekendExpectedTradingDay,
-  shiftBeijingDay,
-} from '../../../scripts/run-daily-recommendation.js';
+import { resolveWeekendExpectedTradingDay } from '../../../scripts/run-daily-recommendation.js';
+import { shiftBeijingDay } from '../../../src/lib/beijing-time.js';
 
 class MockExposurePrismaClient {
   public constructor(

@@ -45,6 +45,7 @@ import { normalizeBaseUrl } from '../lib/url-utils.js';
 import { ensureCluster } from './runtime-store-shared.js';
 import { buildTraceCosts, buildTraceOverview, paginateRows } from './secondary-builders.js';
 import { buildRuntimeGraph } from './trace-builders.js';
+import { uniqueNonEmpty } from '../lib/date-utils.js';
 
 const PIPELINE_STEPS = [
   { id: 'news_fetch', label: '读取新闻' },
@@ -703,8 +704,6 @@ const trimText = (value: string | null | undefined, maxLength: number): string =
   }
   return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
 };
-
-const dedupeStrings = (values: readonly string[]): readonly string[] => [...new Set(values.filter(Boolean))];
 
 const findReasonByKeyword = (reasons: readonly string[], keyword: string | null | undefined): string | null => {
   const safeKeyword = String(keyword ?? '').trim();
@@ -2819,15 +2818,15 @@ export class RuntimeDataOperations {
       }>(
         [
           'SELECT r.symbol,',
-          '  count(*) FILTER (WHERE (r.\"scoreBreakdown\"->\'yield1Day\')::numeric > 0)::text AS t1_wins,',
+          '  count(*) FILTER (WHERE (r."scoreBreakdown"->\'yield1Day\')::numeric > 0)::text AS t1_wins,',
           '  count(*)::text AS t1_total,',
-          '  count(*) FILTER (WHERE (r.\"scoreBreakdown\"->\'yield3Day\')::numeric > 0)::text AS t3_wins,',
+          '  count(*) FILTER (WHERE (r."scoreBreakdown"->\'yield3Day\')::numeric > 0)::text AS t3_wins,',
           '  count(*)::text AS t3_total',
           'FROM (',
-          '  SELECT r.symbol, r.\"scoreBreakdown\",',
-          '         row_number() OVER (PARTITION BY r.symbol ORDER BY r.\"asOf\" DESC) AS rn',
-          '  FROM (SELECT r.* FROM public.\"RecommendationSnapshot\" r JOIN public.\"RecommendationPublish\" rp ON rp.\"traceId\" = r.\"traceId\" AND rp.\"supersededBy\" IS NULL) r',
-          `  WHERE r.\"clusterKey\" = $1 AND r.symbol = ANY($2) AND (r.\"asOf\" + interval '8 hours')::date < $3::date`,
+          '  SELECT r.symbol, r."scoreBreakdown",',
+          '         row_number() OVER (PARTITION BY r.symbol ORDER BY r."asOf" DESC) AS rn',
+          '  FROM (SELECT r.* FROM public."RecommendationSnapshot" r JOIN public."RecommendationPublish" rp ON rp."traceId" = r."traceId" AND rp."supersededBy" IS NULL) r',
+          `  WHERE r."clusterKey" = $1 AND r.symbol = ANY($2) AND (r."asOf" + interval '8 hours')::date < $3::date`,
           ') r',
           'WHERE r.rn <= 30',
           'GROUP BY r.symbol',
@@ -3127,15 +3126,15 @@ export class RuntimeDataOperations {
     }>(
       [
         'SELECT',
-        '  count(*) FILTER (WHERE (r.\"scoreBreakdown\"->\'yield1Day\')::numeric > 0)::text AS t1_wins,',
+        '  count(*) FILTER (WHERE (r."scoreBreakdown"->\'yield1Day\')::numeric > 0)::text AS t1_wins,',
         '  count(*)::text AS t1_total,',
-        '  count(*) FILTER (WHERE (r.\"scoreBreakdown\"->\'yield3Day\')::numeric > 0)::text AS t3_wins,',
+        '  count(*) FILTER (WHERE (r."scoreBreakdown"->\'yield3Day\')::numeric > 0)::text AS t3_wins,',
         '  count(*)::text AS t3_total',
         'FROM (',
-        '  SELECT r.\"scoreBreakdown\",',
-        '         row_number() OVER (ORDER BY r.\"asOf\" DESC) AS rn',
-        '  FROM (SELECT r.* FROM public.\"RecommendationSnapshot\" r JOIN public.\"RecommendationPublish\" rp ON rp.\"traceId\" = r.\"traceId\" AND rp.\"supersededBy\" IS NULL) r',
-        `  WHERE r.\"clusterKey\" = $1 AND r.symbol = $2 AND r.\"asOf\" < $3::timestamp`,
+        '  SELECT r."scoreBreakdown",',
+        '         row_number() OVER (ORDER BY r."asOf" DESC) AS rn',
+        '  FROM (SELECT r.* FROM public."RecommendationSnapshot" r JOIN public."RecommendationPublish" rp ON rp."traceId" = r."traceId" AND rp."supersededBy" IS NULL) r',
+        `  WHERE r."clusterKey" = $1 AND r.symbol = $2 AND r."asOf" < $3::timestamp`,
         ') r',
         'WHERE r.rn <= 30',
       ].join(' '),
@@ -3261,7 +3260,7 @@ export class RuntimeDataOperations {
         '暴露事实不再匹配当前主题',
         '市场确认转弱或跌破风控位',
       ],
-      concept_tags: dedupeStrings([row.industry, row.macro_mainline ?? ''].filter(Boolean)),
+      concept_tags: uniqueNonEmpty([row.industry, row.macro_mainline ?? ''].filter(Boolean)),
     };
     const evidence = await this.getDashboardStockEvidence(symbol, traceId, groupId, 8);
     const traceMetaRows = await pool.query<IDashboardTraceMetaDbRow>(
@@ -3390,7 +3389,7 @@ export class RuntimeDataOperations {
           stock_name: displayStockName,
           link_reason: linkReason,
           industry: row.industry,
-          concept_tags: dedupeStrings([
+          concept_tags: uniqueNonEmpty([
             row.industry ?? '',
             row.taxonomyLevel ?? '',
             row.exposureSourceName ?? '',

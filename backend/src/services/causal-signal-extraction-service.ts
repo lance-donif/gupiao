@@ -5,6 +5,7 @@ import { Prisma } from '@prisma/client';
 import { DataRefreshLedgerService } from './data-refresh-ledger-service.js';
 import { buildItemsProtocolInstruction, parseItemsProtocol, toProtocolVersion, type CausalProtocolMode, type ParsedCausalItem } from './causal-protocol.js';
 import { CAUSAL_PROTOCOL_VERSION, CAUSAL_PROTOCOL_VERSION_ITEMS } from '../version.js';
+import { AI_MAX_REQUEST_CHARS } from './ai-limits.js';
 
 export type CausalSignalDirection = 'positive' | 'negative' | 'mixed' | 'neutral';
 
@@ -221,7 +222,7 @@ const isDirection = (value: unknown): value is CausalSignalDirection => {
 };
 
 
-const DEFAULT_MAX_LLM_REQUEST_CHARS = 240_000;
+const DEFAULT_MAX_LLM_REQUEST_CHARS = AI_MAX_REQUEST_CHARS;
 const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 120_000;
 
 const LLM_CACHE_EXPIRES_AT = new Date('2099-12-31T23:59:59.999Z');

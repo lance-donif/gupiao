@@ -3,10 +3,10 @@ import {
   DEFAULT_BUSINESS_CONFIG,
   RECIPE_VERSION,
   businessConfigHash,
-  canonicalize,
   causalPromptVersion,
   sha256Hex,
 } from '../../../src/version.js';
+import { canonicalize } from '../../../src/lib/hash-utils.js';
 import { MemoryPrisma, candleFixture, newsFixture } from './pipeline-fixtures.js';
 
 describe('M0 version constants and business config fingerprint', () => {
