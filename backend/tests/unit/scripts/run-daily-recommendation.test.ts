@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { syncAndVerifyStockExposureFacts } from '../../../scripts/run-daily-recommendation.js';
-import { resolveWeekendExpectedTradingDay } from '../../../scripts/run-daily-recommendation.js';
+import { resolveNextWeekdayAsOf, refineAsOfWithTradingCalendar, resolveWeekendExpectedTradingDay } from '../../../scripts/run-daily-recommendation.js';
 import { shiftBeijingDay } from '../../../src/lib/beijing-time.js';
 
 class MockExposurePrismaClient {
@@ -140,5 +140,89 @@ describe('trading-day-aware candle gate', () => {
     expect(resolveWeekendExpectedTradingDay('2026-09-13', 0)).toBe('2026-09-11');
     expect(resolveWeekendExpectedTradingDay('2026-09-14', 1)).toBeNull();
     expect(resolveWeekendExpectedTradingDay('2026-09-11', 5)).toBeNull();
+  });
+});
+
+describe('next-weekday default asOf (前一晚跑下一交易日)', () => {
+  const expectAsOfDay = (asOf: Date, expectedDay: string): void => {
+    expect(asOf.toISOString()).toBe(new Date(`${expectedDay}T16:00:00.000+08:00`).toISOString());
+  };
+
+  it('周日运行 → 目标为周一 16:00（用户诉求：前一天跑周一的推荐）', () => {
+    // 2026-10-11 周日 20:00 北京
+    expectAsOfDay(resolveNextWeekdayAsOf(new Date('2026-10-11T12:00:00.000Z')), '2026-10-12');
+  });
+
+  it('周一至周四运行 → 目标为次日 16:00', () => {
+    expectAsOfDay(resolveNextWeekdayAsOf(new Date('2026-10-12T12:00:00.000Z')), '2026-10-13'); // 周一
+    expectAsOfDay(resolveNextWeekdayAsOf(new Date('2026-10-15T12:00:00.000Z')), '2026-10-16'); // 周四
+  });
+
+  it('周五/周六运行 → 目标为下周一 16:00', () => {
+    expectAsOfDay(resolveNextWeekdayAsOf(new Date('2026-10-16T12:00:00.000Z')), '2026-10-19'); // 周五
+    expectAsOfDay(resolveNextWeekdayAsOf(new Date('2026-10-17T12:00:00.000Z')), '2026-10-19'); // 周六
+  });
+});
+
+describe('trading-calendar asOf refinement', () => {
+  const makeCalendarPrisma = (rows: readonly { date: string; isOpen: boolean; calendarVersion?: string }[]): any => ({
+    tradingCalendarDay: {
+      findMany: async () => rows.map(row => ({
+        date: new Date(`${row.date}T00:00:00Z`),
+        isOpen: row.isOpen,
+        calendarVersion: row.calendarVersion ?? 'candle-import',
+      })),
+    },
+  });
+
+  it('目标日为交易日 → 不修正', async () => {
+    const asOf = new Date('2026-10-12T16:00:00.000+08:00'); // 周一，开市
+    const prisma = makeCalendarPrisma([
+      { date: '2026-10-12', isOpen: true },
+      { date: '2026-10-13', isOpen: true },
+    ]);
+    await expect(refineAsOfWithTradingCalendar(prisma, asOf)).resolves.toBe(asOf);
+  });
+
+  it('目标日休市（节假日）→ 推进到下一个开市日 16:00', async () => {
+    const asOf = new Date('2026-10-01T16:00:00.000+08:00'); // 国庆周四，休市
+    const prisma = makeCalendarPrisma([
+      { date: '2026-10-01', isOpen: false },
+      { date: '2026-10-02', isOpen: false },
+      { date: '2026-10-05', isOpen: true },
+    ]);
+    const refined = await refineAsOfWithTradingCalendar(prisma, asOf);
+    expect(refined.toISOString()).toBe(new Date('2026-10-05T16:00:00.000+08:00').toISOString());
+  });
+
+  it('日历表无数据 → 保留本地推导结果（不抛错、不阻断）', async () => {
+    const asOf = new Date('2026-10-12T16:00:00.000+08:00');
+    await expect(refineAsOfWithTradingCalendar(makeCalendarPrisma([]), asOf)).resolves.toBe(asOf);
+  });
+
+  it('prisma 无日历模型（mock 兼容）→ 原样返回', async () => {
+    const asOf = new Date('2026-10-12T16:00:00.000+08:00');
+    await expect(refineAsOfWithTradingCalendar({}, asOf)).resolves.toBe(asOf);
+  });
+
+  it('多版本日历时采用版本号最大的数据源', async () => {
+    const asOf = new Date('2026-10-12T16:00:00.000+08:00');
+    const prisma = makeCalendarPrisma([
+      { date: '2026-10-12', isOpen: false, calendarVersion: 'candle-import' },
+      { date: '2026-10-12', isOpen: true, calendarVersion: 'candle-prod' },
+    ]);
+    await expect(refineAsOfWithTradingCalendar(prisma, asOf)).resolves.toBe(asOf);
+  });
+
+  it('日历查询失败 → 保留本地推导结果', async () => {
+    const asOf = new Date('2026-10-12T16:00:00.000+08:00');
+    const brokenPrisma = {
+      tradingCalendarDay: {
+        findMany: async () => {
+          throw new Error('db down');
+        },
+      },
+    };
+    await expect(refineAsOfWithTradingCalendar(brokenPrisma, asOf)).resolves.toBe(asOf);
   });
 });

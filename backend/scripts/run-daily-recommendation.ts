@@ -187,10 +187,78 @@ const parseArgs = (): Record<string, string> => {
   return parsed;
 };
 
+/**
+ * 调度默认口径（不传 --as-of 时）：目标 = 下一个工作日（北京）16:00 收盘边界。
+ * 调度器在每个交易日的前一晚 20:00 运行，因此目标日即下一交易日；
+ * 节假日本地无法判定，由 refineAsOfWithTradingCalendar 依据 TradingCalendarDay 修正。
+ * 手动/回测入口仍应显式传 --as-of。
+ */
+export const resolveNextWeekdayAsOf = (now: Date = new Date()): Date => {
+  const day = getBeijingDateKey(now);
+  const weekday = new Date(`${day}T00:00:00Z`).getUTCDay();
+  // Fri(5)→下周一(+3)，Sat(6)→下周一(+2)，其余→次日(+1)
+  const offset = weekday === 5 ? 3 : weekday === 6 ? 2 : 1;
+  const target = shiftBeijingDay(day, offset);
+  return new Date(`${target}T16:00:00.000+08:00`);
+};
+
+const CALENDAR_REFINE_LOOKAHEAD_DAYS = 15;
+
+const calendarRowDayKey = (value: unknown): string => {
+  const date = value instanceof Date ? value : new Date(String(value));
+  return date.toISOString().slice(0, 10);
+};
+
+/**
+ * 默认 asOf（下一工作日）在节假日场景需要修正：TradingCalendarDay 表
+ * （exchange=SSE）覆盖目标日且当日休市时，向前推进到下一个真实交易日。
+ * 表无数据 / 覆盖缺口时保留本地推导结果并打日志——宁可沿用，不阻断调度链路。
+ */
+export const refineAsOfWithTradingCalendar = async (prisma: any, asOf: Date): Promise<Date> => {
+  if (typeof prisma?.tradingCalendarDay?.findMany !== 'function') {
+    return asOf;
+  }
+  const asOfDayKey = getBeijingDateKey(asOf);
+  const windowStart = new Date(`${shiftBeijingDay(asOfDayKey, -1)}T00:00:00Z`);
+  const windowEnd = new Date(`${shiftBeijingDay(asOfDayKey, CALENDAR_REFINE_LOOKAHEAD_DAYS)}T00:00:00Z`);
+  try {
+    const rows = await prisma.tradingCalendarDay.findMany({
+      where: { exchange: 'SSE', date: { gte: windowStart, lte: windowEnd } },
+      select: { date: true, isOpen: true, calendarVersion: true },
+    });
+    if (rows.length === 0) {
+      console.log(`[as_of] 交易日历无覆盖数据（${asOfDayKey} +${CALENDAR_REFINE_LOOKAHEAD_DAYS}d），保留本地推导 asOf=${asOfDayKey}`);
+      return asOf;
+    }
+    const activeVersion = [...new Set(rows.map((row: any) => String(row.calendarVersion)))].sort().at(-1);
+    const openDays = new Set(
+      rows
+        .filter((row: any) => String(row.calendarVersion) === activeVersion && row.isOpen)
+        .map((row: any) => calendarRowDayKey(row.date)),
+    );
+    if (openDays.has(asOfDayKey)) {
+      return asOf;
+    }
+    for (let offset = 1; offset <= CALENDAR_REFINE_LOOKAHEAD_DAYS; offset += 1) {
+      const candidate = shiftBeijingDay(asOfDayKey, offset);
+      if (openDays.has(candidate)) {
+        return new Date(`${candidate}T16:00:00.000+08:00`);
+      }
+    }
+    console.warn(`[as_of] 交易日历 ${CALENDAR_REFINE_LOOKAHEAD_DAYS} 天内无开市日，保留本地推导 asOf=${asOfDayKey}`);
+    return asOf;
+  }
+  catch (error) {
+    console.warn(`[as_of] 交易日历修正失败，保留本地推导 asOf=${asOfDayKey}: ${error instanceof Error ? error.message : String(error)}`);
+    return asOf;
+  }
+};
+
 const getAsOf = (raw: string | undefined): Date => {
-  // 默认当日北京收盘边界 16:00 +08:00，调度器按此跑；回测/手动入口传 --as-of 覆盖
+  // 调度器不传 --as-of：目标 = 下一工作日 16:00 收盘边界（每个交易日前一晚跑）；
+  // 回测/手动入口传 --as-of 覆盖
   const asOf = raw === undefined
-    ? new Date(`${getBeijingDateKey(new Date())}T16:00:00.000+08:00`)
+    ? resolveNextWeekdayAsOf()
     : new Date(raw);
   if (Number.isNaN(asOf.getTime())) {
     throw new Error(`Invalid --as-of: ${raw}`);
@@ -1943,8 +2011,8 @@ const runRegistryDailyPipeline = async (input: {
 async function executeMain(args: Record<string, string>, runLease: PipelineRunLease): Promise<void> {
   const runStartedAt = Date.now();
   let clusterKey = args.cluster ?? DEFAULT_CLUSTER_KEY;
+  const asOfExplicit = args['as-of'] !== undefined;
   let asOf = getAsOf(args['as-of']);
-  const traceId = args['resume-trace-id'] ?? args['trace-id'] ?? createTraceId(asOf, clusterKey);
   let limit = Number(args.limit ?? DEFAULT_LIMIT);
   let maxPerIndustry = Number(args['max-per-industry'] ?? DEFAULT_MAX_PER_INDUSTRY);
   const minExposureFacts = Number(args['min-exposure-facts'] ?? DEFAULT_MIN_EXPOSURE_FACTS);
@@ -1980,6 +2048,15 @@ async function executeMain(args: Record<string, string>, runLease: PipelineRunLe
   } }) as unknown as PrismaClient;
 
   try {
+  // 默认 asOf（下一工作日）需在拿到 DB 后按交易日历修正节假日（显式 --as-of 与 resume 不修正）。
+  if (!asOfExplicit && !args['resume-trace-id']) {
+    const refinedAsOf = await refineAsOfWithTradingCalendar(prisma, asOf);
+    if (refinedAsOf.getTime() !== asOf.getTime()) {
+      console.log(`[as_of] 交易日历修正: ${getBeijingDateKey(asOf)}(休市) -> ${getBeijingDateKey(refinedAsOf)}(开市)`);
+      asOf = refinedAsOf;
+    }
+  }
+  const traceId = args['resume-trace-id'] ?? args['trace-id'] ?? createTraceId(asOf, clusterKey);
   const resumed = args['resume-trace-id'] ? await readAiCheckpoint(prisma, traceId) : undefined;
   if (resumed) {
     if ((args['as-of'] && getAsOf(args['as-of']).getTime() !== new Date(resumed.asOf).getTime()) || (args.cluster && args.cluster !== resumed.clusterKey)) throw new Error('Resume must retain the checkpoint asOf and cluster');

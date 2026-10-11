@@ -36,23 +36,25 @@ interface IBeijingDateParts {
 const BEIJING_UTC_OFFSET_HOURS = 8;
 const MS_PER_HOUR = 60 * 60 * 1000;
 /**
- * 每天只在晚间 20:00（北京时间）跑一次：日线增量 → 历史收益对账 → 推荐主链路。
+ * 每个交易日的前一晚 20:00（北京时间）跑一次：日线增量 → 历史收益对账 → 推荐主链路。
+ * asOf 取「下一工作日 16:00」（run-daily-recommendation 默认口径，节假日由交易日历修正），
+ * 即周日 20:00 跑出周一的推荐，周一开盘前已可查看。
  *
  * 顺序不可调换：
  *  - 日线增量先行，否则推荐链路的 candle 预检会因数据陈旧直接停止；
  *  - 收益对账在推荐之前，让关键词惩罚读到已成熟的 5 日收益；
  *  - 推荐主链路自身包含新闻抓取、LLM 因果抽取、图谱/评分与发布。
  *
- * A股周六日铁定休市：周末不调度（cadence weekly + weekdays 1-5），
- * 上一份工作日快照继续有效，避免用无新交易日的空跑烧 LLM 费用。
+ * 调度日为周日~周四（每个交易日的前一晚）；周五、周六不跑——周四晚已生成周五的推荐，
+ * 周五晚再跑会产生同 asOf 的重复 trace（会被 traceId 去重跳过，白烧 LLM 费用）。
  * 任一步失败即中断当日链路（`&&` 串联），保留上一份已发布快照，绝不降级或折中。
  */
 const MVP_SCHEDULE_TABLE: readonly IMvpScheduleTask[] = [
   {
     id: 'daily_recommendation',
-    description: '工作日每晚 20:00 一次性执行：日线增量 → 历史收益对账 → 新闻/LLM 抽取 → 图谱评分 → 发布推荐。',
+    description: '每个交易日前一晚 20:00 执行：日线增量 → 历史收益对账 → 新闻/LLM 抽取 → 图谱评分 → 发布下一交易日推荐（周日晚跑周一，依次类推）。',
     cadence: 'weekly',
-    weekdays: [1, 2, 3, 4, 5],
+    weekdays: [0, 1, 2, 3, 4],
     beijingTime: { hour: 20, minute: 0 },
     dataFrequency: 'daily after market close',
     failureStrategy: 'fail fast; 任一步失败即停止当日链路并保留上一份已发布快照，不降级、不折中',

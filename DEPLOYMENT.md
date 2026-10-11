@@ -203,12 +203,14 @@ docker compose -f docker-compose.production.yml stop scheduler
 docker compose -f docker-compose.production.yml up -d scheduler
 ```
 
-**每个自然日只在 20:00（北京时间）跑一次** `daily_recommendation`，一条命令按顺序串联：
+**每个交易日前一晚 20:00（北京时间）跑一次** `daily_recommendation`（周日~周四；周五/周六不跑，
+周四晚已生成周五推荐），asOf 取「下一工作日 16:00」（节假日由 TradingCalendarDay 修正到下一开市日）。
+即周日 20:00 跑出周一的推荐，周一开盘前已可查看。一条命令按顺序串联：
 
 ```sh
 bun dist/scripts/sync-stock-history.js --mode incremental   # 1. 日线增量（否则推荐预检会 candle_stale 停止）
   && bun dist/scripts/backfill-yield-records.js             # 2. 历史收益对账（关键词惩罚读到已成熟收益）
-  && bun dist/scripts/run-daily-recommendation.js           # 3. 新闻/LLM 抽取 → 图谱评分 → 发布推荐
+  && bun dist/scripts/run-daily-recommendation.js           # 3. 新闻/LLM 抽取 → 图谱评分 → 发布推荐（asOf=下一交易日）
 ```
 
 任一步失败即中断当日链路并保留上一份已发布快照，不降级、不折中。
