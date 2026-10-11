@@ -13,7 +13,6 @@ export * from './limitup-evidence-initialization.js';
 export * from './load-backend-env.js';
 export * from './news-ingest-pipeline.js';
 export * from './news-ingest-types.js';
-export * from './service-types.js';
 export * from './stock-exposure-types.js';
 export * from './strategy-experiment-core.js';
 export * from './strategy-runner.js';
