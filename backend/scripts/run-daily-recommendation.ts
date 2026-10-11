@@ -204,38 +204,30 @@ export const resolveNextWeekdayAsOf = (now: Date = new Date()): Date => {
 
 const CALENDAR_REFINE_LOOKAHEAD_DAYS = 15;
 
-const calendarRowDayKey = (value: unknown): string => {
-  const date = value instanceof Date ? value : new Date(String(value));
-  return date.toISOString().slice(0, 10);
-};
-
 /**
  * 默认 asOf（下一工作日）在节假日场景需要修正：TradingCalendarDay 表
  * （exchange=SSE）覆盖目标日且当日休市时，向前推进到下一个真实交易日。
  * 表无数据 / 覆盖缺口时保留本地推导结果并打日志——宁可沿用，不阻断调度链路。
+ * 日期列用 to_char 取文本，规避 timestamp 无时区字段在非 UTC 容器的日键歧义。
  */
 export const refineAsOfWithTradingCalendar = async (prisma: any, asOf: Date): Promise<Date> => {
-  if (typeof prisma?.tradingCalendarDay?.findMany !== 'function') {
+  if (typeof prisma?.$queryRaw !== 'function') {
     return asOf;
   }
   const asOfDayKey = getBeijingDateKey(asOf);
-  const windowStart = new Date(`${shiftBeijingDay(asOfDayKey, -1)}T00:00:00Z`);
-  const windowEnd = new Date(`${shiftBeijingDay(asOfDayKey, CALENDAR_REFINE_LOOKAHEAD_DAYS)}T00:00:00Z`);
   try {
-    const rows = await prisma.tradingCalendarDay.findMany({
-      where: { exchange: 'SSE', date: { gte: windowStart, lte: windowEnd } },
-      select: { date: true, isOpen: true, calendarVersion: true },
-    });
+    const rows: Array<{ day_key: string; is_open: boolean }> = await prisma.$queryRaw`
+      SELECT to_char(date, 'YYYY-MM-DD') AS day_key, "isOpen" AS is_open
+      FROM "TradingCalendarDay"
+      WHERE exchange = 'SSE'
+        AND date >= ${new Date(`${shiftBeijingDay(asOfDayKey, -1)}T00:00:00Z`)}
+        AND date <= ${new Date(`${shiftBeijingDay(asOfDayKey, CALENDAR_REFINE_LOOKAHEAD_DAYS)}T00:00:00Z`)}
+        AND "calendarVersion" = (SELECT max("calendarVersion") FROM "TradingCalendarDay" WHERE exchange = 'SSE')`;
     if (rows.length === 0) {
       console.log(`[as_of] 交易日历无覆盖数据（${asOfDayKey} +${CALENDAR_REFINE_LOOKAHEAD_DAYS}d），保留本地推导 asOf=${asOfDayKey}`);
       return asOf;
     }
-    const activeVersion = [...new Set(rows.map((row: any) => String(row.calendarVersion)))].sort().at(-1);
-    const openDays = new Set(
-      rows
-        .filter((row: any) => String(row.calendarVersion) === activeVersion && row.isOpen)
-        .map((row: any) => calendarRowDayKey(row.date)),
-    );
+    const openDays = new Set(rows.filter((row) => row.is_open).map((row) => row.day_key));
     if (openDays.has(asOfDayKey)) {
       return asOf;
     }

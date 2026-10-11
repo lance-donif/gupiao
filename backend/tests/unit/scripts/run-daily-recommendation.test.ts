@@ -165,21 +165,15 @@ describe('next-weekday default asOf (前一晚跑下一交易日)', () => {
 });
 
 describe('trading-calendar asOf refinement', () => {
-  const makeCalendarPrisma = (rows: readonly { date: string; isOpen: boolean; calendarVersion?: string }[]): any => ({
-    tradingCalendarDay: {
-      findMany: async () => rows.map(row => ({
-        date: new Date(`${row.date}T00:00:00Z`),
-        isOpen: row.isOpen,
-        calendarVersion: row.calendarVersion ?? 'candle-import',
-      })),
-    },
+  const makeCalendarPrisma = (rows: readonly { day_key: string; is_open: boolean }[]): any => ({
+    $queryRaw: async () => rows.map(row => ({ day_key: row.day_key, is_open: row.is_open })),
   });
 
   it('目标日为交易日 → 不修正', async () => {
     const asOf = new Date('2026-10-12T16:00:00.000+08:00'); // 周一，开市
     const prisma = makeCalendarPrisma([
-      { date: '2026-10-12', isOpen: true },
-      { date: '2026-10-13', isOpen: true },
+      { day_key: '2026-10-12', is_open: true },
+      { day_key: '2026-10-13', is_open: true },
     ]);
     await expect(refineAsOfWithTradingCalendar(prisma, asOf)).resolves.toBe(asOf);
   });
@@ -187,9 +181,9 @@ describe('trading-calendar asOf refinement', () => {
   it('目标日休市（节假日）→ 推进到下一个开市日 16:00', async () => {
     const asOf = new Date('2026-10-01T16:00:00.000+08:00'); // 国庆周四，休市
     const prisma = makeCalendarPrisma([
-      { date: '2026-10-01', isOpen: false },
-      { date: '2026-10-02', isOpen: false },
-      { date: '2026-10-05', isOpen: true },
+      { day_key: '2026-10-01', is_open: false },
+      { day_key: '2026-10-02', is_open: false },
+      { day_key: '2026-10-05', is_open: true },
     ]);
     const refined = await refineAsOfWithTradingCalendar(prisma, asOf);
     expect(refined.toISOString()).toBe(new Date('2026-10-05T16:00:00.000+08:00').toISOString());
@@ -200,27 +194,22 @@ describe('trading-calendar asOf refinement', () => {
     await expect(refineAsOfWithTradingCalendar(makeCalendarPrisma([]), asOf)).resolves.toBe(asOf);
   });
 
-  it('prisma 无日历模型（mock 兼容）→ 原样返回', async () => {
+  it('prisma 无 $queryRaw（mock 兼容）→ 原样返回', async () => {
     const asOf = new Date('2026-10-12T16:00:00.000+08:00');
     await expect(refineAsOfWithTradingCalendar({}, asOf)).resolves.toBe(asOf);
   });
 
-  it('多版本日历时采用版本号最大的数据源', async () => {
+  it('15 天窗口内无开市日 → 保留本地推导结果', async () => {
     const asOf = new Date('2026-10-12T16:00:00.000+08:00');
-    const prisma = makeCalendarPrisma([
-      { date: '2026-10-12', isOpen: false, calendarVersion: 'candle-import' },
-      { date: '2026-10-12', isOpen: true, calendarVersion: 'candle-prod' },
-    ]);
+    const prisma = makeCalendarPrisma([{ day_key: '2026-10-12', is_open: false }]);
     await expect(refineAsOfWithTradingCalendar(prisma, asOf)).resolves.toBe(asOf);
   });
 
   it('日历查询失败 → 保留本地推导结果', async () => {
     const asOf = new Date('2026-10-12T16:00:00.000+08:00');
     const brokenPrisma = {
-      tradingCalendarDay: {
-        findMany: async () => {
-          throw new Error('db down');
-        },
+      $queryRaw: async () => {
+        throw new Error('db down');
       },
     };
     await expect(refineAsOfWithTradingCalendar(brokenPrisma, asOf)).resolves.toBe(asOf);
