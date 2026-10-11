@@ -67,23 +67,3 @@ export const resolveStockStatusAsOf = async (
     source: applicable.source ?? null,
   };
 };
-
-/** 批量解析，返回 symbol -> 状态；缺口的 symbol 不出现在结果中（由调用方决定是否视为 gap）。 */
-export const resolveStockStatusBatch = async (
-  prisma: any,
-  symbols: readonly string[],
-  asOf: Date,
-): Promise<Map<string, StockHistoricalStatus>> => {
-  const result = new Map<string, StockHistoricalStatus>();
-  for (const symbol of symbols) {
-    try {
-      result.set(symbol, await resolveStockStatusAsOf(prisma, symbol, asOf));
-    } catch (err) {
-      if (err instanceof StockStatusCoverageGapError) {
-        continue;
-      }
-      throw err;
-    }
-  }
-  return result;
-};

@@ -210,22 +210,6 @@ export interface IFactSnapshotResult {
   readonly activeAliasCount: number;
 }
 
-export interface ICoverageGapLoopInput {
-  readonly traceId: string;
-  readonly clusterKey: string;
-  readonly asOf: Date;
-  readonly tradeDate: Date;
-  readonly concurrency?: number;
-  readonly maxNewsPerCase?: number;
-  readonly dryRun?: boolean;
-  readonly extractor?: IExposureCandidateExtractor;
-}
-
-export interface ICoverageGapLoopResult {
-  readonly rebuild: IHistoricalLimitUpCaseRebuildResult;
-  readonly gapAnalysis: ICoverageGapAnalysisResult;
-  readonly candidateGeneration: IGenerateExposureCandidatesResult;
-}
 
 
 const DEFAULT_MAX_REQUEST_CHARS = AI_MAX_REQUEST_CHARS;
@@ -297,7 +281,12 @@ const evidenceTextExists = (news: IHistoricalNewsRecord | null, evidenceText: st
 };
 
 const sortByStableJson = <T>(rows: readonly T[]): readonly T[] => {
-  return [...rows].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  // 性能：先为每行预计算一次 JSON 键（Schwartzian transform），
+  // 避免 sort 比较器内 O(n log n) 次重复 stringify；排序结果与原实现一致。
+  return rows
+    .map(row => ({ row, key: JSON.stringify(row) }))
+    .sort((left, right) => left.key.localeCompare(right.key))
+    .map(entry => entry.row);
 };
 
 const readNewsRecord = (row: Record<string, unknown>): IHistoricalNewsRecord => ({
@@ -417,16 +406,6 @@ const incrementReason = (
 };
 
 const buildTradingDateKey = (date: Date): string => date.toISOString().slice(0, 10);
-
-const startOfUtcDate = (value: Date): Date => {
-  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
-};
-
-const nextUtcDate = (value: Date): Date => {
-  const next = startOfUtcDate(value);
-  next.setUTCDate(next.getUTCDate() + 1);
-  return next;
-};
 
 const normalizeKeywordForRule = (value: unknown): string => {
   return String(value ?? '')
@@ -1609,139 +1588,4 @@ function summarizeBy(rows: readonly Record<string, unknown>[], field: string): R
     result[key] = (result[key] ?? 0) + 1;
   }
   return result;
-}
-
-class NoopExposureCandidateExtractor implements IExposureCandidateExtractor {
-  public readonly modelVersion = 'dry-run';
-  public readonly promptVersion = 'dry-run';
-
-  public extract(): Promise<readonly IExposureCandidateDraft[]> {
-    return Promise.resolve([]);
-  }
-}
-
-export class CoverageGapLoopService {
-  public async run(prisma: any, input: ICoverageGapLoopInput): Promise<ICoverageGapLoopResult> {
-    const rebuild = await new HistoricalLimitUpCaseRebuilder().rebuild(prisma, {
-      traceId: `${input.traceId}-limitup-${toBeijingDate(input.tradeDate)}`,
-      clusterKey: input.clusterKey,
-      asOf: nextUtcDate(input.tradeDate),
-      days: 1,
-      mode: 'sealed',
-    });
-    const gapAnalysis = await new CoverageGapAnalyzer().analyze(prisma, {
-      traceId: input.traceId,
-      clusterKey: input.clusterKey,
-      asOf: input.asOf,
-      targetDate: input.tradeDate,
-      mode: 'sealed',
-    });
-    const candidateGeneration = await new HistoricalExposureCandidateGenerator(
-      input.extractor ?? new NoopExposureCandidateExtractor(),
-    ).generate(prisma, {
-      traceId: input.traceId,
-      clusterKey: input.clusterKey,
-      asOf: input.asOf,
-      dryRun: input.dryRun ?? !input.extractor,
-      limitCases: gapAnalysis.unselectedCount,
-      concurrency: input.concurrency,
-      maxNewsPerCase: input.maxNewsPerCase,
-      source: 'daily_coverage_gap_loop',
-    });
-    return {
-      rebuild,
-      gapAnalysis,
-      candidateGeneration,
-    };
-  }
-}
-
-export class CoverageLoopReportService {
-  public async report(prisma: any, input: { readonly clusterKey: string; readonly from: Date; readonly to: Date }): Promise<Record<string, unknown>> {
-    const fromStart = startOfUtcDate(input.from);
-    const toEnd = nextUtcDate(input.to);
-    const gaps = await queryRows(prisma, [
-      'SELECT * FROM "CoverageGapCase"',
-      'WHERE "clusterKey" = $1 AND "tradeDate" >= $2 AND "tradeDate" < $3',
-    ].join(' '), input.clusterKey, fromStart, toEnd);
-    const limitUpCases = await queryRows(prisma, [
-      'SELECT * FROM "HistoricalLimitUpCase"',
-      'WHERE "clusterKey" = $1 AND "tradeDate" >= $2 AND "tradeDate" < $3 AND "sealedLimit" = true',
-    ].join(' '), input.clusterKey, fromStart, toEnd);
-    const recommendations = await queryRows(prisma, [
-      'SELECT * FROM "RecommendationSnapshot"',
-      'WHERE "clusterKey" = $1 AND "asOf" >= $2 AND "asOf" < $3',
-    ].join(' '), input.clusterKey, fromStart, toEnd);
-    const candidates = await queryRows(prisma, [
-      'SELECT * FROM "StockExposureCandidate"',
-      'WHERE "clusterKey" = $1 AND "asOf" >= $2 AND "asOf" < $3',
-    ].join(' '), input.clusterKey, fromStart, toEnd);
-    const promotedFacts = await queryRows(prisma, [
-      'SELECT * FROM "StockExposureFact"',
-      'WHERE "clusterKey" = $1 AND "validFrom" >= $2 AND "validFrom" < $3 AND status = $4',
-    ].join(' '), input.clusterKey, fromStart, toEnd, 'active');
-    const promotedAliases = await queryRows(prisma, [
-      'SELECT * FROM "KeywordAlias"',
-      'WHERE "clusterKey" = $1 AND "validFrom" >= $2 AND "validFrom" < $3 AND status = $4',
-    ].join(' '), input.clusterKey, fromStart, toEnd, 'active');
-    const postReviewAliases = await queryRows(prisma, [
-      'SELECT status, source, count(*)::int AS count FROM "KeywordAlias"',
-      'WHERE "clusterKey" = $1',
-      'GROUP BY status, source',
-      'ORDER BY status ASC, source ASC',
-    ].join(' '), input.clusterKey);
-    const factSnapshots = await queryRows(prisma, [
-      'SELECT "traceId", "asOf", "activeExposureCount", "activeAliasCount", "factHash"',
-      'FROM "FactSnapshot"',
-      'WHERE "clusterKey" = $1',
-      'ORDER BY "createdAt" DESC',
-      'LIMIT 5',
-    ].join(' '), input.clusterKey);
-
-    const reasonCounts: Record<string, number> = {};
-    for (const gap of gaps) {
-      incrementReason(reasonCounts, String(gap.missReason));
-    }
-    const hitSymbols = new Set(limitUpCases.map(row => String(row.symbol)));
-    const selectedHits = recommendations.filter(row => hitSymbols.has(String(row.symbol))).length;
-    const recommendationScores = recommendations.map(row => Number(row.finalScore ?? 0)).filter(score => Number.isFinite(score));
-    const averageRecommendationScore = recommendationScores.length > 0
-      ? recommendationScores.reduce((sum, score) => sum + score, 0) / recommendationScores.length
-      : 0;
-
-    return {
-      clusterKey: input.clusterKey,
-      from: input.from.toISOString(),
-      to: input.to.toISOString(),
-      limitUpCaseCount: limitUpCases.length,
-      selectedHitCount: selectedHits,
-      missedCases: gaps.length,
-      candidateCount: candidates.length,
-      promotedFactCount: promotedFacts.length,
-      promotedAliasCount: promotedAliases.length,
-      postReviewAliasStatusCounts: postReviewAliases,
-      latestFactSnapshots: factSnapshots,
-      noEvidenceGaps: reasonCounts.no_evidence_chain ?? 0,
-      scoreTooLowGaps: reasonCounts.score_too_low ?? 0,
-      filteredOutGaps: reasonCounts.filtered_out ?? 0,
-      notInStockPoolGaps: reasonCounts.not_in_stock_pool ?? 0,
-      nextDayScoringImpact: {
-        recommendationCount: recommendations.length,
-        averageRecommendationScore: Number(averageRecommendationScore.toFixed(4)),
-        selectedHitCount: selectedHits,
-      },
-      reasonCounts,
-    };
-  }
-}
-
-async function queryRows(
-  prisma: any,
-  sql: string,
-  ...params: readonly unknown[]
-): Promise<readonly Record<string, unknown>[]> {
-  if (typeof prisma?.$queryRawUnsafe === 'function') {
-    return await prisma.$queryRawUnsafe(sql, ...params) as readonly Record<string, unknown>[];
-  }
-  return [];
 }

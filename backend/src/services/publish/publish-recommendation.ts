@@ -180,18 +180,3 @@ export async function isPublishedTrace(
 /**
  * 取某 cluster/asOf 下所有“已发布 traceId”集合（用于行级过滤）。
  */
-export async function getPublishedTraceIds(
-  prisma: PrismaClient,
-  options: GetLatestPublishOptions,
-): Promise<ReadonlySet<string>> {
-  const where: Prisma.RecommendationPublishWhereInput = { supersededBy: null };
-  if (options.asOf !== undefined) {
-    const asOf = options.asOf instanceof Date ? options.asOf : new Date(options.asOf);
-    where.asOf = { ...beijingDayWindow(asOf) };
-  }
-  const rows = await prisma.recommendationPublish.findMany({
-    where: { ...where, clusterKey: options.clusterKey },
-    select: { traceId: true },
-  });
-  return new Set(rows.map((row) => row.traceId));
-}

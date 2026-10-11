@@ -20,7 +20,6 @@ import {
   waitForCommittedCacheEntry,
   type CausalCacheKey,
 } from './causal-cache-store.js';
-import { TraceManager } from './trace-manager.js';
 import { CAUSAL_PROTOCOL_VERSION, CAUSAL_PROTOCOL_VERSION_ITEMS, EXTRACTION_SEMANTIC_VERSION, PROMPT_SCHEMA_VERSION } from '../version.js';
 
 export const AI_WORKFLOW_VERSION = 'causal-workflow-v2';
@@ -118,20 +117,6 @@ export async function readAiCheckpoint(prisma:any, traceId:string):Promise<AiPip
   // 版本不符不再直接 throw：旧版 checkpoint 原样返回，由 AiWorkflowSession 记录其
   // 真实版本，DurableCausalExtractionService 据此走兼容执行器在旧协议下续跑。
   return row.checkpoint;
-}
-
-/**
- * 下游恢复按**实际产物**判定因果抽取阶段是否完成：必须存在 `(traceId,'causal_extract')`
- * 的完整分片产物。绝不再依据 `PipelineStepTrace.status === 'SUCCESS'` 之类的状态位。
- */
-export async function isCausalExtractionStageComplete(prisma:any, traceId:string):Promise<boolean> {
-  return TraceManager.isStageComplete(prisma,{traceId,stageId:'causal_extract'});
-}
-
-/** A completed AI phase is a valid checkpoint for resuming downstream stages. */
-export async function readAiWorkflowStatus(prisma:any, traceId:string):Promise<string | null> {
-  const rows=await prisma.$queryRawUnsafe('SELECT status FROM "AiWorkflow" WHERE "traceId"=$1',traceId);
-  return rows[0]?.status == null ? null : String(rows[0].status);
 }
 
 export class AiWorkflowSession {

@@ -648,13 +648,3 @@ export class AkToolsStockExposureService {
     );
   }
 }
-
-export const __privateAkToolsStockExposure = {
-  buildBoardMemberRows,
-  buildIndividualInfoRows,
-  buildMovementRows,
-  buildQueryUrl,
-  normalizeAkToolsSymbol,
-  persistExposureRows,
-  unwrapAkToolsRows,
-};

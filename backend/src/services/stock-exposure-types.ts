@@ -5,7 +5,6 @@ export type StockExposureType
     | 'company_profile_exposure'
     | 'movement_evidence';
 
-export type StockExposureStatus = 'candidate' | 'promoted' | 'rejected' | 'active' | 'inactive';
 
 export interface IStockExposureEvidence {
   readonly schemaVersion: 'stock-exposure-evidence-v1';

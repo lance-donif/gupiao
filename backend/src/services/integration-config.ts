@@ -32,11 +32,3 @@ export const createBackendIntegrationConfig = (
     aktoolsMaxResults: parsePositiveInteger(environment.AKTOOLS_MAX_RESULTS, 10000),
   };
 };
-
-export const requireEnvironmentValue = (value: string | undefined, key: string): string => {
-  if (!value || value.trim().length === 0) {
-    throw new Error(`Missing required environment variable: ${key}`);
-  }
-
-  return value;
-};

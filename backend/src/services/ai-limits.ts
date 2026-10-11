@@ -21,13 +21,3 @@ export function isAiRequestWithinLimit(
 ): boolean {
   return promptChars <= maxRequestChars && bodyChars <= maxRequestChars;
 }
-
-/** 统一的超限错误文案，便于调用方与审计日志对齐。 */
-export function aiRequestTooLargeMessage(
-  label: string,
-  promptChars: number,
-  bodyChars: number,
-  maxRequestChars: number = AI_MAX_REQUEST_CHARS,
-): string {
-  return `${label} request too large: promptChars=${promptChars}, bodyChars=${bodyChars}, maxRequestChars=${maxRequestChars}`;
-}

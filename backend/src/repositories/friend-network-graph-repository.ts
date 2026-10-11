@@ -4,40 +4,6 @@ import type {
 } from '../services/friend-network-types.js';
 import type { IFriendNetworkGraphRepository } from './interfaces/i-friend-network-graph-repository.js';
 
-const escapeCypherLiteral = (value: string): string => {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-};
-
-const quoteCypherString = (value: string): string => {
-  return `"${escapeCypherLiteral(value)}"`;
-};
-
-const normalizeAgtypeScalar = (value: unknown): unknown => {
-  if (typeof value !== 'string') {
-    return value;
-  }
-
-  const trimmed = value.trim();
-
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-    try {
-      return JSON.parse(trimmed);
-    }
-    catch {
-      return trimmed.slice(1, -1);
-    }
-  }
-
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
-    return Number(trimmed);
-  }
-
-  if (trimmed === 'true') { return true; }
-  if (trimmed === 'false') { return false; }
-
-  return trimmed;
-};
-
 export interface IAgeGraphClient {
   execute: (cypher: string) => Promise<void>;
   executeBatch: (cypher: string, params: Readonly<Record<string, unknown>>) => Promise<void>;
@@ -45,64 +11,7 @@ export interface IAgeGraphClient {
   close: () => Promise<void>;
 }
 
-export class PgAgeGraphClient implements IAgeGraphClient {
-  public constructor(
-    private readonly databaseUrl: string,
-    private readonly graphName: string,
-  ) {}
 
-  public async execute(cypher: string): Promise<void> {
-    await this.runCypher(cypher);
-  }
-
-  public async executeBatch(cypher: string, params: Readonly<Record<string, unknown>>): Promise<void> {
-    await this.runCypher(cypher, undefined, params);
-  }
-
-  public async query<T>(cypher: string, columnNames?: readonly string[]): Promise<readonly T[]> {
-    const rows = await this.runCypher(cypher, columnNames);
-    return rows as readonly T[];
-  }
-
-  private async runCypher(
-    cypher: string,
-    columnNames?: readonly string[],
-    params?: Readonly<Record<string, unknown>>,
-  ): Promise<readonly Record<string, unknown>[]> {
-    const pgModule = (await import('pg')) as {
-      Client: new (options: { connectionString: string }) => {
-        connect: () => Promise<void>;
-        query: (queryText: string, values?: readonly unknown[]) => Promise<{ rows: readonly Record<string, unknown>[] }>;
-        end: () => Promise<void>;
-      };
-    };
-    const client = new pgModule.Client({ connectionString: this.databaseUrl });
-
-    await client.connect();
-    try {
-      await client.query('LOAD \'age\'');
-      await client.query('SET search_path = ag_catalog, "$user", public');
-      const escapedGraphName = this.graphName.replace(/'/g, '\'\'');
-      const columnDefinition = columnNames && columnNames.length > 0
-        ? columnNames.map(name => `${name} agtype`).join(', ')
-        : 'result agtype';
-      const paramValues = params ? Object.values(params) : [];
-      const sql = `SELECT * FROM ag_catalog.cypher('${escapedGraphName}', $$ ${cypher} $$, ${paramValues.length > 0 ? paramValues.map((_, i) => `$${i + 1}::agtype`).join(', ') : 'NULL'}) AS (${columnDefinition});`;
-      const result = await client.query(sql, paramValues);
-      return result.rows.map((row) => {
-        const normalizedEntries = Object.entries(row).map(([key, value]) => [key, normalizeAgtypeScalar(value)]);
-        return Object.fromEntries(normalizedEntries);
-      });
-    }
-    finally {
-      await client.end();
-    }
-  }
-
-  public async close(): Promise<void> {
-    return Promise.resolve();
-  }
-}
 
 export class FriendNetworkGraphRepository implements IFriendNetworkGraphRepository {
   public constructor(
@@ -179,29 +88,3 @@ export class FriendNetworkGraphRepository implements IFriendNetworkGraphReposito
   }
 }
 
-export const buildDeleteClusterGraphCypher = (cluster: string): readonly string[] => {
-  return [
-    `MATCH ()-[r:FRIEND_RELATION {cluster: ${quoteCypherString(cluster)}}]->() DELETE r RETURN 1`,
-    `MATCH (n:SignalNode {cluster: ${quoteCypherString(cluster)}}) DELETE n RETURN 1`,
-  ];
-};
-
-export class FriendNetworkAgeGraphReadClient implements IAgeGraphClient {
-  public constructor(private readonly baseClient: PgAgeGraphClient) {}
-
-  public execute(cypher: string): Promise<void> {
-    return this.baseClient.execute(cypher);
-  }
-
-  public executeBatch(cypher: string, params: Readonly<Record<string, unknown>>): Promise<void> {
-    return this.baseClient.executeBatch(cypher, params);
-  }
-
-  public query<T>(cypher: string, columnNames?: readonly string[]): Promise<readonly T[]> {
-    return this.baseClient.query<T>(cypher, columnNames);
-  }
-
-  public close(): Promise<void> {
-    return this.baseClient.close();
-  }
-}

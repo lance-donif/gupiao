@@ -15,8 +15,12 @@ import {
   selectStrategyRecommendations,
 } from './strategy-experiment-core.js';
 import { normalizeSelectionSignalType } from './temp-stock-recommendation-service.js';
-import { calculateMarketSignalScore } from './scoring-contribution-engine.js';
+// SRP：直接依赖独立模块，不再经由 1900+ 行的评分引擎模块导入。
+import { calculateMarketSignalScore } from './scoring/market-signal-score.js';
 import { toNumber } from '../lib/number-utils.js';
+import { isCandleVisibleAsOf } from './market-data/market-data-reader.js';
+import { stockInfoExposureRank } from './scoring/exposure-rank.js';
+import { loadContributionSignalMap } from './scoring/contribution-signal-loader.js';
 
 export interface IStrategyDefinitionRow {
   readonly id: string;
@@ -109,52 +113,7 @@ const defaultMarketSignal = (): Record<string, unknown> => ({
 
 const CHINESE_TEXT_PATTERN = /[\u3400-\u9FFF]/u;
 
-const stockInfoExposureSources = new Set([
-  'tickflow_sw_universe',
-  'akshare_industry_board_em',
-  'akshare_concept_board_em',
-  'akshare_individual_info_em',
-  'manual_verified',
-  'test_exposure',
-]);
-
-const stockInfoExposureRank = (exposure: any): number => {
-  const source = String(exposure.source ?? '');
-  const exposureType = String(exposure.exposureType ?? '');
-  const taxonomyLevel = String(exposure.taxonomyLevel ?? '').toUpperCase();
-  if (source === 'historical_limitup_news' || exposureType === 'movement_evidence') {
-    return -1;
-  }
-  if (!source && !exposureType) {
-    return 1;
-  }
-  if (!stockInfoExposureSources.has(source)) {
-    return -1;
-  }
-  if (source === 'tickflow_sw_universe') {
-    if (taxonomyLevel === 'SW3') {
-      return 100;
-    }
-    if (taxonomyLevel === 'SW2') {
-      return 90;
-    }
-    if (taxonomyLevel === 'SW1') {
-      return 80;
-    }
-    return 70;
-  }
-  if (source === 'akshare_industry_board_em') {
-    return 75;
-  }
-  if (source === 'akshare_concept_board_em') {
-    return 65;
-  }
-  if (source === 'akshare_individual_info_em') {
-    return 55;
-  }
-  return 40;
-};
-
+// DRY：暴露来源白名单与排名规则统一走 scoring/exposure-rank.ts（唯一真源）。
 export class StrategyExperimentRunner {
   public async ensureDefaultStrategy(prisma: any, clusterKey: string): Promise<readonly IStrategyDefinitionRow[]> {
     if (!prisma.strategyDefinition?.findMany || !prisma.strategyDefinition?.create) {
@@ -350,7 +309,7 @@ export class StrategyExperimentRunner {
     const symbols: string[] = [...new Set(featureRows.map((row: any) => String(row.symbol)))];
     const [stockInfoMap, signalMap, marketSignalMap, priceMap] = await Promise.all([
       this.loadStockInfo(prisma, input.clusterKey, input.asOf, symbols),
-      this.loadContributionSignals(prisma, input.traceId, symbols),
+      loadContributionSignalMap(prisma, input.traceId, symbols),
       this.loadMarketSignals(prisma, input.traceId, input.clusterKey, input.asOf, symbols),
       this.loadLatestPrices(prisma, input.clusterKey, input.asOf, symbols),
     ]);
@@ -411,7 +370,7 @@ export class StrategyExperimentRunner {
 
     const symbols: string[] = [...new Set(snapshotRows.map((row: any) => String(row.symbol)))];
     const [signalMap, marketSignalMap, priceMap] = await Promise.all([
-      this.loadContributionSignals(prisma, input.traceId, symbols),
+      loadContributionSignalMap(prisma, input.traceId, symbols),
       this.loadMarketSignals(prisma, input.traceId, input.clusterKey, input.asOf, symbols),
       this.loadLatestPrices(prisma, input.clusterKey, input.asOf, symbols),
     ]);
@@ -503,42 +462,6 @@ export class StrategyExperimentRunner {
     return map;
   }
 
-  private async loadContributionSignals(
-    prisma: any,
-    traceId: string,
-    symbols: readonly string[],
-  ): Promise<Map<string, readonly { keyword: string; score: number }[]>> {
-    const map = new Map<string, readonly { keyword: string; score: number }[]>();
-    if (!prisma.evidenceContribution?.findMany || symbols.length === 0) {
-      return map;
-    }
-
-    const rows = await prisma.evidenceContribution.findMany({
-      where: {
-        traceId,
-        symbol: { in: [...symbols] },
-      },
-    }) as any[];
-
-    const keywordScoreBySymbol = new Map<string, Map<string, number>>();
-    for (const row of rows) {
-      const symbol = String(row.symbol);
-      const keyword = String(row.matchedExposureKeyword ?? row.keyword);
-      const current = keywordScoreBySymbol.get(symbol) ?? new Map<string, number>();
-      current.set(keyword, (current.get(keyword) ?? 0) + toNumber(row.finalContribScore));
-      keywordScoreBySymbol.set(symbol, current);
-    }
-
-    for (const [symbol, keywordScores] of keywordScoreBySymbol.entries()) {
-      const signals = [...keywordScores.entries()]
-        .map(([keyword, score]) => ({ keyword, score }))
-        .sort((left, right) => right.score - left.score || left.keyword.localeCompare(right.keyword));
-      map.set(symbol, signals);
-    }
-
-    return map;
-  }
-
   private async loadMarketSignals(
     prisma: any,
     traceId: string,
@@ -584,6 +507,10 @@ export class StrategyExperimentRunner {
 
     const candlesBySymbol = new Map<string, any[]>();
     for (const candle of candles) {
+      // asOf 时间边界：与 scoring/market-signal-loader.ts 一致，剔除未来/盘中泄漏的 K 线。
+      if (!isCandleVisibleAsOf({ tradingDay: new Date(candle.tradingDay), visibleAt: candle.visibleAt ? new Date(candle.visibleAt) : null }, asOf)) {
+        continue;
+      }
       const symbol = stockIdToSymbol.get(String(candle.stockId));
       if (symbol) {
         const list = candlesBySymbol.get(symbol) ?? [];
@@ -704,6 +631,10 @@ export class StrategyExperimentRunner {
     });
 
     for (const candle of sortedCandles) {
+      // asOf 时间边界：只取 asOf 时点已可见的收盘价（过滤会保留每只股票最新可见一根）。
+      if (!isCandleVisibleAsOf({ tradingDay: new Date(candle.tradingDay), visibleAt: candle.visibleAt ? new Date(candle.visibleAt) : null }, asOf)) {
+        continue;
+      }
       const stockId = String(candle.stockId);
       const symbol = stockById.get(stockId);
       if (!symbol) {

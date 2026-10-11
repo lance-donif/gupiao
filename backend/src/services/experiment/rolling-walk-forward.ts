@@ -2,11 +2,6 @@
  * M7 rolling walk-forward schedule: train 120, validation 20, test 20,
  * isolation gap 5 sessions, test window advances by 20 sessions.
  */
-export interface M7Window {
-  readonly train: readonly Date[];
-  readonly validation: readonly Date[];
-  readonly test: readonly Date[];
-}
 
 export interface RollingOptions {
   readonly trainSessions?: number;

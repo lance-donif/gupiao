@@ -60,14 +60,6 @@ export function isCandleVisibleAsOf(candle: CandleVisibilityInput, asOf: Date): 
   return candleVisibleAt(candle).getTime() <= asOf.getTime();
 }
 
-/** 过滤出在 asOf 时点已可用于特征的 K 线（去除未来/盘中泄漏）。 */
-export function filterVisibleCandles<T extends CandleVisibilityInput>(
-  candles: readonly T[],
-  asOf: Date,
-): T[] {
-  return candles.filter(candle => isCandleVisibleAsOf(candle, asOf));
-}
-
 /**
  * 构建 Prisma 的 datasetVersionId 过滤条件。
  *  - undefined：不加任何过滤（兼容旧逻辑，不引入 dataset 维度）

@@ -130,7 +130,3 @@ export const getKeywordDictionary = async (
   cachedSnapshot = { snapshot, loadedAtMs: Date.now() };
   return snapshot;
 };
-
-export const invalidateKeywordDictionary = (): void => {
-  cachedSnapshot = null;
-};

@@ -2,6 +2,7 @@ import type { INewsSourceRequest, IProviderNewsArticlePayload, IProviderNewsResp
 import crypto from 'node:crypto';
 import { SourceFailureCategory } from '../sources/contracts.js';
 import { normalizeBaseUrl, toNonEmptyString } from '../lib/url-utils.js';
+import { toBeijingDayKey } from '../lib/beijing-time.js';
 import { readNewsText } from './news-http.js';
 
 export interface IAkToolsNewsProviderOptions {
@@ -85,14 +86,8 @@ const toIsoString = (raw: string | null, fallback: Date): string => {
   return parsed.toISOString();
 };
 
-const getBeijingDateKey = (value: Date): string => {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(value);
-};
+// DRY：北京日键统一走 lib/beijing-time.ts（唯一真源），不再本地维护 Intl 格式化副本。
+const getBeijingDateKey = (value: Date): string => toBeijingDayKey(value);
 
 const isToday = (publishedAt: string, referenceDate: Date): boolean => {
   const published = new Date(publishedAt);

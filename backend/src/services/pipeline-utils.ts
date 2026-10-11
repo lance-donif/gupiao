@@ -121,30 +121,14 @@ export class PipelineStopError extends Error {
   }
 }
 
-export const getBeijingDateKey = (date: Date): string => {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(date);
-};
-
 /**
- * 运行键：clusterKey + mode + asOf + recipeVersion + businessConfigHash。
- * 供应商顺序、凭证、并发与超时不参与，因此调度配置变化不会产生新的运行。
+ * 北京自然日键（YYYY-MM-DD）。
+ *
+ * DRY：原实现与 tavily-news-provider.ts 中各有一份 Intl 格式化副本，
+ * 现统一委托给 lib/beijing-time.ts 的 toBeijingDayKey（唯一真源），
+ * 对外导出名保持 getBeijingDateKey 不变。
  */
-export const buildRunKey = (input: {
-  readonly asOf: Date;
-  readonly clusterKey: string;
-  readonly mode: string;
-}): string => [
-  input.clusterKey,
-  input.mode,
-  input.asOf.toISOString(),
-  RECIPE_VERSION,
-  DEFAULT_BUSINESS_CONFIG_HASH,
-].join('|');
+export { toBeijingDayKey as getBeijingDateKey } from '../lib/beijing-time.js';
 
 export const createTraceId = (asOf: Date, clusterKey: string): string => {
   const suffix = crypto.randomBytes(4).toString('hex');

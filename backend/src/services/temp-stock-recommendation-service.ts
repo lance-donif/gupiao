@@ -10,6 +10,8 @@ import {
 import { DEFAULT_BUSINESS_CONFIG } from '../version.js';
 import { toBeijingDayKey } from '../lib/beijing-time.js';
 import { uniqueNonEmpty } from '../lib/date-utils.js';
+import { stockInfoExposureRank } from './scoring/exposure-rank.js';
+import { loadContributionSignalMap } from './scoring/contribution-signal-loader.js';
 
 export interface ITempStockQuote {
   readonly symbol: string;
@@ -176,52 +178,7 @@ const createEmptyCooldownExclusions = (): IRecommendationCooldownExclusions => (
   previousDayKeywords: new Set<string>(),
 });
 
-const stockInfoExposureSources = new Set([
-  'tickflow_sw_universe',
-  'akshare_industry_board_em',
-  'akshare_concept_board_em',
-  'akshare_individual_info_em',
-  'manual_verified',
-  'test_exposure',
-]);
-
-const stockInfoExposureRank = (exposure: any): number => {
-  const source = String(exposure.source ?? '');
-  const exposureType = String(exposure.exposureType ?? '');
-  const taxonomyLevel = String(exposure.taxonomyLevel ?? '').toUpperCase();
-  if (source === 'historical_limitup_news' || exposureType === 'movement_evidence') {
-    return -1;
-  }
-  if (!source && !exposureType) {
-    return 1;
-  }
-  if (!stockInfoExposureSources.has(source)) {
-    return -1;
-  }
-  if (source === 'tickflow_sw_universe') {
-    if (taxonomyLevel === 'SW3') {
-      return 100;
-    }
-    if (taxonomyLevel === 'SW2') {
-      return 90;
-    }
-    if (taxonomyLevel === 'SW1') {
-      return 80;
-    }
-    return 70;
-  }
-  if (source === 'akshare_industry_board_em') {
-    return 75;
-  }
-  if (source === 'akshare_concept_board_em') {
-    return 65;
-  }
-  if (source === 'akshare_individual_info_em') {
-    return 55;
-  }
-  return 40;
-};
-
+// DRY：暴露来源白名单与排名规则统一走 scoring/exposure-rank.ts（唯一真源）。
 const parseFeatureReasonMetadata = (
   reasons: readonly string[] | undefined,
 ): {
@@ -463,19 +420,32 @@ const getBreakdownNumber = (recommendation: ITempStockRecommendation, key: keyof
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+// 性能：marketSignal 的 JSON 解析结果按 recommendation 对象做 WeakMap 记忆化。
+// 质量门槛会对同一 recommendation 连续读取多个字段，避免每次调用都重复 JSON.parse。
+const marketSignalCache = new WeakMap<object, Record<string, unknown>>();
+
+const readMarketSignalRecord = (recommendation: ITempStockRecommendation): Record<string, unknown> => {
+  const cached = marketSignalCache.get(recommendation);
+  if (cached) {
+    return cached;
+  }
+  const parsed = parseJsonRecord(recommendation.scoreBreakdown.marketSignal);
+  marketSignalCache.set(recommendation, parsed);
+  return parsed;
+};
+
 const getMarketSignalNumber = (recommendation: ITempStockRecommendation, key: string): number | null => {
-  const marketSignal = parseJsonRecord(recommendation.scoreBreakdown.marketSignal);
-  const parsed = Number(marketSignal[key]);
+  const parsed = Number(readMarketSignalRecord(recommendation)[key]);
   return Number.isFinite(parsed) ? parsed : null;
 };
 
 const getMarketSignalString = (recommendation: ITempStockRecommendation, key: string): string | null => {
-  const value = parseJsonRecord(recommendation.scoreBreakdown.marketSignal)[key];
+  const value = readMarketSignalRecord(recommendation)[key];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 };
 
 const getMarketSignalBoolean = (recommendation: ITempStockRecommendation, key: string): boolean => {
-  const marketSignal = parseJsonRecord(recommendation.scoreBreakdown.marketSignal);
+  const marketSignal = readMarketSignalRecord(recommendation);
   return marketSignal[key] === true;
 };
 
@@ -669,7 +639,7 @@ export class TempStockRecommendationService {
     // 2. 只使用股票真实暴露事实补全名称与行业。
     const stockInfoMap = await this.loadStockInfoMap(prisma, clusterKey, asOf, featureSymbols);
 
-    const signalMap = await this.loadContributionSignals(
+    const signalMap = await loadContributionSignalMap(
       prisma,
       traceId,
       featureSymbols,
@@ -1043,42 +1013,6 @@ export class TempStockRecommendationService {
     }
 
     return result;
-  }
-
-  private async loadContributionSignals(
-    prisma: any,
-    traceId: string,
-    symbols: readonly string[],
-  ): Promise<Map<string, readonly { keyword: string; score: number }[]>> {
-    if (!prisma.evidenceContribution?.findMany || symbols.length === 0) {
-      return new Map();
-    }
-
-    const rows = await prisma.evidenceContribution.findMany({
-      where: {
-        traceId,
-        symbol: { in: [...symbols] },
-      },
-    });
-
-    const keywordScoreBySymbol = new Map<string, Map<string, number>>();
-    for (const row of rows) {
-      const symbol = String(row.symbol);
-      const keyword = String(row.matchedExposureKeyword ?? row.keyword);
-      const current = keywordScoreBySymbol.get(symbol) ?? new Map<string, number>();
-      current.set(keyword, (current.get(keyword) ?? 0) + Number(row.finalContribScore));
-      keywordScoreBySymbol.set(symbol, current);
-    }
-
-    const signalsBySymbol = new Map<string, readonly { keyword: string; score: number }[]>();
-    for (const [symbol, keywordScores] of keywordScoreBySymbol.entries()) {
-      const signals = [...keywordScores.entries()]
-        .map(([keyword, score]) => ({ keyword, score }))
-        .sort((a, b) => b.score - a.score || a.keyword.localeCompare(b.keyword));
-      signalsBySymbol.set(symbol, signals);
-    }
-
-    return signalsBySymbol;
   }
 
   private async loadPreviousDayRecommendationExclusions(

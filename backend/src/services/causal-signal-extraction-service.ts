@@ -912,12 +912,20 @@ export class CausalSignalExtractionService {
     }
 
     const ledger = new DataRefreshLedgerService();
-    for (const news of extractedNews) {
-      if (!completedNewsIds.has(news.id)) {
-        continue;
-      }
-      const candidatesForNews = batchCandidates.filter(candidate => candidate.newsId === news.id);
-      await ledger.recordSuccess(prisma, {
+    // 性能：先按 newsId 预分组（O(n)），避免循环内反复 filter（O(n²)）；
+    // 各 bucketKey 互不相同且 upsert 幂等，逐条 await 改为并行写入。
+    const candidatesByNewsId = new Map<string, ICausalSignalCandidateRecord[]>();
+    for (const candidate of batchCandidates) {
+      const list = candidatesByNewsId.get(candidate.newsId) ?? [];
+      list.push(candidate);
+      candidatesByNewsId.set(candidate.newsId, list);
+    }
+    await Promise.all(
+      extractedNews
+        .filter(news => completedNewsIds.has(news.id))
+        .map(news => {
+          const candidatesForNews = candidatesByNewsId.get(news.id) ?? [];
+          return ledger.recordSuccess(prisma, {
         dataKind: 'causal_signal_extraction',
         source: this.cacheSourceKey,
         clusterKey: input.clusterKey,
@@ -947,8 +955,9 @@ export class CausalSignalExtractionService {
             failureReason: candidate.failureReason ?? null,
           })),
         },
-      });
-    }
+          });
+        }),
+      );
   }
 
   private get cacheSourceKey(): string {

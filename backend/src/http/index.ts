@@ -9,7 +9,7 @@ import { sendError } from './http-utils.js';
 import { handleBackendRoute } from './routes.js';
 import { BackendRuntimeStore } from './runtime-store.js';
 
-export { BackendRuntimeStore, createBackendRuntimeStore } from './runtime-store.js';
+export { BackendRuntimeStore } from './runtime-store.js';
 export type { IBackendArtifacts, IBackendConfigStore, IContributionDetailReader, IDailyReportSnapshotReader } from './types.js';
 
 export const startBackendHttpServer = async (

@@ -2,7 +2,6 @@ import type { GraphKind } from './runtime-types.js';
 import type {
   BackendConfigCategory,
   IBackendArtifacts,
-  IBackendConfigStore,
   IBackendRuntimeStoreOptions,
   IContributionDetailPayload,
   IDashboardEvidencePayload,
@@ -331,10 +330,6 @@ export class BackendRuntimeStore {
     return this.data.loadArtifactsForTests();
   }
 }
-
-export const createBackendRuntimeStore = (rootDir: string, configStore: IBackendConfigStore): BackendRuntimeStore => {
-  return new BackendRuntimeStore({ rootDir, configStore });
-};
 
 export const resolveDefaultTargetDate = (): string => toBeijingDate(new Date());
 

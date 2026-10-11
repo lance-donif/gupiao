@@ -8,23 +8,6 @@ import { PrismaClient } from '@prisma/client';
 import { publishRecommendation } from './publish-recommendation.js';
 import { isPublishedTrace } from './publish-recommendation.js';
 
-export interface BackfillOptions {
-  /** 指定 trace 回填；省略则扫描整个 clusterKey。 */
-  traceId?: string;
-  clusterKey?: string;
-  auditStatus?: string;
-}
-
-export interface BackfillReport {
-  scanned: number;
-  skippedAlreadyPublished: number;
-  skippedFailedTrace: number;
-  skippedNoSnapshot: number;
-  published: number;
-  publishedTraceIds: string[];
-  errors: Array<{ traceId: string; message: string }>;
-}
-
 const isSuccessTrace = (status: string | null | undefined): boolean => status === 'SUCCESS';
 
 /**
@@ -60,65 +43,4 @@ export async function backfillPublishForTrace(
     reason: 'legacy_backfill',
   });
   return { id: result.id, publishVersion: result.publishVersion };
-}
-
-export async function backfillPublish(
-  prisma: PrismaClient,
-  options: BackfillOptions = {},
-): Promise<BackfillReport> {
-  const report: BackfillReport = {
-    scanned: 0,
-    skippedAlreadyPublished: 0,
-    skippedFailedTrace: 0,
-    skippedNoSnapshot: 0,
-    published: 0,
-    publishedTraceIds: [],
-    errors: [],
-  };
-
-  const where: Record<string, unknown> = {};
-  if (options.clusterKey) {
-    where.clusterKey = options.clusterKey;
-  }
-  if (options.traceId) {
-    where.traceId = options.traceId;
-  }
-
-  const traces = await prisma.runTrace.findMany({ where });
-  report.scanned = traces.length;
-  for (const trace of traces) {
-    try {
-      if (!isSuccessTrace(trace.status)) {
-        report.skippedFailedTrace += 1;
-        continue;
-      }
-      if (await isPublishedTrace(prisma, trace.traceId)) {
-        report.skippedAlreadyPublished += 1;
-        continue;
-      }
-      const snapshotCount = await prisma.recommendationSnapshot.count({ where: { traceId: trace.traceId } });
-      if (snapshotCount === 0) {
-        report.skippedNoSnapshot += 1;
-        continue;
-      }
-      const result = await publishRecommendation(prisma, {
-        traceId: trace.traceId,
-        clusterKey: trace.clusterKey,
-        asOf: trace.asOf,
-        auditStatus: options.auditStatus ?? 'backfill',
-        reason: 'legacy_backfill',
-      });
-      if (!result.reused) {
-        report.published += 1;
-        report.publishedTraceIds.push(trace.traceId);
-      }
-    }
-    catch (error) {
-      report.errors.push({
-        traceId: trace.traceId,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  return report;
 }

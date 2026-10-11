@@ -1,7 +1,4 @@
 import type { INewsSourceArticle } from '../sources/contracts.js';
-import { NewsItem } from '../types/entities/news-item.js';
-
-import { Timestamp } from '../types/value-objects/timestamp.js';
 
 export interface INormalizedNewsCandidate {
   readonly id: string;
@@ -369,24 +366,3 @@ export class NewsIngestDeduplicationPipeline {
   }
 }
 
-export const toNewsItems = (candidates: readonly INormalizedNewsCandidate[]): readonly NewsItem[] => {
-  return candidates.map((candidate) => {
-    return new NewsItem(
-      candidate.id,
-      candidate.title,
-      candidate.content,
-      candidate.source,
-      Timestamp.from(candidate.publishedAt),
-    );
-  });
-};
-
-export type NewsNormalizationReport = IServicePipelineReport<
-  readonly INewsSourceArticle[],
-  readonly INormalizedNewsCandidate[]
->;
-
-export type NewsDeduplicationReport = IServicePipelineReport<
-  readonly INormalizedNewsCandidate[],
-  readonly INormalizedNewsCandidate[]
->;
