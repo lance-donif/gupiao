@@ -1,3 +1,4 @@
+import { projectPanels } from "./projects.js";
 import { requestId } from "./api.js";
 import {
   $,
@@ -96,6 +97,8 @@ async function readTaskFiles(files) {
 }
 
 export function setupPanels({ api, openConversation, refreshConversations }) {
+  const { projects, taskSources, publishFile } = projectPanels({ api, loadPanel, submit });
+
   const memories = () =>
     loadPanel(
       "长期记忆",
@@ -185,6 +188,7 @@ export function setupPanels({ api, openConversation, refreshConversations }) {
       () => api("budget"),
       (box, data) => {
         box.append(
+          el("h3", "运行时模型账本", "panel-section"),
           detailList([
             ["预算上限", money(data.limit_usd)],
             ["本地已记账", money(data.booked_usd)],
@@ -199,6 +203,23 @@ export function setupPanels({ api, openConversation, refreshConversations }) {
             "hint",
           ),
         );
+        if (data.project_budget) {
+          const ledger = data.project_budget;
+          box.append(
+            el("h3", "项目开发额度", "panel-section"),
+            detailList([
+              ["项目额度", money(ledger.limit_usd)],
+              ["用户所报累计", money(ledger.user_reported_cumulative_usd)],
+              ["后续估算", money(ledger.post_baseline_estimates_usd)],
+              ["估算余额", money(ledger.estimated_remaining_usd)],
+            ]),
+          );
+          if (ledger.baseline_as_of_utc) {
+            box.append(
+              el("p", "用户累计数截至 " + ledger.baseline_as_of_utc + "（UTC）。", "hint"),
+            );
+          }
+        }
       },
     );
 
@@ -330,17 +351,22 @@ export function setupPanels({ api, openConversation, refreshConversations }) {
           selection.textContent = error || files.map((file) => file.name).join("、");
           selection.className = error ? "form-error" : "hint";
         };
+        attachmentArea.append(help, selection);
+        const sources = taskSources(attachmentArea);
         kind.onchange = () => {
           picker.disabled = kind.value !== "office";
           attachmentArea.hidden = picker.disabled;
+          if (!picker.disabled) void sources.enable();
         };
         kind.onchange();
-        attachmentArea.append(help, selection);
         form.append(attachmentArea);
         let previousPayload, previousRequest;
         submit(form, submitButton(form, "创建任务"), async () => {
           const body = { prompt: input.value.trim(), kind: kind.value, frequency: frequency.value };
-          if (kind.value === "office") body.files = await readTaskFiles(Array.from(picker.files));
+          if (kind.value === "office") {
+            body.files = await readTaskFiles(Array.from(picker.files));
+            Object.assign(body, sources.read(body.files));
+          }
           const payload = JSON.stringify(body);
           if (payload !== previousPayload) {
             previousPayload = payload;
@@ -443,6 +469,13 @@ export function setupPanels({ api, openConversation, refreshConversations }) {
                 },
                 details,
               );
+              if (task.kind === "office" && task.status === "completed" && file.publishable) {
+                addAction(
+                  "保存到项目 · " + file.name,
+                  () => publishFile(task, file, tasks),
+                  details,
+                );
+              }
               const format = /\.csv$/i.test(file.name)
                 ? "xlsx"
                 : /\.(?:md|txt)$/i.test(file.name)
@@ -467,5 +500,5 @@ export function setupPanels({ api, openConversation, refreshConversations }) {
       },
     );
 
-  return { memories, documents, tasks, services, budget };
+  return { projects, memories, documents, tasks, services, budget };
 }

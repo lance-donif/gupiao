@@ -412,7 +412,7 @@ $("account").onclick = () => {
   );
 };
 const panels = setupPanels({ api, openConversation, refreshConversations });
-for (const name of ["memories", "documents", "budget", "services", "tasks"]) {
+for (const name of ["projects", "memories", "documents", "budget", "services", "tasks"]) {
   $("show-" + name).onclick = () => connected(panels[name]);
 }
 $("status").onclick = () => connected(panels.services);

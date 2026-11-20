@@ -24,42 +24,73 @@ export function safeUrl(value) {
   }
 }
 
-function inline(node, text) {
+function appendCitations(node, text, sources) {
+  let start = 0;
+  for (const match of text.matchAll(/https?:\/\/[^\s<>，。；！？)）]+|\[([1-9]\d?)\](?!\()/gi)) {
+    if (!match[1]) continue;
+    const source = sources.get(Number(match[1]));
+    if (!source) continue;
+    node.append(document.createTextNode(text.slice(start, match.index)));
+    const button = action(
+      match[0],
+      () => {
+        source.details.open = true;
+        source.summary.focus();
+        source.summary.scrollIntoView({ block: "nearest" });
+      },
+      "citation",
+    );
+    button.setAttribute("aria-label", `查看来源 ${match[1]}，${source.title}`);
+    button.setAttribute("aria-controls", source.details.id);
+    node.append(button);
+    start = match.index + match[0].length;
+  }
+  node.append(document.createTextNode(text.slice(start)));
+}
+
+function inline(node, text, sources) {
   for (const part of text.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/g)) {
     if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
-      node.append(el("strong", part.slice(2, -2)));
+      const strong = el("strong");
+      appendCitations(strong, part.slice(2, -2), sources);
+      node.append(strong);
     } else if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
       node.append(el("code", part.slice(1, -1)));
-    } else node.append(document.createTextNode(part));
+    } else appendCitations(node, part, sources);
   }
 }
 
-function richText(node, text) {
+function richText(node, text, sources) {
   let paragraph = [],
     list = null,
-    code = null;
+    code = null,
+    fence = "";
   const flush = () => {
     if (paragraph.length) {
       const p = el("p");
-      inline(p, paragraph.join("\n"));
+      inline(p, paragraph.join("\n"), sources);
       node.append(p);
       paragraph = [];
     }
     list = null;
   };
   for (const line of text.split("\n")) {
-    if (/^\s*```/.test(line)) {
-      flush();
-      if (code === null) code = [];
-      else {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (code !== null) {
+      if (marker && marker[1].startsWith(fence) && !line.slice(marker[0].length).trim()) {
         node.append(el("pre", code.join("\n")));
         code = null;
-      }
-    } else if (code !== null) code.push(line);
-    else if (!line.trim()) flush();
+      } else code.push(line);
+    } else if (marker) {
+      flush();
+      fence = marker[1];
+      code = [];
+    } else if (!line.trim()) flush();
     else if (/^#{1,6}\s+/.test(line)) {
       flush();
-      node.append(el("strong", line.replace(/^#{1,6}\s+/, "")));
+      const heading = el("strong");
+      inline(heading, line.replace(/^#{1,6}\s+/, ""), sources);
+      node.append(heading);
     } else if (/^\s*(?:[-*]|\d+\.)\s+/.test(line)) {
       const tag = /^\s*\d+\./.test(line) ? "ol" : "ul";
       if (list?.localName !== tag) {
@@ -68,7 +99,7 @@ function richText(node, text) {
         node.append(list);
       }
       const li = el("li");
-      inline(li, line.replace(/^\s*(?:[-*]|\d+\.)\s+/, ""));
+      inline(li, line.replace(/^\s*(?:[-*]|\d+\.)\s+/, ""), sources);
       list.append(li);
     } else {
       list = null;
@@ -79,26 +110,41 @@ function richText(node, text) {
   flush();
 }
 
+let sourceGroupSequence = 0;
+
 export function messageNode(message) {
   const assistant = message.role === "assistant";
   const article = el("article", null, "message " + (assistant ? "assistant" : "user"));
   article.setAttribute("aria-label", assistant ? "回声" : "你");
-  if (assistant) {
-    article.append(el("div", "回声", "byline"));
-    richText(article, String(message.content ?? ""));
-  } else article.append(el("p", message.content));
-  const sources = el("div", null, "sources");
+
+  const sources = el("section", null, "sources");
+  sources.setAttribute("aria-label", "本轮引用来源");
+  const refs = new Map();
+  const group = message.id || `view-${++sourceGroupSequence}`;
   for (const [index, source] of (message.sources || []).entries()) {
     const url = safeUrl(source.url);
     if (!url) continue;
-    const link = el("a", `[${index + 1}] ${source.title || url.hostname} ↗`);
+    const number = index + 1;
+    const title = source.title || url.hostname;
+    const details = el("details");
+    details.id = `source-${group}-${number}`;
+    const summary = el("summary", `[${number}] ${title}`);
+    const link = el("a", `阅读原文 · ${url.hostname} ↗`);
     link.href = url.href;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    if (source.snippet) link.title = source.snippet;
-    sources.append(link);
+    details.append(summary);
+    if (source.snippet) details.append(el("p", source.snippet));
+    details.append(link);
+    sources.append(details);
+    refs.set(number, { details, summary, title });
   }
-  if (sources.childNodes.length) article.append(sources);
+
+  if (assistant) {
+    article.append(el("div", "回声", "byline"));
+    richText(article, String(message.content ?? ""), refs);
+  } else article.append(el("p", message.content));
+  if (refs.size) article.append(sources);
   return article;
 }
 

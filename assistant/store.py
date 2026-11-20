@@ -164,6 +164,16 @@ class Store:
             rows = conn.execute("SELECT * FROM turns WHERE conversation_id=? ORDER BY id", (conversation_id,))
             return [message for row in rows for message in as_messages(row)]
 
+    def latest_research_sources(self, owner, conversation_id):
+        with self.connection() as conn:
+            self.conversation(conn, owner, conversation_id)
+            row = conn.execute(
+                """SELECT sources FROM turns WHERE conversation_id=? AND mode='research' AND sources<>'[]'
+                   ORDER BY id DESC LIMIT 1""",
+                (conversation_id,),
+            ).fetchone()
+            return json.loads(row["sources"]) if row else []
+
     @staticmethod
     def _check_idle(conversation):
         if conversation["turn_claim"] and conversation["claim_expires"] > time.time():

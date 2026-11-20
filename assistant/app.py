@@ -13,9 +13,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .desktop import Desktop, DesktopUnavailable
 from .engine import ConversationBusy, Engine
 from .exports import docx, xlsx
 from .linking import Linking
+from .project_budget import read_snapshot
+from .projects import ProjectConflict
 from .provider import Provider
 from .qq import QQBot
 from .search import WebSearch
@@ -49,7 +52,35 @@ class TaskFileInput(BaseModel):
     content: str = Field(min_length=1, max_length=24576)
 
 
+class ProjectInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ProjectFileInput(BaseModel):
+    content: str = Field(min_length=1, max_length=24576)
+    expected_version: int = Field(ge=0, strict=True)
+
+
+class ProjectSelection(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    version: int = Field(ge=1, strict=True)
+
+
+class ProjectPublish(BaseModel):
+    task_id: str = Field(min_length=1, max_length=80)
+    source_run_id: str = Field(min_length=1, max_length=80)
+    source_name: str = Field(min_length=1, max_length=80)
+    target_name: str = Field(min_length=1, max_length=80)
+    expected_version: int = Field(ge=0, strict=True)
+
+
+class DesktopSave(BaseModel):
+    target_name: str | None = Field(None, min_length=1, max_length=80)
+
+
 class TaskInput(BaseModel):
+    project_id: str | None = Field(None, min_length=1, max_length=80)
+    project_files: list[ProjectSelection] = Field(default_factory=list, max_length=4)
     files: list[TaskFileInput] = Field(default_factory=list, max_length=4)
     request_id: str | None = Field(None, min_length=1, max_length=160)
     prompt: str = Field(min_length=1, max_length=4000)
@@ -67,6 +98,7 @@ def create_app(*, db_path=None, token=None, provider=None, search=None, workers=
     search = search or WebSearch()
     engine = Engine(db_path, provider, search)
     tasks = TaskQueue(engine)
+    desktop = Desktop(tasks.projects)
     linking = Linking(engine)
     qq = QQBot(db_path, engine, tasks)
 
@@ -85,6 +117,7 @@ def create_app(*, db_path=None, token=None, provider=None, search=None, workers=
     app = FastAPI(title="回声", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(qq.router)
     app.state.tasks = tasks
+    app.state.desktop = desktop
 
     def owner(authorization: str = Header(default="")):
         if not secrets.compare_digest(authorization.encode(), ("Bearer " + token).encode()):
@@ -101,9 +134,17 @@ def create_app(*, db_path=None, token=None, provider=None, search=None, workers=
     async def invalid(request, exc):
         return JSONResponse({"detail": str(exc)}, 400)
 
+    @app.exception_handler(ProjectConflict)
+    async def conflict(request, exc):
+        return JSONResponse({"detail": str(exc), "reason": exc.reason}, 409)
+
     @app.exception_handler(ConversationBusy)
     async def busy(request, exc):
         return JSONResponse({"detail": str(exc)}, 409)
+
+    @app.exception_handler(DesktopUnavailable)
+    async def unavailable(request, exc):
+        return JSONResponse({"detail": str(exc)}, 503)
 
     @app.exception_handler(RuntimeError)
     async def upstream(request, exc):
@@ -122,6 +163,7 @@ def create_app(*, db_path=None, token=None, provider=None, search=None, workers=
             ),
             "search": "SearXNG" if search.searx else "中文维基百科",
             "qq_configured": qq.enabled,
+            "desktop_configured": desktop.sandbox.enabled,
         }
 
     @app.get("/api/budget")
@@ -129,6 +171,7 @@ def create_app(*, db_path=None, token=None, provider=None, search=None, workers=
         state = provider.budget()
         return {
             **state,
+            "project_budget": read_snapshot(Path(db_path).with_name("project-budget.sqlite3")),
             **{
                 key + "_usd": state[src]
                 for key, src in (
@@ -224,6 +267,86 @@ def create_app(*, db_path=None, token=None, provider=None, search=None, workers=
             },
         )
 
+    @app.get("/api/projects")
+    def projects_list(user=authenticated):
+        return tasks.projects.list(user)
+
+    @app.post("/api/projects", status_code=201)
+    def create_project(data: ProjectInput, user=authenticated):
+        return tasks.projects.create(user, data.name)
+
+    @app.get("/api/projects/{pid}")
+    def project(pid: str, user=authenticated):
+        return tasks.projects.get(user, pid)
+
+    @app.delete("/api/projects/{pid}", status_code=204)
+    def delete_project(pid: str, user=authenticated):
+        desktop.delete_project(user, pid)
+        return Response(status_code=204)
+
+    @app.get("/api/projects/{pid}/desktop")
+    def desktop_status(pid: str, user=authenticated):
+        return desktop.status(user, pid)
+
+    @app.post("/api/projects/{pid}/desktop")
+    def open_desktop(pid: str, data: ProjectSelection, user=authenticated):
+        return desktop.start(user, pid, data.name, data.version)
+
+    @app.get("/api/projects/{pid}/desktop/{sid}/screen")
+    def desktop_screen(pid: str, sid: str, user=authenticated):
+        return Response(
+            desktop.screenshot(user, pid, sid),
+            media_type="image/png",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.post("/api/projects/{pid}/desktop/{sid}/input", status_code=204)
+    def desktop_input(pid: str, sid: str, data: dict, user=authenticated):
+        desktop.input(user, pid, sid, data)
+        return Response(status_code=204)
+
+    @app.post("/api/projects/{pid}/desktop/{sid}/save")
+    def save_desktop(pid: str, sid: str, data: DesktopSave, user=authenticated):
+        return desktop.save(user, pid, sid, target_name=data.target_name)
+
+    @app.delete("/api/projects/{pid}/desktop/{sid}", status_code=204)
+    def close_desktop(pid: str, sid: str, user=authenticated):
+        desktop.stop(user, pid, sid)
+        return Response(status_code=204)
+
+    @app.get("/api/projects/{pid}/files/{name}")
+    def project_file(pid: str, name: str, version: int | None = None, user=authenticated):
+        return tasks.projects.file(user, pid, name, version)
+
+    @app.get("/api/projects/{pid}/files/{name}/history")
+    def project_file_history(pid: str, name: str, user=authenticated):
+        return tasks.projects.history(user, pid, name)
+
+    @app.put("/api/projects/{pid}/files/{name}")
+    def write_project_file(pid: str, name: str, data: ProjectFileInput, user=authenticated):
+        return tasks.projects.write(user, pid, name, data.content, data.expected_version)
+
+    @app.delete("/api/projects/{pid}/files/{name}", status_code=204)
+    def delete_project_file(pid: str, name: str, expected_version: int, user=authenticated):
+        tasks.projects.delete_file(user, pid, name, expected_version)
+        return Response(status_code=204)
+
+    @app.post("/api/projects/{pid}/publish")
+    def publish_task_file(pid: str, data: ProjectPublish, user=authenticated):
+        return tasks.projects.publish(
+            user,
+            pid,
+            data.task_id,
+            data.source_name,
+            data.target_name,
+            data.expected_version,
+            source_run_id=data.source_run_id,
+        )
+
+    @app.get("/api/tasks/{tid}")
+    def get_task(tid: str, user=authenticated):
+        return tasks.get(user, tid)
+
     @app.get("/api/tasks/{tid}/files/{name}")
     def workspace_file(
         tid: str, name: str, format: Literal["original", "docx", "xlsx"] = "original", user=authenticated
@@ -243,6 +366,8 @@ def create_app(*, db_path=None, token=None, provider=None, search=None, workers=
             data.kind,
             request_id=data.request_id,
             files=[file.model_dump() for file in data.files],
+            project_id=data.project_id,
+            project_files=[file.model_dump() for file in data.project_files],
         )
 
     @app.get("/api/tasks/{tid}/artifact")

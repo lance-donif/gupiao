@@ -212,7 +212,7 @@ class Office:
             raise RuntimeError("此任务轮次已失效")
 
     @staticmethod
-    def _files(db, tid):
+    def file_metadata(db, tid):
         return [
             dict(r)
             for r in db.execute(
@@ -224,7 +224,7 @@ class Office:
     def files(self, owner, task_id):
         with self.engine.connection() as db:
             self._task(db, owner, task_id)
-            return self._files(db, task_id)
+            return self.file_metadata(db, task_id)
 
     @staticmethod
     def _read(db, tid, name):
@@ -243,12 +243,12 @@ class Office:
     def _local_tool(self, db, tid, action):
         verb, name, text = action["action"], action["name"], action["text"]
         if verb == "list_files":
-            return self._files(db, tid)
+            return self.file_metadata(db, tid)
         if verb == "read_file":
             return self._read(db, tid, name)
         if verb == "finish":
             return text
-        names = [row["name"] for row in self._files(db, tid)]
+        names = [row["name"] for row in self.file_metadata(db, tid)]
         if name not in names and len(names) >= MAX_FILES:
             raise ValueError(f"每个任务最多存放 {MAX_FILES} 个文件")
         db.execute(

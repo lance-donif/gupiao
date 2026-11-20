@@ -15,13 +15,15 @@ from fastapi import APIRouter, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from .linking import Linking, code_digest
+from .projects import ProjectConflict
 from .qq_queue import Inbox
+from .search import _web_link
 from .store import ConversationBusy
 
 LOG = logging.getLogger(__name__)
 API = "https://api.bot.qq.com"
 KINDS = {"GROUP_AT_MESSAGE_CREATE": "groups", "C2C_MESSAGE_CREATE": "users"}
-TASK_COMMANDS = {"/任务", "/任务列表", "/进度", "/成果", "/暂停", "/恢复"}
+TASK_COMMANDS = {"/项目", "/项目任务", "/任务", "/任务列表", "/进度", "/成果", "/暂停", "/恢复"}
 TASK_KINDS = {"写作": "draft", "研究": "research", "文件": "office"}
 TASK_STATES = {"queued": "排队中", "running": "运行中", "paused": "已暂停", "failed": "失败", "completed": "已完成"}
 TASK_HELP = "发送 /任务 写作|研究|文件 任务说明，可创建一次性任务。用 /任务列表 查看编号。"
@@ -220,9 +222,52 @@ class QQBot:
             self.wake.wait(2)
             self.wake.clear()
 
+    def _project_command(self, owner, command, argument, rid):
+        if command == "/项目任务":
+            header, _, prompt = argument.partition("\n")
+            parts = header.split(maxsplit=2)
+            if (
+                len(parts) != 3
+                or not re.fullmatch(r"[a-f0-9]{32}", parts[0])
+                or not re.fullmatch(r"[1-9][0-9]{0,17}", parts[1])
+                or not prompt.strip()
+            ):
+                return "用法：/项目任务 项目编号 版本号 文件名，下一行填写任务说明。"
+            task = self.tasks.create(
+                owner,
+                prompt,
+                kind="office",
+                request_id=rid,
+                project_id=parts[0],
+                project_files=[{"name": parts[2], "version": int(parts[1])}],
+            )
+            return f"已按版本 {parts[1]} 创建项目任务。发送 /进度 {task['id']} 查看进度。"
+        parts = argument.split()
+        pid = parts.pop(0) if parts and re.fullmatch(r"[a-f0-9]{32}", parts[0]) else None
+        if len(parts) > 1 or (parts and not re.fullmatch(r"[1-9][0-9]?", parts[0])):
+            return "用法：/项目 [页码]，或 /项目 项目编号 [页码] 查看文件。"
+        page = int(parts[0]) if parts else 1
+        if pid:
+            project = self.tasks.projects.get(owner, pid)
+            rows = [f"v{f['version']}  {f['name']}" for f in project["files"]]
+            title = project["name"]
+            usage = f"交办示例：/项目任务 {pid} 1 文件名\n在下一行填写说明"
+        else:
+            rows = [f"{p['id']}  {p['name']}" for p in self.tasks.projects.list(owner)]
+            title = "项目"
+            usage = "用 /项目 项目编号 查看文件。"
+        if not rows:
+            return "该项目尚无文件。" if pid else "当前工作区还没有项目。可在 Web 创建项目并绑定此私聊。"
+        pages = (len(rows) + 7) // 8
+        if page > pages:
+            return f"共有 {pages} 页。"
+        return "\n".join([f"{title} {page}/{pages}", *rows[(page - 1) * 8 : page * 8], usage])
+
     def _task_command(self, owner, command, argument, request_id, linked):
         if self.tasks is None:
             return "任务服务暂不可用。"
+        if command in {"/项目", "/项目任务"}:
+            return self._project_command(owner, command, argument, request_id)
         if command == "/任务":
             parts = argument.split(maxsplit=1)
             if len(parts) != 2 or parts[0] not in TASK_KINDS:
@@ -280,6 +325,25 @@ class QQBot:
             task = self.tasks.change(owner, tid, wanted, request_id=request_id)
         return f"任务{TASK_STATES[task['status']]}。"
 
+    def _source_command(self, owner, cid, argument):
+        if argument and not re.fullmatch(r"[1-9][0-9]?", argument):
+            return "用法：/来源 或 /来源 1"
+        sources = self.engine.latest_research_sources(owner, cid)
+        if not sources:
+            return "此对话还没有可查看的检索来源。发送 /搜索 关键词 开始检索。"
+        if not argument:
+            return "最近一次检索的来源（发送 /来源 1 查看链接与摘录）\n" + "\n".join(
+                f"[{i}] {source['title']}" for i, source in enumerate(sources, 1)
+            )
+        number = int(argument)
+        if number > len(sources):
+            return f"这次检索有 {len(sources)} 项来源，可发送 /来源 查看编号。"
+        source = sources[number - 1]
+        link = _web_link(source.get("url")) or "原文链接不可用"
+        snippet = source.get("snippet") or ""
+        excerpt = snippet if len(snippet) <= 600 else snippet[:600] + "…"
+        return f"[{number}] {source['title']}\n{link}\n\n" + (f"检索时保存的摘录\n{excerpt}" if excerpt else "此来源没有保存摘录。")
+
     def _compose(self, job):
         prompt, owner = job["prompt"], job["owner"]
         if job["mode"] in ("bind", "unbind"):
@@ -302,14 +366,16 @@ class QQBot:
         if job["mode"] == "chat":
             command, *args = prompt.split(maxsplit=1)
             argument = args[0] if args else ""
+            if command == "/来源":
+                return self._source_command(routed_owner, cid, argument)
             if command in TASK_COMMANDS:
                 if job["kind"] != "users":
                     return "请在与机器人的单聊中操作任务。"
                 try:
                     return self._task_command(routed_owner, command, argument, rid, bool(job["bound_cid"]))
                 except KeyError:
-                    return "当前工作区没有这个任务或文件。"
-                except (ValueError, ConversationBusy) as exc:
+                    return "当前工作区没有这个项目或文件。" if command.startswith("/项目") else "当前工作区没有这个任务或文件。"
+                except (ValueError, ConversationBusy, ProjectConflict) as exc:
                     return str(exc)
             if command in ("/记住", "/记忆", "/忘记"):
                 if job["kind"] != "users":
@@ -331,7 +397,11 @@ class QQBot:
         content = result["content"]
         sources = [f"[{i}] {s['title']}" for i, s in enumerate(result.get("sources", []), 1)]
         if sources:
-            content += "\n\n来源\n" + "\n".join(sources)
+            footer = "\n\n来源（发送 /来源 1 查看链接与摘录）\n" + "\n".join(sources)
+            if len(content) + len(footer) > 4000:
+                footer = "\n\n回复过长。发送 /来源 查看本次检索的来源。"
+                content = content[:4000 - len(footer)]
+            content += footer
         return content
 
     def process_one(self):

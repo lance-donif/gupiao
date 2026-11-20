@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from .office import Office
+from .projects import Projects
 from .store import ConversationBusy, checked_text
 from .workflow import ResearchWorkflow
 
@@ -47,13 +48,18 @@ class PausedJob(Exception):
     pass
 
 
-def public(row):
+def public(row, project=None):
     due = row["next_run"]
     return {
-        **{key: row[key] for key in ("id", "conversation_id", "prompt", "kind", "frequency", "last_error")},
+        **{
+            key: row[key]
+            for key in ("id", "run_id", "conversation_id", "prompt", "kind", "frequency", "last_error")
+        },
         "status": "paused" if row["paused"] else row["status"],
         "activity": json.loads(row["activity"]),
         "files": [],
+        "project_id": project["project_id"] if project else None,
+        "project_files": project["project_files"] if project else [],
         "has_artifact": row["artifact"] is not None,
         "next_run_at": datetime.fromtimestamp(due, UTC).isoformat() if due is not None else None,
     }
@@ -67,17 +73,35 @@ class TaskQueue:
         with engine.connection() as db:
             db.executescript(TASK_SCHEMA)
         self.office = Office(engine)
+        self.projects = Projects(engine)
         self.research = ResearchWorkflow(engine)
 
-    def create(self, owner, prompt, frequency="once", kind="research", *, request_id=None, files=None):
+    def create(
+        self,
+        owner,
+        prompt,
+        frequency="once",
+        kind="research",
+        *,
+        request_id=None,
+        files=None,
+        project_id=None,
+        project_files=None,
+    ):
         prompt = checked_text(prompt, "任务说明", 4000)
         if frequency not in PERIOD or kind not in {"draft", "research", "office"}:
             raise ValueError("无效的任务设置")
-        if files and kind != "office":
+        files = files or []
+        project_files = project_files or []
+        if project_files and not project_id:
+            raise ValueError("请选择项目后再附带项目文件")
+        if (project_id or files) and kind != "office":
             raise ValueError("输入文件仅适用于文件工作任务")
         receipt_type = "create"
-        if files and request_id is not None:
-            payload = json.dumps(files, ensure_ascii=False, sort_keys=True).encode()
+        if (files or project_id) and request_id is not None:
+            # Retain the historical digest for upload-only requests.
+            inputs = [files, project_id, project_files] if project_id else files
+            payload = json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode()
             receipt_type += ":" + hashlib.sha256(payload).hexdigest()
         with self.engine.connection(write=True) as db:
             if request_id is not None:
@@ -85,7 +109,7 @@ class TaskQueue:
                 if old:
                     if (old["prompt"], old["kind"], old["frequency"]) != (prompt, kind, frequency):
                         raise ValueError("该请求编号已用于其他任务")
-                    return public(old)
+                    return self._task_view(db, old, self.projects.task_links(db, owner))
             if db.execute("SELECT count(*) FROM tasks WHERE owner=?", (owner,)).fetchone()[0] >= 64:
                 raise ValueError("最多可保存 64 个任务")
             conversation = self.engine._create(db, owner, "任务 · " + prompt[:48])
@@ -96,13 +120,17 @@ class TaskQueue:
                    VALUES(?,?,?,?,?,?,'queued',?,?,?)""",
                 (tid, conversation["id"], owner, prompt, kind, frequency, uuid4().hex, stamp, stamp),
             )
+            if project_id:
+                snapshots = self.projects.snapshot(db, owner, project_id, project_files)
+                self.projects.attach(db, owner, project_id, tid, project_files)
+                files = [*files, *snapshots]
             if files:
                 self.office.seed(db, tid, files)
             if request_id is not None:
                 db.execute(
                     "INSERT INTO task_requests VALUES (?,?,?,?)", (owner, request_id, tid, receipt_type)
                 )
-            return public(self._get(db, owner, tid))
+            return self._task_view(db, self._get(db, owner, tid), self.projects.task_links(db, owner))
 
     def _request(self, db, owner, request_id, action):
         checked_text(request_id, "请求编号", 160)
@@ -115,12 +143,20 @@ class TaskQueue:
             return self._get(db, owner, receipt["task_id"])
         return None
 
+    def _task_view(self, db, row, links):
+        result = public(row, links.get(row["id"]))
+        if row["kind"] == "office":
+            names = self.projects.publishable(db, row["owner"], row["id"], row["run_id"])
+            result["files"] = [
+                {**entry, "publishable": entry["name"] in names}
+                for entry in self.office.file_metadata(db, row["id"])
+            ]
+        return result
+
     def get(self, owner, tid):
         with self.engine.connection() as db:
-            row = public(self._get(db, owner, tid))
-        if row["kind"] == "office":
-            row["files"] = self.office.files(owner, tid)
-        return row
+            db.execute("BEGIN")
+            return self._task_view(db, self._get(db, owner, tid), self.projects.task_links(db, owner))
 
     @staticmethod
     def _get(db, owner, tid):
@@ -131,14 +167,12 @@ class TaskQueue:
 
     def list(self, owner):
         with self.engine.connection() as db:
-            rows = [
-                public(r)
-                for r in db.execute("SELECT * FROM tasks WHERE owner=? ORDER BY created DESC", (owner,))
+            db.execute("BEGIN")
+            links = self.projects.task_links(db, owner)
+            return [
+                self._task_view(db, row, links)
+                for row in db.execute("SELECT * FROM tasks WHERE owner=? ORDER BY created DESC", (owner,))
             ]
-        for row in rows:
-            if row["kind"] == "office":
-                row["files"] = self.office.files(owner, row["id"])
-        return rows
 
     def artifact(self, owner, tid):
         with self.engine.connection() as db:
@@ -155,7 +189,7 @@ class TaskQueue:
                 if previous:
                     if previous["id"] != tid:
                         raise ValueError("该请求编号已用于其他任务")
-                    return public(previous)
+                    return self._task_view(db, previous, self.projects.task_links(db, owner))
             if action == "pause":
                 db.execute("UPDATE tasks SET paused=1,next_run=NULL WHERE id=?", (tid,))
             elif action == "resume":
@@ -176,7 +210,7 @@ class TaskQueue:
                 raise ValueError("未知操作")
             if request_id is not None:
                 db.execute("INSERT INTO task_requests VALUES(?,?,?,?)", (owner, request_id, tid, action))
-            return public(self._get(db, owner, tid))
+            return self._task_view(db, self._get(db, owner, tid), self.projects.task_links(db, owner))
 
     def checkpoint(self, tid, key, label):
         with self.engine.connection(write=True) as db:
@@ -229,13 +263,15 @@ class TaskQueue:
                 message = self.engine.reply(job["owner"], job["conversation_id"], job["prompt"], "chat", key)
             article = f"# {job['prompt']}\n\n{message['content']}\n"
             if message["sources"]:
-                article += (
-                    "\n## 参考资料\n\n"
-                    + "\n".join(
-                        f"{i}. {s['title']} — {s['url']}" for i, s in enumerate(message["sources"], 1)
-                    )
-                    + "\n"
-                )
+                article += "\n## 参考资料\n"
+                for number, source in enumerate(message["sources"], 1):
+                    title = " ".join(source["title"].splitlines())
+                    article += f"\n[{number}] {title} — {source['url']}\n"
+                    snippet = source.get("snippet")
+                    if snippet:
+                        # Use an indented Markdown block to preserve evidence as literal text.
+                        excerpt = "\n".join("    " + line for line in snippet.splitlines())
+                        article += f"\n{excerpt}\n"
         except PausedJob:
             with self.engine.connection(write=True) as db:
                 db.execute(

@@ -49,6 +49,7 @@ export async function request(path, { method = "GET", body, token, raw = false }
       typeof detail === "string" ? detail : `请求失败（HTTP ${response.status}）`,
     );
     error.status = response.status;
+    error.reason = data?.reason;
     throw error;
   }
   if (response.status === 204) return;

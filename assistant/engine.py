@@ -5,6 +5,7 @@ import re
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from .citations import CITATION, prose, quantity_notes
 from .knowledge import Knowledge
 from .store import ConversationBusy, Store, checked_text, now
 
@@ -46,23 +47,21 @@ def research_sources(results):
     return sources
 
 
-_CITATION = re.compile(r"\[([0-9]+)\](?!\()")
-
-
 def _grounded_answer(answer, sources):
     if not sources:
         return answer
     wrapped = re.fullmatch(r"```(?:markdown|md)[ \t]*\r?\n(.*?)\r?\n```", answer, re.DOTALL | re.IGNORECASE)
     if wrapped:
         answer = wrapped.group(1).strip()
-    cited = _CITATION.findall(answer)
+    checked = prose(answer)
+    cited = CITATION.findall(checked)
     if any(len(n) > 2 or not 1 <= int(n) <= len(sources) for n in cited):
         raise RuntimeError("研究回复包含不存在的来源编号，请核实后重新提问")
     if not cited or not any(
-        _CITATION.search(line) and re.search(r"\w", _CITATION.sub("", line)) for line in answer.splitlines()
+        CITATION.search(line) and re.search(r"\w", CITATION.sub("", line)) for line in checked.splitlines()
     ):
         answer += "\n\n> 模型未在正文标注来源编号，请对照所附来源核实具体说法。"
-    return answer
+    return answer + quantity_notes(checked, sources)
 
 
 class Engine(Store):

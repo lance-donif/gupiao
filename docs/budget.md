@@ -45,3 +45,20 @@ uv run python -m assistant.billing --project proj_EXAMPLE --start 2026-11-01 --e
 ```
 
 命令只向 OpenAI 官方组织 Costs API 发起 GET 请求，逐页核对项目 ID、日期和币种。输出含各时间桶费用、汇总美元金额、请求标识和查询时间。用 `provider_reported_usd` 与同周期、同项目的账本记录及结算凭证交叉核对。项目中其他客户端的请求会纳入该报告，近期费用可能延迟出现。其他提供商可从其计费后台导出相同周期的账单。部署测试中的模拟账单与免费回环调用均不能证明付费额度消耗。[OpenAI 官方 Costs API 规范](https://github.com/openai/openai-openapi/blob/master/openapi.yaml) · [xAI Chat Completions 用量字段](https://docs.x.ai/developers/rest-api-reference/inference/chat-completions)
+
+## 开发额度估算
+
+`assistant.project_budget` 在 `data/project-budget.sqlite3` 中保留开发额度的人工记录。新建文件仅允许当前系统用户读写。首次报告累计用量时使用 `baseline`，后续有明确金额和估算依据的增量使用 `estimate`。以下命令中的大写变量需替换为实际金额、时刻和来源。
+
+```bash
+uv run python -m assistant.project_budget baseline AMOUNT --ref REPORT_ID --at UTC_TIMESTAMP --source "累计金额的来源"
+uv run python -m assistant.project_budget estimate AMOUNT --ref ESTIMATE_ID --at UTC_TIMESTAMP --source "用量、单价及计算依据"
+uv run python -m assistant.project_budget status
+uv run python -m assistant.project_budget list
+```
+
+估算余额等于额度减去最近一次用户报告的累计金额，再减去该时刻之后登记的增量估算。累计金额覆盖其对应时刻及以前的估算。重复提交同一编号和内容仅记一笔，较早记录仍可在历史中查阅。金额以美元显示，支持六位小数。用 `status --at UTC_TIMESTAMP` 可按指定时间复算，也可在子命令前加 `--limit AMOUNT` 查看较低额度下的余额。
+
+首次登记累计金额前，余额显示为 `null`。`verified_supplier_usd` 始终为空，供应商费用需在上面的独立核账流程中查证。这份开发估算不会触发外部请求，不改动应用的模型调用额度。缺少开发平台计费依据时，后续平台费用仍待更新。
+
+工作台登录后的额度页面会在服务数据库旁查找同目录的 `project-budget.sqlite3`。对于自定义服务数据库路径，可在上述命令的子命令前指定 `--db /path/to/project-budget.sqlite3`。Web 端以只读方式查看汇总；缺少文件时，页面仅展示应用侧费用。累计开发用量可能已包含部分模型费，合并项目成本前应对齐核算期间并排除两边覆盖的同一笔费用。

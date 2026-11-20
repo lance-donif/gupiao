@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import pytest
+from docx import Document
 from fastapi.testclient import TestClient
 
 from assistant.app import create_app
@@ -16,6 +17,7 @@ from assistant.search import WebSearch
 def workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_BASE_URL", "http://127.0.0.1:18081/v1")
     monkeypatch.setenv("MODEL_NAME", "test")
+    monkeypatch.delenv("ECHO_DESKTOP_IMAGE_ID", raising=False)
     monkeypatch.setenv("QQ_APP_ID", "")
     monkeypatch.setenv("QQ_APP_SECRET", "")
     db = tmp_path / "suite.db"
@@ -121,7 +123,11 @@ def test_research_job_failure_and_resume(workspace):
     assert client.post(url + "/resume").status_code == 200
     assert queue.run_one()
     assert tasks_list(client)["status"] == "completed"
-    assert "https://example.org/tide" in client.get(url + "/artifact").text
+    report = client.get(url + "/artifact").text
+    assert "[1] 潮汐能 — https://example.org/tide" in report
+    assert "    海洋能" in report
+    word = Document(BytesIO(client.get(url + "/artifact?format=docx").content))
+    assert "海洋能" in {p.text.strip() for p in word.paragraphs}
     assert len(calls) == 1
 
 
@@ -161,3 +167,88 @@ def test_task_input_files_commit_atomically_before_worker_runs(workspace):
     payload.update(request_id="second", files=[file, file])
     assert client.post("/api/tasks", json=payload).status_code == 400
     assert len(client.get("/api/tasks").json()) == len(client.get("/api/conversations").json()) == 1
+
+
+def test_project_snapshot_task_and_publish_via_api(workspace):
+    client, queue, model = workspace
+    pid = client.post("/api/projects", json={"name": "出行"}).json()["id"]
+    url = "/api/projects/" + pid
+    file_url = url + "/files/行程.txt"
+    assert client.put(file_url, json={"expected_version": 0, "content": "地点：杭州"}).status_code == 200
+    req = {
+        "prompt": "创建文件：行程简报.md",
+        "kind": "office",
+        "project_id": pid,
+        "project_files": [{"name": "行程.txt", "version": 1}],
+        "request_id": "task-pin",
+    }
+    result = client.post("/api/tasks", json=req)
+    assert result.status_code == 201, result.text
+    job = result.json()
+    assert job["project_files"] == req["project_files"]
+    assert client.put(file_url, json={"expected_version": 1, "content": "地点：宁波"}).json()["version"] == 2
+    assert client.post("/api/tasks", json=req).json()["id"] == job["id"]
+    stale = client.post("/api/tasks", json={**req, "request_id": "other"})
+    assert stale.status_code == 409 and stale.json()["reason"] == "file_version"
+    assert client.get("/api/tasks/" + job["id"] + "/files/行程.txt").text == "地点：杭州"
+    outputs = iter(
+        [
+            {"action": "write_file", "name": "行程简报.md", "text": "出行目的地为杭州。"},
+            {"action": "finish", "name": "", "text": "简报已保存。"},
+        ]
+    )
+    model.complete = lambda messages, **kwargs: json.dumps(next(outputs), ensure_ascii=False)
+    assert queue.run_one()
+    done = client.get("/api/tasks/" + job["id"]).json()
+    assert done["status"] == "completed", done
+    assert {f["name"]: f["publishable"] for f in done["files"]} == {"行程.txt": False, "行程简报.md": True}
+    publish = {
+        "task_id": job["id"],
+        "source_run_id": done["run_id"],
+        "source_name": "行程简报.md",
+        "target_name": "已审.md",
+        "expected_version": 0,
+    }
+    result = client.post(url + "/publish", json=publish)
+    assert result.status_code == 200 and result.json()["source_task_id"] == job["id"]
+    assert client.get(url + "/files/已审.md").json()["content"] == "出行目的地为杭州。"
+    assert client.get(url + "/files/行程.txt?version=1").json()["content"] == "地点：杭州"
+    assert client.get(url + "/files/行程.txt/history").json()[0]["version"] == 2
+    assert (
+        client.post(url + "/publish", json={**publish, "source_run_id": "old"}).json()["reason"] == "task_run"
+    )
+    assert client.delete(url).status_code == 204
+    assert client.get("/api/tasks/" + job["id"]).json()["project_id"] is None
+
+
+def test_budget_api_reads_only_workspace_sibling(workspace, tmp_path):
+    from assistant.project_budget import ledger, record
+
+    client, _, _ = workspace
+    assert client.get("/api/budget").json()["project_budget"] is None
+    with ledger(tmp_path / "project-budget.sqlite3") as db:
+        record(db, "baseline", "12.50", "example", "2025-01-01T00:00:00Z", "测试数据")
+    json_data = client.get("/api/budget").json()
+    assert json_data["project_budget"]["estimated_remaining_usd"] == "49987.50"
+    assert json_data["project_budget"]["verified_supplier_usd"] is None
+    assert json_data["booked_usd"] == 0
+
+
+def test_desktop_routes_auth_and_opt_in(workspace):
+    client, _, _ = workspace
+    pid = client.post("/api/projects", json={"name": "编辑器"}).json()["id"]
+    route = f"/api/projects/{pid}/desktop"
+    assert client.get("/api/status").json()["desktop_configured"] is False
+    assert client.get(route).json() == {"enabled": False, "session": None}
+    assert client.post(route, json={"name": "说明.txt", "version": 1}).status_code == 503
+    for method, tail, data in [
+        ("GET", "", None),
+        ("POST", "", {"name": "说明.txt", "version": 1}),
+        ("GET", "/session/screen", None),
+        ("POST", "/session/input", {"type": "click", "x": 5, "y": 8}),
+        ("POST", "/session/save", {}),
+        ("DELETE", "/session", None),
+    ]:
+        assert (
+            client.request(method, route + tail, json=data, headers={"Authorization": ""}).status_code == 401
+        )

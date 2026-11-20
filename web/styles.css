@@ -33,7 +33,8 @@ button:disabled {
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
-a:focus-visible {
+a:focus-visible,
+summary:focus-visible {
   outline: 3px solid #be6b39;
   outline-offset: 3px;
 }
@@ -597,21 +598,41 @@ textarea {
   font-family: ui-monospace, monospace;
   font-size: 0.9em;
 }
+.citation {
+  padding: 0 0.16em;
+  color: #445a43;
+  font-size: 0.9em;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .sources {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  display: grid;
+  gap: 3px;
   margin-top: 12px;
+  font-size: 13px;
+}
+.sources details {
+  padding: 0 10px;
+  border-left: 2px solid #bcc8b4;
+  border-radius: 0 6px 6px 0;
+  background: #f0f2eb;
+}
+.sources summary {
+  padding: 6px 0;
+  color: #394c39;
+  cursor: pointer;
+}
+.sources p {
+  color: #42483e;
+  margin: 0.2em 0;
 }
 .sources a {
+  display: inline-block;
+  padding: 5px 0 8px;
   color: #445a43;
   text-decoration: underline;
   text-underline-offset: 3px;
-  padding: 4px 9px;
-  border-radius: 6px;
-  background: #edf0e7;
-  font-size: 12px;
-  max-width: 100%;
 }
 .pending {
   color: var(--muted);
@@ -941,4 +962,95 @@ fieldset {
   max-width: 100%;
   overflow-wrap: anywhere;
   margin: 6px 0;
+}
+
+.project-name {
+  text-align: left;
+  overflow-wrap: anywhere;
+  color: #394e38;
+  font-weight: 650;
+}
+.project-history,
+.project-task,
+.project-input,
+.version-conflict {
+  margin: 10px 0;
+}
+.project-history summary,
+.version-conflict summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+.project-input {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.project-input label {
+  overflow-wrap: anywhere;
+}
+.project-input select {
+  width: auto;
+  margin: 0;
+}
+.project-task small {
+  display: block;
+  color: var(--muted);
+}
+.version-conflict {
+  padding: 10px;
+  background: #f5eade;
+  border-radius: 7px;
+}
+.version-conflict .secondary {
+  margin-top: 8px;
+}
+
+#panel:has(.desktop-pane) {
+  width: min(1060px, calc(100vw - 20px));
+}
+.desktop-pane {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+.desktop-pane > .hint {
+  margin: 0 !important;
+}
+.desktop-viewport {
+  min-width: 0;
+  overflow: auto;
+  max-height: 70dvh;
+}
+.desktop-actions [aria-pressed="true"] {
+  background: #e0e6d9;
+}
+.desktop-screen {
+  border: 1px solid var(--line);
+  background: #e7e6df;
+  display: block;
+  padding: 0;
+  width: 100%;
+  overflow: hidden;
+  cursor: text;
+}
+.desktop-screen img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.desktop-actions {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.desktop-pane textarea.field {
+  min-height: 3em !important;
+}
+.desktop-pane .version-conflict {
+  margin: 0;
+}
+.desktop-pane form:not(:first-child) {
+  margin-top: 5px;
 }

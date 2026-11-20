@@ -92,7 +92,7 @@ def test_durable_ack_idempotency_and_scope(bot):
     restored.rest = bot.rest
     assert restored.process_one()
     assert not restored.process_one()
-    bot.rest.send.assert_called_once_with("users", "u1", "message.01!", 1, "结果\n\n来源\n[1] 新闻")
+    bot.rest.send.assert_called_once_with("users", "u1", "message.01!", 1, "结果\n\n来源（发送 /来源 1 查看链接与摘录）\n[1] 新闻")
     assert bot.engine.reply.call_args.kwargs["mode"] == "research"
     assert bot.engine.reply.call_args.args[2] == "天气"
     for group, user in [("g1", "u1"), ("g2", "u1"), ("g1", "u2")]:
@@ -309,3 +309,110 @@ def test_qq_pause_of_completed_recurring_task_and_replayed_command(tmp_path, mon
                    (f"/暂停 {tid}",))
     assert bot.process_one()
     assert tasks.get(owner, tid)["status"] == "queued"
+
+
+def test_sources_follow_latest_successful_research_in_qq_conversation(tmp_path, monkeypatch):
+    from assistant.engine import Engine
+
+    monkeypatch.setenv("QQ_APP_ID", "qq42")
+    monkeypatch.setenv("QQ_APP_SECRET", "local-test-secret")
+    path = tmp_path / "sources.sqlite"
+    model, search = Mock(), Mock()
+    model.complete.return_value = "研究结果 [1]"
+    engine = Engine(path, model, search)
+    bot = QQBot(path, engine)
+    bot.rest = Mock()
+    valid_source = {"title": "潮汐", "url": "https://example.org/tide", "snippet": "原文片段" * 175}
+
+    def dispatch(text, mid, **kwargs):
+        signed_post(bot, event(text=text, mid=mid, **kwargs))
+        assert bot.process_one()
+        return bot.rest.send.call_args.args[-1]
+
+    assert "还没有" in dispatch("/来源", "before")
+    search.return_value = [{"title": "旧来源", "url": "https://example.org/old", "snippet": "以前"}]
+    dispatch("/搜索 first", "old")
+    search.return_value = [valid_source]
+    assert "/来源 1" in dispatch("/搜索 second", "new")
+    dispatch("谢谢", "ordinary")
+    search.return_value = []
+    assert "未能完成" in dispatch("/搜索 empty", "failed")
+    attempts = (model.complete.call_count, search.call_count)
+
+    listing = dispatch("/来源", "list")
+    assert "[1] 潮汐" in listing and "旧来源" not in listing
+    detail = dispatch("/来源 1", "detail")
+    assert detail.endswith(valid_source["snippet"][:600] + "…")
+    assert valid_source["url"] in detail
+    assert "1 项来源" in dispatch("/来源 2", "index")
+    assert "用法" in dispatch("/来源 -1", "negative")
+    assert "还没有" in dispatch("/来源", "other-user", user="u2")
+    assert "还没有" in dispatch("/来源", "group", kind="GROUP_AT_MESSAGE_CREATE")
+
+    web_owner = "web:alice"
+    search.return_value = [valid_source]
+    other = engine.create_conversation(web_owner, "另一个 Web 对话")
+    engine.reply(web_owner, other["id"], "仅 Web 可见", mode="research")
+    assert "绑定成功" in dispatch("/绑定 " + bot.linking.issue(web_owner)["code"], "bind")
+    assert "还没有" in dispatch("/来源", "linked")
+    search.return_value = [{"title": "已绑定资料", "url": "https://example.org/private", "snippet": "绑定摘录"}]
+    dispatch("/搜索 linked", "bound-research")
+    assert "绑定摘录" in dispatch("/来源 1", "bound-detail")
+    assert "已解除" in dispatch("/解绑", "unlink")
+    assert "绑定摘录" not in dispatch("/来源 1", "restored")
+    assert (model.complete.call_count, search.call_count) == (attempts[0] + 2, attempts[1] + 2)
+
+
+def test_source_lookup_validates_saved_link_and_rechecks_binding_before_send(bot):
+    bot.engine.latest_research_sources.return_value = [
+        {"title": "历史来源", "url": "https://name:secret@example.org/a", "snippet": ""}
+    ]
+    signed_post(bot, event(text="/来源 1", mid="bad-link"))
+    assert bot.process_one()
+    reply = bot.rest.send.call_args.args[-1]
+    assert "原文链接不可用" in reply and "secret" not in reply and "没有保存摘录" in reply
+    bot.linking.route.side_effect = lambda owner: ("web:alice", "bound")
+    bot.linking.still_linked.return_value = False
+    signed_post(bot, event(text="/来源 1", mid="withdrawn"))
+    assert bot.process_one()
+    bot.rest.send.assert_called_once()
+    bot.engine.reply.assert_not_called()
+    with sqlite3.connect(bot.inbox.path) as db:
+        assert db.execute("SELECT status FROM qq_jobs WHERE mid='withdrawn'").fetchone() == ("canceled",)
+
+
+def test_qq_delegates_pinned_private_project_without_cross_account_reads(tmp_path, monkeypatch):
+    from assistant.engine import Engine
+    from assistant.tasks import TaskQueue
+
+    monkeypatch.setenv("QQ_APP_ID", "bot")
+    monkeypatch.setenv("QQ_APP_SECRET", "test-secret")
+    path = tmp_path / "projects.sqlite"
+    model = Mock()
+    engine = Engine(path, model, Mock())
+    tasks = TaskQueue(engine)
+    bot = QQBot(path, engine, tasks)
+    bot.rest = Mock()
+    owner = "web:workspace"
+    pid = tasks.projects.create(owner, "季度收支")["id"]
+    tasks.projects.write(owner, pid, "本季 收入.csv", "收入\n13", 0)
+
+    def send(message, mid, **kwargs):
+        signed_post(bot, event(text=message, mid=mid, **kwargs))
+        assert bot.process_one()
+        return bot.rest.send.call_args.args[-1]
+
+    request = f"/项目任务 {pid} 1 本季 收入.csv\n核对总额"
+    assert "没有这个项目" in send(request, "before")
+    assert "绑定成功" in send("/绑定 " + bot.linking.issue(owner)["code"], "bind")
+    assert pid in send("/项目", "list")
+    assert "本季 收入.csv" in send(f"/项目 {pid}", "files")
+    assert "创建项目任务" in send(request, "create")
+    assert "单聊" in send(request, "group", kind="GROUP_AT_MESSAGE_CREATE")
+    tasks.projects.write(owner, pid, "本季 收入.csv", "收入\n999", 1)
+    assert "版本" in send(request, "stale")
+    items = tasks.list(owner)
+    assert len(items) == 1 and tasks.office.read(owner, items[0]["id"], "本季 收入.csv") == "收入\n13"
+    send("/解绑", "unbind")
+    assert "没有这个项目" in send("/项目 " + pid, "denied")
+    model.complete.assert_not_called()
