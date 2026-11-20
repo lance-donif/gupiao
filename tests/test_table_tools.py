@@ -89,6 +89,8 @@ def test_container_command_and_worker_match_local(monkeypatch):
     popen = subprocess.Popen
 
     def local_worker(command, **kwargs):
+        assert set(kwargs["env"]) == {"PATH", "DOCKER_CONFIG"}
+        assert not list(Path(kwargs["env"]["DOCKER_CONFIG"]).iterdir())
         seen.append(command)
         return popen([sys.executable, "-I", str(Path(table_tools.__file__).resolve()), "--worker"], **kwargs)
 

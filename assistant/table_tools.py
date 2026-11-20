@@ -183,12 +183,14 @@ def _container(data):
         "--worker",
     ]
     # A private unlinked input file lets the worker read without a pipe write deadlock.
-    with tempfile.TemporaryFile() as stdin:
+    with tempfile.TemporaryFile() as stdin, tempfile.TemporaryDirectory() as empty_config:
+        # An empty CLI config prevents daemon requests inheriting user proxy credentials.
+        cli_env = {"PATH": os.pathsep.join(os.get_exec_path()), "DOCKER_CONFIG": empty_config}
         stdin.write(data)
         stdin.seek(0)
         try:
             process = subprocess.Popen(
-                command, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                command, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=cli_env
             )
         except OSError as exc:
             raise RuntimeError("无法启动 Docker CSV 隔离进程") from exc
@@ -206,6 +208,7 @@ def _container(data):
                     stderr=subprocess.DEVNULL,
                     timeout=5,
                     check=False,
+                    env=cli_env,
                 )
             except (OSError, subprocess.TimeoutExpired) as cleanup:
                 raise RuntimeError(f"CSV 隔离进程清理失败，请检查 {name}") from cleanup
