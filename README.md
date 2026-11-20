@@ -1,109 +1,60 @@
-# 股票预测系统
+# 回声 · Echo
 
-1、第一次同步股票数据可能要很久，因为要从 Tushare 同步所有股票数据。请耐心等待。
-2、AI对新闻处理也要很久，因为要处理所有新闻。请耐心等待。
+回声是可自托管的中文个人 AI 工作台。你可以在 Web 上传资料、交给它持续执行的任务，也可以在 QQ 私聊或群内 @ 它。从本机开始即可体验真实模型推理。
 
-![界面截图](image.png)
+## 在本机启动
 
-新闻聚合 + 因果关键词网络 + 行情确认 → 可解释股票推荐。
-
-## 技术栈
-
-- **后端**：TypeScript + Bun + Prisma + Vitest
-- **前端**：React + Vite + Radix UI + ECharts + AntV G6
-- **数据库**：PostgreSQL（含 Apache AGE 图扩展）+ Redis
-- **AI**：LangChain + deepagents
-
-## 实现思路
-
-```
-抓新闻 → LLM 因果抽取 → 关键词关系图谱 → 行情确认 → 综合评分 → 生成推荐
-```
-
-每天跑一次：从新闻里用 LLM 提取因果信号，建关键词关系网，结合 K 线数据打分，选出 30 只推荐股票。
-
-## 需要配置
-
-复制 `.env.example` 为 `.env`。所有 AI 功能只使用一份配置，无需分别配置主模型和廉价模型：
-
-1. 在 `.env` 里填写 `AI_PROVIDER_IDS`（逗号分隔，顺序即优先级）。
-2. 每个提供商填写 `AI_PROVIDER_<ID大写>_BASE_URL`、`_API_KEY` 和 `_MODELS`（逗号分隔的模型 id）。至少保留一家供应商、一个模型即可运行。
-3. 从仓库根目录启动后端（配置只读根目录 `.env`）。修改配置后重启相关进程。
-
-配置 `DATABASE_URL` 后，所有 AI 入口共用 PostgreSQL 中的限额和健康状态，按有效响应率、耗时和空闲容量分流。每家供应商初始共享 2 个并发，稳定至少 2 分钟且成功 10 次后逐步增加，默认最高 5；全局最高 10。多个模型共享供应商额度。遇到 429 并发减半并冷却，网络连续失败时熔断，恢复阶段仅放行一个探测请求。配置顺序只用于初始同等条件下的排序。
-
-先运行 `cd backend && bunx prisma migrate deploy` 创建 AI 调度表。没有数据库的显式单模型调用仅用于隔离测试；生产入口需要数据库，不能用进程内限流替代共享限额。
-
-只要求供应商支持 Chat Completions；无需安装 CPA。`baseUrl` 填接口前缀，例如 `https://example.com/v1`，程序追加 `/chat/completions`。模型 ID 按供应商要求原样填写，同一模型可出现在不同供应商下。
-
-模型可选参数示例（`AI_PROVIDER_<ID大写>_MODEL_<序号>_*`，序号对应 MODELS 列表顺序）：
+需要 Python 3.12–3.14、带 FTS5 的 SQLite 和 uv。在仓库根目录运行：
 
 ```sh
-AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_STREAM=true
-AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_REASONING_EFFORT=high
-AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_RESPONSE_FORMAT=json_object  # 不支持时填 null
-AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_MAX_COMPLETION_TOKENS=8192   # 与 MAX_TOKENS 二选一
-AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_FIRST_RESPONSE_MS=45000
-AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_IDLE_MS=45000
-AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_TOTAL_MS=180000
-AI_PROVIDER_DEEPSEEK_OFFICIAL_MODEL_1_CONTEXT_TOKENS=128000
+uv sync --frozen
+uv run python -m assistant init
+python scripts/local_model.py
 ```
 
-仅填写供应商支持的参数。默认使用非流式、`response_format: {"type":"json_object"}`；不支持该参数时设为 `null`，仍会严格校验返回 JSON。设置 `reasoning_effort` 时默认不发送温度；可显式配置 `temperature`，设为 `null` 则不发送。输出长度使用 `max_tokens` 或 `max_completion_tokens`，二选一。自适应调用默认首响应 45 秒、流式无进展 45 秒、总耗时 180 秒，分别由模型 `FIRST_RESPONSE_MS/IDLE_MS/TOTAL_MS` 覆盖；`TIMEOUT_MS` 为总超时兼容字段。心跳不重置无进展计时，正文和推理增量会重置。
+默认本地模型为 Qwen3.5-2B。首次启动会下载并校验约 1.28 GB 的量化权重。内存较少的设备可运行 `python scripts/local_model.py --profile lite` 使用 0.5B 模型。保持它运行，在第二个终端启动工作台。
 
-请求提示词和完整请求体不得超过 240000 字符。新闻从每批 3 条开始，稳定完成后最多合并为 5 条；长度超限、截断或重复结构错误会拆批，最小一条，单条仍不合法时需要处理。限流不会触发拆批。结构合法但证据不合格的结果仍按原有业务规则拒绝，不通过换模型绕过证据门槛。
-
-供应商和模型的限流字段为 `INITIAL_CONCURRENCY/MAX_CONCURRENCY/RPM/TPM/DAILY_REQUESTS/DAILY_TOKENS/MIN_SPACING_MS/CONTEXT_TOKENS`（提供商级直接加前缀，模型级加 `MODEL_<序号>_` 中缀）。仅填写已知的硬上限；RPM/TPM 响应头用于保守学习，Token 预估使用请求 UTF-8 字节数加输出预算，有实际 usage 时对账，预估不等于服务端计费量。每日额度按 UTC 零点重置。多个入口共用额度时，用 `AI_QUOTA_GROUPS=account` 定义组、`AI_QUOTA_GROUP_ACCOUNT_MAX_CONCURRENCY=2` 配额，并给这些供应商设置 `AI_PROVIDER_<ID大写>_QUOTA_GROUP=account`。
-
-429 优先遵守 `Retry-After`；401、明确余额耗尽或模型不存在会停用对应凭证或模型。未知原因的 403 冷却 15 分钟后再试。配置变更和凭证轮换后重启进程；凭证不写入任务或调用日志。
-
-本项目当前配置的模型统一声明 `limits.contextTokens: 128000`，按用户提供的容量设定，指输入与输出合计的上下文预算。调度器在输入预估之外预留 `max_completion_tokens/max_tokens`，未指定时预留 4096 tokens；不把上下文容量直接当作最大输出长度。项目 240000 字符请求上限仍独立生效。修改此字段不会自动突破 `initialBatchSize/maxBatchSize` 的条数限制，配置重启或续跑后生效。
-
-### AI 断点续跑
-
-```bash
-cd backend
-bun scripts/run-daily-recommendation.ts --as-of 2026-09-07T16:00:00+08:00
-bun scripts/run-daily-recommendation.ts --resume-trace-id <原 traceId>
+```sh
+uv run python -m assistant serve
 ```
 
-AI 阶段保存完整输入和继续流水线所需的检查点。恢复时沿用原始新闻与 `asOf`，不重新抓新闻，也不重新请求已完成任务（包括合法空结果）。并发、超时和供应商顺序的调整不会清掉完成记录；输入或工作流版本变化需要新 trace。旧版非持久化任务不能直接用新续跑入口恢复。
+打开 <http://127.0.0.1:8000>，用根目录 `.env` 的 `WORKSPACE_TOKEN` 登录。访问令牌代表这个私人 Web 工作区，持有者可以读取其中的数据。应用默认使用本机模型。接入云端时，在 `.env` 设置兼容 Chat Completions 的地址、模型标识、密钥和实际价格，再重启。文件工作和多步研究需要模型支持 JSON Schema 结构化输出。[本机模型与其他平台](docs/local-model.md) · [云模型费用配置](docs/budget.md)
 
-每轮默认最多一小时，到期标记 `PAUSED`；任务预算耗尽、所有候选永久不可用等情况标记 `NEEDS_ATTENTION`。每个原任务及拆分子任务共享 24 次外部请求预算，续跑不重置。暂停后不会自动另开一轮。所有 AI 任务成功后才执行原推荐流程；已经进入下游或完成的 trace 不允许通过续跑入口重复发布。任务结果和因果候选事务提交，崩溃可能导致外部重复计费，但不会依靠重复写入生成额外候选。
+## 可以交付什么
 
-运行状态见 `AiWorkflow/AiWorkItem/AiAttempt`；所有请求共用 `AiSchedulerState` 中的原子并发租约和健康状态。真实数据库集成测试通过 `AI_TEST_DATABASE_URL` 显式启用，测试只创建并删除独立临时 schema。
+| 入口 | 可操作的实例 |
+| --- | --- |
+| 对话、记忆与知识文件 | 在「长期记忆」保存「用中文回答」。上传含有会议安排的 Markdown，再问会议是哪一天。文档按工作区索引，可删除。 |
+| 联网研究 | 对话切到联网模式，询问一个概念并查看来源。后台研究会把主题拆成最多三项查询，保存检索进度、阅读资料并生成带来源的报告。默认检索中文维基百科，设置 SearXNG 后可查更多站点。 |
+| 后台任务 | 委托撰写、研究或文件工作，可设单次、每天或每周执行。任务显示步骤、错误和下一次运行时间，支持暂停、恢复与下载结果。 |
+| 文件工作 | 上传销售表并委托「计算每列合计，生成简报」，或让助手创建新表。文件随任务一起保存，表格工具计算数字，助手使用工具结果撰稿。可下载原始文件或转换为 Word、Excel。报告也可单独下载为 Markdown 或 Word。 |
+| QQ | 支持单聊和群聊 @。可用 `/搜索` 联网，或私聊 `/记住` 保存偏好。私聊还支持委托写作、研究和文件任务，查询进度与成果。在 Web 的「服务连接」签发一次码，私聊绑定后即可访问同一工作区的记忆和知识文件。群聊使用独立上下文。 |
+| 用量与额度 | 模型调用先预留费用，完成后记录用量和估算。可按请求号核账，管理员可独立读取专用 OpenAI 项目的成本报表。 |
 
-迁移旧配置：将原 `LLM_SMART_BASE_URL/API_KEY/MODEL` 的值分别填入供应商的 `baseUrl/apiKey/models[0].id`；其他供应商追加到数组。若之前使用 `OPENAI_*` 或 `AI_*` 配置，也按相同方式迁移。旧环境变量及各功能专用模型变量不再控制 AI 调用；原推理、流式和输出长度设置迁入对应模型的 `parameters`。保留 `CAUSAL_SIGNAL_EXTRACTOR=llm`；每日推荐 AI 批次和并发改由 `scheduling` 控制。
+任务由工作台服务运行，关闭浏览器后仍会继续。暂停在步骤之间生效，已经提交的模型请求可能完成并计费。定期任务在本轮完成后安排下一轮。任务失败会保留可查看的原因，等待用户恢复。内容和检索质量取决于模型、资料和上下文窗口，阅读报告时可打开原始来源。[文件工具、恢复和限制](docs/office.md) · [可选只读浏览器](docs/browser.md) · [可选隔离计算容器](docs/table-tools.md)
 
-真实密钥只放在被 Git 和 Docker 构建忽略的 `backend/tmp/` 中，勿写入示例文件。溯源记录使用实际成功的供应商和模型；不会重写历史推荐。
+## QQ 与部署
 
-其他配置按需修改。
+QQ 需要开放平台 AppID、AppSecret、公网 HTTPS 回调，以及平台启用的事件权限。未开通 QQ 账号的开发者可使用签名诊断脚本验证消息从接收到回答的全链路。测试过程中，腾讯收发端点由本地传输模拟。[QQ 接入和复验](docs/qq.md)
 
-## Docker 一键运行
+应用使用单机 SQLite，建议每个实例持久保存 `data/` 并只运行一个 Web 服务进程。备份活动数据库可使用 SQLite backup API。公开部署时由 HTTPS 反向代理转发，QQ 的回调路径为 `/qq/webhook`。容器内可使用云端 HTTPS 模型；Linux 上使用宿主机回环模型时，可按下面的方式共享网络并将 Web 服务限制在本机。
 
-```bash
-# 启动所有服务（数据库 + 后端 API + 前端 + 定时任务）
-docker compose up -d
-
-# 停止
-docker compose down
+```sh
+docker build -t echo-assistant .
+docker volume create echo-data
+docker run --rm --network host --env-file .env -v echo-data:/app/data \
+  echo-assistant python -m assistant serve --host 127.0.0.1 --port 8000
 ```
 
-启动后：前端 `http://localhost:3000`，后端 API `http://localhost:8000`。
+如果构建环境要求自定义 TLS 根证书，构建命令还支持 `--secret id=ca_bundle,src=/path/to/ca-bundle.pem`。工作区数据和配置文件独立于镜像保存。
 
-## 本地开发
+## 验证
 
-```bash
-# 1. 启动数据库
-docker compose up -d postgres redis
-
-# 2. 安装依赖
-make install-dev
-
-# 3. 初始化数据库表
-make migrate
-
-# 4. 启动服务
-make backend-http   # 后端
-make web            # 前端
+```sh
+uv run --frozen ruff check assistant scripts tests
+uv run --frozen pytest -q
+# 先启动本机模型，再运行签名消息穿过整个 QQ 和模型链路的诊断。
+uv run python -m scripts.check_qq_local
 ```
+
+[产品与开源技术调研](docs/research.md) · [独立额度监督与核账](docs/budget.md) · [交付验证记录](docs/verification.md)

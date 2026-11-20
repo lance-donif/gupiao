@@ -1,12 +1,134 @@
 <!doctype html>
 <html lang="zh-CN">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>量化演进 - 股票分析平台</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#f9f8f5" />
+    <title>回声 · AI 工作台</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./app.js"></script>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <a class="skip" href="#prompt">跳到消息输入框</a>
+    <div class="layout">
+      <button id="scrim" aria-label="关闭导航" hidden></button>
+      <aside id="sidebar" aria-label="工作台导航">
+        <div class="brand">
+          <span class="brand-icon" aria-hidden="true"><i></i></span><span>回声</span
+          ><span class="brand-en" lang="en">Echo</span
+          ><button id="close-nav" class="icon mobile-only" aria-label="关闭导航">×</button>
+        </div>
+        <button id="new-chat" class="new-chat">
+          <span class="plus" aria-hidden="true">＋</span>新对话
+        </button>
+        <nav aria-label="工作区">
+          <button id="show-tasks" class="nav-action">
+            <span class="glyph task-glyph" aria-hidden="true">◷</span>后台任务
+          </button>
+          <button id="show-documents" class="nav-action">
+            <span class="glyph file-glyph" aria-hidden="true">▤</span>知识文件
+          </button>
+          <button id="show-memories" class="nav-action">
+            <span class="glyph memory-glyph" aria-hidden="true"></span>长期记忆
+          </button>
+          <button id="show-budget" class="nav-action">
+            <span class="glyph budget-glyph" aria-hidden="true"></span>用量与额度
+          </button>
+          <button id="show-services" class="nav-action">
+            <span class="glyph service-glyph" aria-hidden="true"></span>服务连接
+          </button>
+        </nav>
+        <section class="history" aria-labelledby="history-title">
+          <h2 id="history-title">对话记录</h2>
+          <div id="history-list"></div>
+        </section>
+        <button id="account" class="account">
+          <span class="account-avatar" aria-hidden="true">◎</span
+          ><span
+            ><strong id="account-name">连接工作台</strong
+            ><small id="account-note">使用访问令牌登录</small></span
+          ><b aria-hidden="true">›</b>
+        </button>
+      </aside>
+      <main>
+        <header class="top">
+          <button
+            id="open-nav"
+            class="icon mobile-only"
+            aria-controls="sidebar"
+            aria-expanded="false"
+            aria-label="打开导航"
+          >
+            ☰
+          </button>
+          <span class="crumb">工作台</span><span class="crumb-slash" aria-hidden="true">/</span
+          ><strong id="page-title">新对话</strong>
+          <button id="status" class="status">
+            <i aria-hidden="true"></i><span>尚未连接</span>
+          </button>
+        </header>
+        <div id="scroll-pane" class="scroll-pane" tabindex="-1">
+          <div id="welcome" class="welcome">
+            <div class="echo-art" aria-hidden="true">
+              <i></i><i></i><i></i><i></i><i></i><i></i>
+            </div>
+            <h1>有什么想聊的<span>？</span></h1>
+            <p>一起梳理想法，或带着来源探索一个问题。</p>
+            <div id="starters" class="starters">
+              <button data-mode="chat" data-text="帮我梳理一个还不成熟的想法。请先问我一个问题。">
+                <span class="starter-icon">✳︎</span
+                ><span><strong>梳理想法</strong><small>从一个问题开始</small></span
+                ><b>↗</b>
+              </button>
+              <button
+                data-mode="research"
+                data-text="请检索资料，解释开源大语言模型是如何工作的，并附上来源。"
+              >
+                <span class="starter-icon">⌕</span
+                ><span><strong>查找资料</strong><small>用来源交叉核对</small></span
+                ><b>↗</b>
+              </button>
+            </div>
+          </div>
+          <section id="messages" class="messages" aria-label="对话消息" hidden></section>
+        </div>
+        <footer class="compose-area">
+          <div class="compose-wrap">
+            <div id="feedback" role="status" aria-live="polite" hidden></div>
+            <form id="compose" class="compose">
+              <label class="sr" for="prompt">消息内容</label>
+              <textarea
+                id="prompt"
+                rows="2"
+                maxlength="16000"
+                placeholder="给回声发消息…"
+                required
+              ></textarea>
+              <div class="compose-tools">
+                <div class="mode-switch" role="group" aria-label="回答模式">
+                  <button type="button" data-mode="chat" aria-pressed="true">对话</button>
+                  <button type="button" data-mode="research" aria-pressed="false">联网检索</button>
+                </div>
+                <button id="send" class="send" type="submit" aria-label="发送消息" disabled>
+                  ↑
+                </button>
+              </div>
+            </form>
+            <div class="compose-note" id="compose-note">
+              Enter 发送 <span>·</span> Shift + Enter 换行
+            </div>
+          </div>
+        </footer>
+      </main>
+    </div>
+    <dialog id="panel" aria-labelledby="panel-title">
+      <div class="panel-head">
+        <h2 id="panel-title"></h2>
+        <button id="close-panel" class="icon" aria-label="关闭窗口">×</button>
+      </div>
+      <div id="panel-body"></div>
+    </dialog>
+    <noscript>此工作台需要启用 JavaScript。</noscript>
   </body>
 </html>
